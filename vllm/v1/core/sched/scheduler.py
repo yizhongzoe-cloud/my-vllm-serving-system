@@ -466,6 +466,37 @@ class Scheduler(SchedulerInterface):
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
+                    elif self.policy == SchedulingPolicy.SLO_AWARE:
+                        # SLO-aware preemption: preempt the request with
+                        # the largest E2E slack (least urgent).
+                        current_time = time.time()
+                        preempted_req = max(
+                            self.running,
+                            key=lambda r: r.get_e2e_slack(current_time),
+                        )
+                        self.running.remove(preempted_req)
+                        if preempted_req in scheduled_running_reqs:
+                            scheduled_running_reqs.remove(preempted_req)
+                            token_budget += num_scheduled_tokens[
+                                preempted_req.request_id
+                            ]
+                            req_to_new_blocks.pop(preempted_req.request_id)
+                            num_scheduled_tokens.pop(preempted_req.request_id)
+                            scheduled_spec_decode_tokens.pop(
+                                preempted_req.request_id, None
+                            )
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                                preempted_req.request_id, None
+                            )
+                            if preempted_encoder_inputs:
+                                # Restore encoder compute budget if the preempted
+                                # request had encoder inputs scheduled in this step.
+                                num_embeds_to_restore = sum(
+                                    preempted_req.get_num_encoder_embeds(i)
+                                    for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_embeds_to_restore
+                            req_index -= 1
                     else:
                         preempted_req = self.running.pop()
 

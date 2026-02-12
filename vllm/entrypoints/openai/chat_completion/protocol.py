@@ -354,6 +354,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    ttft_slo_ms: float | None = Field(
+        default=None,
+        description=(
+            "Time To First Token SLO in milliseconds. "
+            "If set with slo_aware scheduling policy, the scheduler will "
+            "prioritize this request based on slack time "
+            "(deadline - current_time)."
+        ),
+    )
+    e2e_latency_slo_ms: float | None = Field(
+        default=None,
+        description=(
+            "End-to-end latency SLO in milliseconds. "
+            "This is the total time from request arrival to completion. "
+            "Used for SLO-aware preemption decisions."
+        ),
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
@@ -452,6 +470,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        # Pass in SLO parameters via extra_args
+        if self.ttft_slo_ms is not None:
+            extra_args["ttft_slo_ms"] = self.ttft_slo_ms
+        if self.e2e_latency_slo_ms is not None:
+            extra_args["e2e_latency_slo_ms"] = self.e2e_latency_slo_ms
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,

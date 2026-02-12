@@ -1,0 +1,27 @@
+# Default benchmark configuration
+
+server:
+  model: "facebook/opt-125m"
+  host: "localhost"
+  port: 8000
+
+benchmark:
+  mode: "concurrent"        # sequential, concurrent, poisson
+  concurrency: 10           # for concurrent mode
+  rate: 10.0                # for poisson mode (requests per second)
+  stream: false
+  timeout: 120.0
+
+dataset:
+  type: "synthetic"         # synthetic, jsonl, json
+  path: null                # for jsonl/json type
+  num_requests: 100         # for synthetic type
+  slo_distribution:
+    ttft_range: [50, 500]   # ms
+    e2e_range: [200, 3000]  # ms
+    no_slo_ratio: 0.2
+
+output:
+  results_dir: "data/results"
+  save_raw: true            # save raw request results
+  save_metrics: true        # save aggregated metrics

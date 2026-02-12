@@ -74,6 +74,10 @@ class EngineCoreRequest(
     current_wave: int = 0
     priority: int = 0
 
+    # SLO requirements in milliseconds
+    ttft_slo_ms: float | None = None
+    e2e_latency_slo_ms: float | None = None
+
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
 

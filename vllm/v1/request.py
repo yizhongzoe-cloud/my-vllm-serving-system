@@ -74,6 +74,8 @@ class Request:
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
+        ttft_slo_ms: float | None = None,
+        e2e_latency_slo_ms: float | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -87,6 +89,19 @@ class Request:
             sampling_params
         )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
+
+        # SLO-related fields
+        self.ttft_slo_ms = ttft_slo_ms
+        self.e2e_latency_slo_ms = e2e_latency_slo_ms
+
+        # Calculate deadlines from SLO requirements
+        self.ttft_deadline: float | None = None
+        if ttft_slo_ms is not None:
+            self.ttft_deadline = self.arrival_time + (ttft_slo_ms / 1000.0)
+
+        self.e2e_deadline: float | None = None
+        if e2e_latency_slo_ms is not None:
+            self.e2e_deadline = self.arrival_time + (e2e_latency_slo_ms / 1000.0)
 
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
@@ -192,6 +207,8 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
             resumable=request.resumable,
+            ttft_slo_ms=request.ttft_slo_ms,
+            e2e_latency_slo_ms=request.e2e_latency_slo_ms,
         )
 
     def append_output_token_ids(
@@ -268,11 +285,79 @@ class Request:
         events, self.events = self.events, []
         return events
 
+    def has_slo(self) -> bool:
+        """Check if the request has any SLO requirement."""
+        return self.ttft_slo_ms is not None or self.e2e_latency_slo_ms is not None
+
+    def get_ttft_slack(self, current_time: float) -> float:
+        """
+        Calculate TTFT slack time.
+
+        Args:
+            current_time: Current time (time.time())
+
+        Returns:
+            Slack time in seconds. Returns float('inf') if no TTFT SLO is set.
+            Negative value means SLO is already violated.
+        """
+        if self.ttft_deadline is None:
+            return float('inf')
+        return self.ttft_deadline - current_time
+
+    def get_e2e_slack(self, current_time: float) -> float:
+        """
+        Calculate E2E slack time.
+
+        Args:
+            current_time: Current time (time.time())
+
+        Returns:
+            Slack time in seconds. Returns float('inf') if no E2E SLO is set.
+            Negative value means SLO is already violated.
+        """
+        if self.e2e_deadline is None:
+            return float('inf')
+        return self.e2e_deadline - current_time
+
+    def get_effective_slack(self, current_time: float) -> float:
+        """
+        Get the effective slack time for scheduling.
+
+        WAITING requests use TTFT slack, RUNNING requests use E2E slack.
+        """
+        if self.status == RequestStatus.RUNNING:
+            return self.get_e2e_slack(current_time)
+        else:
+            return self.get_ttft_slack(current_time)
+
     def __lt__(self, other: "Request") -> bool:
         """
-        Compare two requests based on priority, arrival time, and request ID.
-        Used in priority scheduling.
+        Compare two requests based on SLO slack, priority, arrival time,
+        and request ID. Used in priority/SLO-aware scheduling.
+
+        For SLO-aware scheduling:
+        - Requests with SLO are prioritized over those without
+        - Among requests with SLO, smaller slack time (more urgent) comes first
+        - WAITING requests use TTFT slack, RUNNING requests use E2E slack
         """
+        # Check if either request has SLO
+        self_has_slo = self.has_slo()
+        other_has_slo = other.has_slo()
+
+        # If both have SLO, compare by slack time
+        if self_has_slo and other_has_slo:
+            current_time = time.time()
+            self_slack = self.get_effective_slack(current_time)
+            other_slack = other.get_effective_slack(current_time)
+            if self_slack != other_slack:
+                return self_slack < other_slack  # Smaller slack = more urgent
+        elif self_has_slo and not other_has_slo:
+            # Requests with SLO are prioritized over those without
+            return True
+        elif not self_has_slo and other_has_slo:
+            return False
+
+        # Fall back to original priority-based comparison
         if self.priority != other.priority:
             return self.priority < other.priority
         if self.arrival_time != other.arrival_time:

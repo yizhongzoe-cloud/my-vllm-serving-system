@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import heapq
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
@@ -15,6 +16,7 @@ class SchedulingPolicy(Enum):
 
     FCFS = "fcfs"
     PRIORITY = "priority"
+    SLO_AWARE = "slo_aware"
 
 
 class RequestQueue(ABC):
@@ -198,11 +200,109 @@ class PriorityRequestQueue(RequestQueue):
             yield heapq.heappop(heap_copy)
 
 
+class SLOAwareRequestQueue(RequestQueue):
+    """
+    SLO-aware priority queue that orders requests by slack time.
+
+    Slack time = deadline - current_time
+
+    Requests with smaller slack time are processed first, as they are
+    closer to violating their SLO. This queue periodically re-heapifies
+    to reflect the dynamic nature of slack time.
+    """
+
+    def __init__(self, reheapify_interval: float = 0.1) -> None:
+        """
+        Initialize the SLO-aware request queue.
+
+        Args:
+            reheapify_interval: Minimum interval (in seconds) between
+                re-heapify operations. Default is 100ms.
+        """
+        self._heap: list[Request] = []
+        self._last_reheapify: float = 0.0
+        self._reheapify_interval: float = reheapify_interval
+
+    def add_request(self, request: Request) -> None:
+        """Add a request to the queue according to SLO-aware policy."""
+        heapq.heappush(self._heap, request)
+
+    def pop_request(self) -> Request:
+        """Pop the most urgent request (smallest slack time) from the queue."""
+        if not self._heap:
+            raise IndexError("pop from empty heap")
+        self._maybe_reheapify()
+        return heapq.heappop(self._heap)
+
+    def peek_request(self) -> Request:
+        """Peek at the most urgent request without removing it."""
+        if not self._heap:
+            raise IndexError("peek from empty heap")
+        self._maybe_reheapify()
+        return self._heap[0]
+
+    def _maybe_reheapify(self) -> None:
+        """
+        Periodically re-heapify to reflect dynamic slack time changes.
+
+        Since slack time depends on current time, the ordering may change
+        over time. This method re-heapifies at regular intervals to maintain
+        correct ordering.
+        """
+        now = time.time()
+        if now - self._last_reheapify >= self._reheapify_interval:
+            heapq.heapify(self._heap)
+            self._last_reheapify = now
+
+    def prepend_request(self, request: Request) -> None:
+        """Add a request to the queue according to SLO-aware policy.
+
+        Note: In a SLO-aware queue, there is no concept of prepending to the
+        front. Requests are ordered by slack time."""
+        self.add_request(request)
+
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        """Add all requests from another queue according to SLO-aware policy.
+
+        Note: In a SLO-aware queue, there is no concept of prepending to the
+        front. Requests are ordered by slack time."""
+        for request in requests:
+            self.add_request(request)
+
+    def remove_request(self, request: Request) -> None:
+        """Remove a specific request from the queue."""
+        self._heap.remove(request)
+        heapq.heapify(self._heap)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        requests_to_remove = requests if isinstance(requests, set) else set(requests)
+        self._heap = [r for r in self._heap if r not in requests_to_remove]
+        heapq.heapify(self._heap)
+
+    def __bool__(self) -> bool:
+        """Check if queue has any requests."""
+        return bool(self._heap)
+
+    def __len__(self) -> int:
+        """Get number of requests in queue."""
+        return len(self._heap)
+
+    def __iter__(self) -> Iterator[Request]:
+        """Iterate over the queue according to SLO-aware policy."""
+        self._maybe_reheapify()
+        heap_copy = self._heap[:]
+        while heap_copy:
+            yield heapq.heappop(heap_copy)
+
+
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:
         return PriorityRequestQueue()
     elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
+    elif policy == SchedulingPolicy.SLO_AWARE:
+        return SLOAwareRequestQueue()
     else:
         raise ValueError(f"Unknown scheduling policy: {policy}")

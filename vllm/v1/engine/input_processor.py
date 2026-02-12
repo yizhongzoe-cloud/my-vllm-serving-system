@@ -618,6 +618,13 @@ class InputProcessor:
                     )
                 )
 
+        # Extract SLO parameters from sampling_params.extra_args
+        ttft_slo_ms: float | None = None
+        e2e_latency_slo_ms: float | None = None
+        if sampling_params is not None and sampling_params.extra_args is not None:
+            ttft_slo_ms = sampling_params.extra_args.get("ttft_slo_ms")
+            e2e_latency_slo_ms = sampling_params.extra_args.get("e2e_latency_slo_ms")
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -633,6 +640,8 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            ttft_slo_ms=ttft_slo_ms,
+            e2e_latency_slo_ms=e2e_latency_slo_ms,
         )
 
     def _validate_model_inputs(
