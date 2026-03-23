@@ -1,0 +1,47 @@
+{
+  "total_requests": 10,
+  "successful_requests": 10,
+  "failed_requests": 0,
+  "success_rate": 1.0,
+  "total_time_s": 20.445436716079712,
+  "throughput_rps": 0.48910669597657974,
+  "tokens_per_second": 276.9811219315371,
+  "ttft": {
+    "mean_ms": 13812.397646903992,
+    "p50_ms": 13224.642992019653,
+    "p90_ms": 17836.201071739197,
+    "p95_ms": 19139.878571033474,
+    "p99_ms": 20182.820570468903,
+    "min_ms": 9883.830785751343,
+    "max_ms": 20443.55607032776,
+    "std_ms": 3391.3636009133106
+  },
+  "e2e_latency": {
+    "mean_ms": 13812.397646903992,
+    "p50_ms": 13224.642992019653,
+    "p90_ms": 17836.201071739197,
+    "p95_ms": 19139.878571033474,
+    "p99_ms": 20182.820570468903,
+    "min_ms": 9883.830785751343,
+    "max_ms": 20443.55607032776,
+    "std_ms": 3391.3636009133106
+  },
+  "slo": {
+    "ttft_total": 8,
+    "ttft_met": 0,
+    "ttft_violated": 8,
+    "ttft_compliance_rate": 0.0,
+    "e2e_total": 8,
+    "e2e_met": 0,
+    "e2e_violated": 8,
+    "e2e_compliance_rate": 0.0,
+    "any_slo_total": 8,
+    "all_slo_met": 0,
+    "overall_compliance_rate": 0.0
+  },
+  "config": {
+    "mode": "concurrent",
+    "concurrency": 10,
+    "stream": false
+  }
+}

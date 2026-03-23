@@ -57,6 +57,7 @@ class VLLMServer:
         print(f"  Model: {self.model}")
         print(f"  URL: {self.base_url}")
 
+        # execute cmd
         self.process = subprocess.Popen(
             cmd,
             cwd=str(self.vllm_path),

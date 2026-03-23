@@ -1,7 +1,7 @@
 # Default benchmark configuration
 
 server:
-  model: "facebook/opt-125m"
+  model: "meta-llama/Llama-3.1-8B-Instruct"
   host: "localhost"
   port: 8000
 

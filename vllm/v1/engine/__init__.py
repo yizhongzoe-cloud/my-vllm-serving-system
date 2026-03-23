@@ -77,6 +77,14 @@ class EngineCoreRequest(
     # SLO requirements in milliseconds
     ttft_slo_ms: float | None = None
     e2e_latency_slo_ms: float | None = None
+    tpot_slo_ms: float | None = None
+    failure_gap_slo_ms: float | None = None
+    expected_output_len: int | None = None
+
+    # FT: number of tokens already checkpointed from a previous engine.
+    # When > 0, the receiving engine should attempt to restore KV cache
+    # from the shared checkpoint store instead of recomputing from scratch.
+    num_checkpointed_tokens: int = 0
 
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
@@ -185,6 +193,12 @@ class EngineCoreOutputs(
 
     utility_output: UtilityOutput | None = None
     finished_requests: set[str] | None = None
+
+    # FT: checkpoint updates from this step.
+    # Maps request_id -> num_checkpointed_tokens for requests that were
+    # successfully checkpointed.  Used by FTDPAsyncMPClient to track
+    # checkpoint progress for failover restore.
+    checkpoint_updates: dict[str, int] | None = None
 
     # In DP case, used to signal that the current wave of requests
     # has finished and the engines are paused.

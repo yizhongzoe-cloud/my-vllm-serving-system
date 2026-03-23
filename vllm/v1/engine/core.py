@@ -312,6 +312,143 @@ class EngineCore:
 
         self.scheduler.add_request(request)
 
+        # FT: if the request carries checkpoint info from a failed engine,
+        # queue it for KV restore after blocks are allocated.
+        #
+        # We do NOT set num_computed_tokens here.  The first schedule()
+        # treats this as a fresh request: allocates blocks for all tokens
+        # and schedules full computation.  After schedule() allocates
+        # blocks, _process_ft_pending_restores() restores checkpoint KV
+        # into those blocks AND patches scheduler_output to reduce the
+        # scheduled tokens, so the model runner skips the restored prefix
+        # and only computes the remaining tokens.  If restore fails, the
+        # scheduler_output is left unchanged and the request does a full
+        # recompute — always correct.
+        if getattr(request, "num_checkpointed_tokens", 0) > 0:
+            if not hasattr(self, "_ft_pending_restores"):
+                self._ft_pending_restores: list[
+                    tuple[str, int]
+                ] = []
+            self._ft_pending_restores.append(
+                (request.request_id, request.num_checkpointed_tokens)
+            )
+
+    def _process_ft_pending_restores(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """Restore checkpoint KV into allocated blocks and patch scheduler_output.
+
+        Called in step() after schedule() but BEFORE execute_model().
+        For each pending restore:
+          1. Copy checkpoint KV from host memory into the GPU blocks
+             that schedule() just allocated.
+          2. Update request.num_computed_tokens and
+             request.num_checkpointed_tokens to reflect the restore.
+          3. Patch scheduler_output so the model runner skips the
+             restored prefix: reduce num_scheduled_tokens and update
+             NewRequestData.num_computed_tokens.
+
+        If restore fails, the scheduler_output is left unchanged and the
+        request does a full recompute — always correct.
+
+        Requests whose blocks are not yet allocated (still in waiting
+        queue) are kept for the next step.
+        """
+        if not hasattr(self, "_ft_pending_restores") or not self._ft_pending_restores:
+            return
+
+        from vllm.v1.core.sched.ft_scheduler_impl import (
+            FaultTolerantSchedulerImpl,
+        )
+        if not isinstance(self.scheduler, FaultTolerantSchedulerImpl):
+            self._ft_pending_restores.clear()
+            return
+
+        kv_cache_mgr = self.scheduler._base.kv_cache_manager
+        still_pending: list[tuple[str, int]] = []
+
+        # Build a lookup for NewRequestData so we can patch it.
+        new_req_data_by_id = {
+            nrd.req_id: nrd
+            for nrd in scheduler_output.scheduled_new_reqs
+        }
+
+        for req_id, num_ckpt_tokens in self._ft_pending_restores:
+            try:
+                blocks = kv_cache_mgr.req_to_blocks.get(req_id)
+                if blocks is None:
+                    still_pending.append((req_id, num_ckpt_tokens))
+                    continue
+
+                all_ids = blocks.get_block_ids()
+                if not all_ids:
+                    still_pending.append((req_id, num_ckpt_tokens))
+                    continue
+
+                target_block_ids = list(all_ids[0])
+
+                results = self.collective_rpc(
+                    "restore_kv_blocks",
+                    args=(req_id, target_block_ids),
+                )
+
+                if results and results[0] and results[0] > 0:
+                    tokens_restored = results[0]
+
+                    # Update request metadata.
+                    request = self.scheduler._base.requests.get(req_id)
+                    if request is not None:
+                        request.num_computed_tokens = tokens_restored
+                        request.num_checkpointed_tokens = tokens_restored
+
+                    # Patch scheduler_output so the model runner skips
+                    # the restored prefix instead of recomputing it.
+                    old_scheduled = scheduler_output.num_scheduled_tokens.get(
+                        req_id
+                    )
+                    if old_scheduled is not None and old_scheduled > tokens_restored:
+                        new_scheduled = old_scheduled - tokens_restored
+                        scheduler_output.num_scheduled_tokens[req_id] = (
+                            new_scheduled
+                        )
+                        scheduler_output.total_num_scheduled_tokens -= (
+                            tokens_restored
+                        )
+
+                        # Also patch NewRequestData.num_computed_tokens
+                        # so the model runner positions start from the
+                        # restored offset.
+                        nrd = new_req_data_by_id.get(req_id)
+                        if nrd is not None:
+                            nrd.num_computed_tokens = tokens_restored
+
+                    logger.info(
+                        "FT restore: request %s restored %d tokens "
+                        "from checkpoint, skipping prefill for "
+                        "restored prefix (%d → %d scheduled tokens)",
+                        req_id,
+                        tokens_restored,
+                        old_scheduled or 0,
+                        scheduler_output.num_scheduled_tokens.get(
+                            req_id, 0
+                        ),
+                    )
+                else:
+                    logger.info(
+                        "FT restore: request %s checkpoint not found "
+                        "or empty, will recompute fully",
+                        req_id,
+                    )
+                # Don't retry regardless of outcome.
+            except Exception:
+                logger.debug(
+                    "FT restore failed for request %s (will recompute)",
+                    req_id,
+                )
+
+        self._ft_pending_restores = still_pending
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
@@ -378,6 +515,12 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+
+        # FT restore: schedule() has allocated KV blocks.  Restore
+        # checkpoint KV into those blocks and patch scheduler_output
+        # to skip the restored prefix (avoids redundant prefill).
+        self._process_ft_pending_restores(scheduler_output)
+
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -395,7 +538,92 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # FT checkpoint hook: if the scheduler is FT-aware, trigger
+        # GPU→CPU KV checkpoint via collective_rpc on the workers.
+        ckpt_updates = self._maybe_ft_checkpoint()
+
+        # Merge any buffered checkpoint updates from previous steps.
+        if not hasattr(self, "_ft_buffered_ckpt_updates"):
+            self._ft_buffered_ckpt_updates: dict[str, int] = {}
+        if ckpt_updates:
+            self._ft_buffered_ckpt_updates.update(ckpt_updates)
+
+        # Inject checkpoint updates into ALL output entries so every
+        # client receives the update (DP may have multiple clients).
+        # If no outputs this step, buffer updates for the next step
+        # that does produce outputs.
+        if self._ft_buffered_ckpt_updates and engine_core_outputs:
+            for outputs in engine_core_outputs.values():
+                outputs.checkpoint_updates = dict(
+                    self._ft_buffered_ckpt_updates
+                )
+            self._ft_buffered_ckpt_updates.clear()
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _maybe_ft_checkpoint(self) -> dict[str, int] | None:
+        """Trigger GPU→CPU KV checkpoint if using FT scheduler.
+
+        Returns:
+            Dict mapping request_id -> num_checkpointed_tokens for
+            successfully checkpointed requests, or None.
+        """
+        from vllm.v1.core.sched.ft_scheduler_impl import (
+            FaultTolerantSchedulerImpl,
+        )
+
+        if not isinstance(self.scheduler, FaultTolerantSchedulerImpl):
+            return None
+
+        checkpoint_requests = self.scheduler.get_checkpoint_requests()
+        if not checkpoint_requests:
+            return None
+
+        # checkpoint_requests is list of (request_id, block_ids, num_tokens)
+        # — already includes real num_computed_tokens from the scheduler.
+        request_block_map = checkpoint_requests
+        ckpt_updates: dict[str, int] = {}
+
+        try:
+            results = self.collective_rpc(
+                "checkpoint_kv_blocks",
+                args=(request_block_map,),
+            )
+
+            # Write checkpoint results back to FT controller/request state.
+            # results is a list (one per worker); take the first.
+            if results and results[0]:
+                ft = self.scheduler.ft_scheduler
+                # Collect (num_tokens, size_bytes) for metadata sync.
+                metadata_updates: dict[str, tuple[int, int]] = {}
+                for req_id, size_bytes in results[0]:
+                    request = ft.request_pool.get_request(req_id)
+                    if request is not None:
+                        ft.checkpoint_controller.record_checkpoint(request)
+                        ckpt_updates[req_id] = request.num_computed_tokens
+                        metadata_updates[req_id] = (
+                            request.num_computed_tokens,
+                            size_bytes,
+                        )
+                        logger.debug(
+                            "FT checkpoint recorded for request %s "
+                            "(%d bytes, %d tokens)",
+                            req_id,
+                            size_bytes,
+                            request.num_computed_tokens,
+                        )
+                # Sync metadata (with actual size_bytes from worker) to
+                # FT scheduler so RecoveryManager can estimate recovery
+                # costs accurately.
+                if metadata_updates:
+                    ft.update_checkpoint_metadata(metadata_updates)
+        except Exception:
+            logger.debug(
+                "FT checkpoint failed for %d requests (non-fatal)",
+                len(request_block_map),
+            )
+
+        return ckpt_updates if ckpt_updates else None
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -650,7 +878,9 @@ class EngineCoreProc(EngineCore):
         engine_index: int = 0,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
-        self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        self.output_queue = queue.Queue[
+            tuple[int, EngineCoreOutputs] | tuple[bytes, int]
+        ]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -965,6 +1195,22 @@ class EngineCoreProc(EngineCore):
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
 
+    @property
+    def _ft_idle_heartbeat_sec(self) -> float:
+        """Heartbeat interval for idle engines.
+
+        Derived from the coordinator's failure_timeout_sec to avoid the
+        configuration trap where heartbeat > timeout causes false deaths.
+        Uses timeout / 3 so that at least 2 heartbeats arrive within each
+        timeout window.
+        """
+        timeout = getattr(
+            self.vllm_config.scheduler_config,
+            "failure_timeout_sec",
+            5.0,
+        )
+        return max(0.5, timeout / 3.0)
+
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
@@ -981,7 +1227,21 @@ class EngineCoreProc(EngineCore):
                 if logger.isEnabledFor(DEBUG):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
-            req = self.input_queue.get()
+
+            # Use a timeout so that idle engines periodically send a
+            # heartbeat to the coordinator, preventing false failure
+            # detection.  Without this, an engine with no requests
+            # would block forever and be declared dead by the
+            # coordinator's output-based liveness check.
+            try:
+                req = self.input_queue.get(
+                    timeout=self._ft_idle_heartbeat_sec
+                )
+            except queue.Empty:
+                # No input received — send a heartbeat (empty stats)
+                # so the coordinator knows we're alive.
+                self._send_idle_heartbeat()
+                continue
             self._handle_client_request(*req)
 
         if waited:
@@ -991,6 +1251,29 @@ class EngineCoreProc(EngineCore):
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
+
+    def _send_idle_heartbeat(self) -> None:
+        """Send a heartbeat to the coordinator while idle.
+
+        Publishes a minimal EngineCoreOutputs with scheduler stats so
+        that the coordinator's output-based liveness check doesn't
+        falsely declare this engine as dead.
+        """
+        if not hasattr(self, "output_queue"):
+            return
+        try:
+            from vllm.v1.core.sched.output import SchedulerStats
+            counts = self.scheduler.get_request_counts()
+            stats = SchedulerStats(
+                *counts,
+                step_counter=getattr(self, "step_counter", 0),
+                current_wave=getattr(self, "current_wave", 0),
+            )
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(scheduler_stats=stats))
+            )
+        except Exception:
+            pass  # Best-effort heartbeat.
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -1064,8 +1347,13 @@ class EngineCoreProc(EngineCore):
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
 
-        # Put ENGINE_CORE_DEAD in the queue.
-        self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
+        # Put (ENGINE_CORE_DEAD, engine_index) in the queue so the output
+        # thread can send a 2-frame multipart that identifies *which*
+        # engine died.  This lets FT clients trigger immediate failover
+        # without guessing.
+        self.output_queue.put_nowait(
+            (EngineCoreProc.ENGINE_CORE_DEAD, self.engine_index)
+        )
 
         # Wait until msg sent by the daemon before shutdown.
         self.output_thread.join(timeout=5.0)
@@ -1195,9 +1483,21 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 output = self.output_queue.get()
-                if output == EngineCoreProc.ENGINE_CORE_DEAD:
+                if (
+                    isinstance(output, tuple)
+                    and len(output) == 2
+                    and output[0] == EngineCoreProc.ENGINE_CORE_DEAD
+                ):
+                    # Send 2-frame multipart: [ENGINE_CORE_DEAD, engine_index].
+                    # Frame 0 is the sentinel for backward compat with base
+                    # client; frame 1 carries the engine identity so FT
+                    # clients can trigger immediate, targeted failover.
+                    _, dead_engine_index = output
+                    idx_bytes = msgspec.msgpack.encode(dead_engine_index)
                     for socket in sockets:
-                        socket.send(output)
+                        socket.send_multipart(
+                            [EngineCoreProc.ENGINE_CORE_DEAD, idx_bytes]
+                        )
                     break
                 assert not isinstance(output, bytes)
                 client_index, outputs = output

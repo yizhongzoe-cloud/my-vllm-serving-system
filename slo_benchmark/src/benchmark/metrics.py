@@ -64,6 +64,33 @@ class SLOMetrics:
 
 
 @dataclass
+class FaultToleranceMetrics:
+    """Fault-tolerance specific metrics."""
+
+    # Failover events
+    num_failover_events: int = 0
+    total_affected_requests: int = 0
+    total_recovered: int = 0
+    total_dropped: int = 0
+    recovery_rate: float = 1.0
+
+    # Failover gap
+    failover_gap: LatencyMetrics | None = None
+    failure_gap_slo_total: int = 0
+    failure_gap_slo_met: int = 0
+    failure_gap_slo_compliance: float = 1.0
+
+    # Checkpoint overhead
+    checkpoint_overhead: LatencyMetrics | None = None
+    total_checkpoints: int = 0
+    checkpoint_pool_utilization: float = 0.0
+
+    # Goodput — output tokens from successfully completed requests
+    goodput_tokens: int = 0
+    goodput_tokens_per_second: float = 0.0
+
+
+@dataclass
 class BenchmarkMetrics:
     """Complete benchmark metrics."""
 
@@ -85,12 +112,15 @@ class BenchmarkMetrics:
     # SLO compliance
     slo: SLOMetrics
 
+    # Fault tolerance (optional, only present when FT mode is used)
+    ft: FaultToleranceMetrics | None = None
+
     # Config
-    config: dict
+    config: dict = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "total_requests": self.total_requests,
             "successful_requests": self.successful_requests,
             "failed_requests": self.failed_requests,
@@ -103,6 +133,17 @@ class BenchmarkMetrics:
             "slo": asdict(self.slo),
             "config": self.config,
         }
+        if self.ft is not None:
+            ft_dict = asdict(self.ft)
+            # LatencyMetrics nested fields need special handling
+            if self.ft.failover_gap is not None:
+                ft_dict["failover_gap"] = asdict(self.ft.failover_gap)
+            if self.ft.checkpoint_overhead is not None:
+                ft_dict["checkpoint_overhead"] = asdict(
+                    self.ft.checkpoint_overhead
+                )
+            result["fault_tolerance"] = ft_dict
+        return result
 
     def save(self, path: str | Path) -> None:
         """Save metrics to JSON file."""
@@ -145,9 +186,32 @@ class BenchmarkMetrics:
             f"  TTFT SLO:    {self.slo.ttft_met}/{self.slo.ttft_total} met ({self.slo.ttft_compliance_rate:.1%})",
             f"  E2E SLO:     {self.slo.e2e_met}/{self.slo.e2e_total} met ({self.slo.e2e_compliance_rate:.1%})",
             f"  Overall:     {self.slo.all_slo_met}/{self.slo.any_slo_total} met ({self.slo.overall_compliance_rate:.1%})",
-            "",
-            "=" * 60,
         ]
+
+        if self.ft is not None:
+            lines.extend([
+                "",
+                "## Fault Tolerance",
+                f"  Failover events:    {self.ft.num_failover_events}",
+                f"  Affected requests:  {self.ft.total_affected_requests}",
+                f"  Recovered:          {self.ft.total_recovered}",
+                f"  Dropped:            {self.ft.total_dropped}",
+                f"  Recovery rate:      {self.ft.recovery_rate:.1%}",
+                f"  Goodput:            {self.ft.goodput_tokens} tokens "
+                f"({self.ft.goodput_tokens_per_second:.1f} tok/s)",
+            ])
+            if self.ft.failover_gap is not None:
+                lines.extend([
+                    f"  Failover gap P50:   {self.ft.failover_gap.p50_ms:.1f}ms",
+                    f"  Failover gap P99:   {self.ft.failover_gap.p99_ms:.1f}ms",
+                ])
+            lines.append(
+                f"  Gap SLO compliance: "
+                f"{self.ft.failure_gap_slo_met}/{self.ft.failure_gap_slo_total} "
+                f"({self.ft.failure_gap_slo_compliance:.1%})"
+            )
+
+        lines.extend(["", "=" * 60])
         return "\n".join(lines)
 
 
@@ -167,22 +231,27 @@ def compute_metrics(result: BenchmarkResult) -> BenchmarkMetrics:
     total_tokens = sum(r.output_tokens for r in successful)
     tokens_per_second = total_tokens / result.total_time_s if result.total_time_s > 0 else 0
 
-    # SLO metrics
-    ttft_slo_requests = [r for r in successful if r.request.ttft_slo_ms is not None]
-    ttft_met = sum(1 for r in ttft_slo_requests if r.ttft_slo_met)
+    # SLO metrics — denominator includes ALL requests with SLOs (not just
+    # successful ones).  Failed requests with SLOs count as violations so
+    # that the compliance rate reflects true system reliability.
+    all_results = result.results
 
-    e2e_slo_requests = [r for r in successful if r.request.e2e_latency_slo_ms is not None]
-    e2e_met = sum(1 for r in e2e_slo_requests if r.e2e_slo_met)
+    ttft_slo_requests = [r for r in all_results if r.request.ttft_slo_ms is not None]
+    ttft_met = sum(1 for r in ttft_slo_requests if r.success and r.ttft_slo_met)
+
+    e2e_slo_requests = [r for r in all_results if r.request.e2e_latency_slo_ms is not None]
+    e2e_met = sum(1 for r in e2e_slo_requests if r.success and r.e2e_slo_met)
 
     any_slo_requests = [
-        r for r in successful
+        r for r in all_results
         if r.request.ttft_slo_ms is not None or r.request.e2e_latency_slo_ms is not None
     ]
 
-    # All SLOs met means: TTFT met (if exists) AND E2E met (if exists)
+    # All SLOs met means: request succeeded AND TTFT met (if exists) AND E2E met (if exists)
     all_slo_met = sum(
         1 for r in any_slo_requests
-        if (r.ttft_slo_met is None or r.ttft_slo_met)
+        if r.success
+        and (r.ttft_slo_met is None or r.ttft_slo_met)
         and (r.e2e_slo_met is None or r.e2e_slo_met)
     )
 

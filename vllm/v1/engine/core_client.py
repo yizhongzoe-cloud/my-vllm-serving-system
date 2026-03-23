@@ -117,6 +117,11 @@ class EngineCoreClient(ABC):
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
+            # Fault-tolerant mode uses FT client with failover support.
+            if vllm_config.scheduler_config.policy == "fault_tolerant":
+                from vllm.v1.engine.ft_client import FTDPAsyncMPClient
+
+                return FTDPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
             return DPLBAsyncMPClient(*client_args)
         return AsyncMPClient(*client_args)
@@ -423,7 +428,12 @@ class BackgroundResources:
                     shutdown_sender.send(b"")
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
-        if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
+        # ENGINE_CORE_DEAD is now sent as a 2-frame multipart:
+        #   [b"ENGINE_CORE_DEAD", msgpack(engine_index)]
+        # Check frame 0 regardless of frame count for compat.
+        if len(frames) >= 1 and (
+            bytes(frames[0].buffer) == EngineCoreProc.ENGINE_CORE_DEAD
+        ):
             self.engine_dead = True
             raise EngineDeadError()
 

@@ -76,6 +76,9 @@ class Request:
         resumable: bool = False,
         ttft_slo_ms: float | None = None,
         e2e_latency_slo_ms: float | None = None,
+        tpot_slo_ms: float | None = None,
+        failure_gap_slo_ms: float | None = None,
+        expected_output_len: int | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -93,6 +96,9 @@ class Request:
         # SLO-related fields
         self.ttft_slo_ms = ttft_slo_ms
         self.e2e_latency_slo_ms = e2e_latency_slo_ms
+        self.tpot_slo_ms = tpot_slo_ms
+        self.failure_gap_slo_ms = failure_gap_slo_ms
+        self.expected_output_len = expected_output_len
 
         # Calculate deadlines from SLO requirements
         self.ttft_deadline: float | None = None
@@ -102,6 +108,23 @@ class Request:
         self.e2e_deadline: float | None = None
         if e2e_latency_slo_ms is not None:
             self.e2e_deadline = self.arrival_time + (e2e_latency_slo_ms / 1000.0)
+
+        # TPOT deadline: estimated completion time based on TPOT bound.
+        # D_j^{tpot} * G_j gives total decode budget; add to arrival + prefill.
+        self.tpot_deadline: float | None = None
+        if tpot_slo_ms is not None and expected_output_len is not None:
+            total_decode_budget_sec = (tpot_slo_ms / 1000.0) * expected_output_len
+            self.tpot_deadline = self.arrival_time + total_decode_budget_sec
+
+        # Cached sort key for SLO-aware scheduling (avoids time.time()
+        # calls during heap comparisons; updated by update_sort_key()).
+        self._cached_slack: float = float('inf')
+
+        # Fault-tolerance fields
+        self.checkpoint_level: int = 0  # 0=none, 1=low freq, 2=high freq
+        self.assigned_replica_id: int | None = None
+        self.num_checkpointed_tokens: int = 0
+        self.last_checkpoint_time: float | None = None
 
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
@@ -191,7 +214,7 @@ class Request:
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
     ) -> "Request":
-        return cls(
+        req = cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
@@ -209,7 +232,15 @@ class Request:
             resumable=request.resumable,
             ttft_slo_ms=request.ttft_slo_ms,
             e2e_latency_slo_ms=request.e2e_latency_slo_ms,
+            tpot_slo_ms=request.tpot_slo_ms,
+            failure_gap_slo_ms=request.failure_gap_slo_ms,
+            expected_output_len=request.expected_output_len,
         )
+        # FT: propagate checkpoint info for failover restore.
+        req.num_checkpointed_tokens = getattr(
+            request, "num_checkpointed_tokens", 0
+        )
+        return req
 
     def append_output_token_ids(
         self,
@@ -287,7 +318,43 @@ class Request:
 
     def has_slo(self) -> bool:
         """Check if the request has any SLO requirement."""
-        return self.ttft_slo_ms is not None or self.e2e_latency_slo_ms is not None
+        return (self.ttft_slo_ms is not None
+                or self.e2e_latency_slo_ms is not None
+                or self.tpot_slo_ms is not None)
+
+    def has_failure_gap_slo(self) -> bool:
+        """Check if the request has a failure-gap SLO."""
+        return self.failure_gap_slo_ms is not None
+
+    @property
+    def prompt_len(self) -> int:
+        """P_j: prompt length in tokens."""
+        return self.num_prompt_tokens
+
+    @property
+    def generation_len(self) -> int:
+        """G_j: expected output length.
+
+        Uses the user-provided expected_output_len if available.
+        Otherwise estimates as half of max_tokens (a heuristic that
+        avoids the extreme overestimate of using the full max_tokens
+        upper bound, which would distort capacity accounting).
+        """
+        if self.expected_output_len is not None:
+            return self.expected_output_len
+        return max(1, self.max_tokens // 2)
+
+    @property
+    def generation_progress(self) -> float:
+        """Fraction of expected output tokens generated so far (0.0 to 1.0)."""
+        gen_len = self.generation_len
+        if gen_len <= 0:
+            return 0.0
+        return min(self.num_output_tokens / gen_len, 1.0)
+
+    def get_uncovered_tokens(self) -> int:
+        """Tokens generated since last checkpoint (would need replay)."""
+        return max(0, self.num_computed_tokens - self.num_checkpointed_tokens)
 
     def get_ttft_slack(self, current_time: float) -> float:
         """
@@ -319,16 +386,40 @@ class Request:
             return float('inf')
         return self.e2e_deadline - current_time
 
+    def get_tpot_slack(self, current_time: float) -> float:
+        """
+        Calculate TPOT slack time.
+
+        Returns:
+            Slack time in seconds. Returns float('inf') if no TPOT SLO is set.
+        """
+        if self.tpot_deadline is None:
+            return float('inf')
+        return self.tpot_deadline - current_time
+
     def get_effective_slack(self, current_time: float) -> float:
         """
         Get the effective slack time for scheduling.
 
-        WAITING requests use TTFT slack, RUNNING requests use E2E slack.
+        WAITING requests use TTFT slack, RUNNING requests use
+        min(E2E slack, TPOT slack) to respect both constraints.
         """
         if self.status == RequestStatus.RUNNING:
-            return self.get_e2e_slack(current_time)
+            return min(self.get_e2e_slack(current_time),
+                       self.get_tpot_slack(current_time))
         else:
             return self.get_ttft_slack(current_time)
+
+    def update_sort_key(self, current_time: float) -> None:
+        """Pre-compute the sort key for SLO-aware scheduling.
+
+        Called once per reheapify cycle (not per comparison) to avoid
+        repeated time.time() syscalls during heap operations.
+        """
+        if self.has_slo():
+            self._cached_slack = self.get_effective_slack(current_time)
+        else:
+            self._cached_slack = float('inf')
 
     def __lt__(self, other: "Request") -> bool:
         """
@@ -339,20 +430,20 @@ class Request:
         - Requests with SLO are prioritized over those without
         - Among requests with SLO, smaller slack time (more urgent) comes first
         - WAITING requests use TTFT slack, RUNNING requests use E2E slack
+
+        Uses pre-computed _cached_slack (set by update_sort_key or
+        SLOAwareRequestQueue._maybe_reheapify) to avoid calling
+        time.time() on every comparison during heap operations.
         """
-        # Check if either request has SLO
         self_has_slo = self.has_slo()
         other_has_slo = other.has_slo()
 
-        # If both have SLO, compare by slack time
         if self_has_slo and other_has_slo:
-            current_time = time.time()
-            self_slack = self.get_effective_slack(current_time)
-            other_slack = other.get_effective_slack(current_time)
+            self_slack = getattr(self, '_cached_slack', float('inf'))
+            other_slack = getattr(other, '_cached_slack', float('inf'))
             if self_slack != other_slack:
                 return self_slack < other_slack  # Smaller slack = more urgent
         elif self_has_slo and not other_has_slo:
-            # Requests with SLO are prioritized over those without
             return True
         elif not self_has_slo and other_has_slo:
             return False

@@ -17,6 +17,7 @@ class SchedulingPolicy(Enum):
     FCFS = "fcfs"
     PRIORITY = "priority"
     SLO_AWARE = "slo_aware"
+    FAULT_TOLERANT = "fault_tolerant"
 
 
 class RequestQueue(ABC):
@@ -246,11 +247,13 @@ class SLOAwareRequestQueue(RequestQueue):
         Periodically re-heapify to reflect dynamic slack time changes.
 
         Since slack time depends on current time, the ordering may change
-        over time. This method re-heapifies at regular intervals to maintain
-        correct ordering.
+        over time. This method updates each request's cached sort key
+        and re-heapifies at regular intervals.
         """
         now = time.time()
         if now - self._last_reheapify >= self._reheapify_interval:
+            for req in self._heap:
+                req.update_sort_key(now)
             heapq.heapify(self._heap)
             self._last_reheapify = now
 
@@ -303,6 +306,11 @@ def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
     elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
     elif policy == SchedulingPolicy.SLO_AWARE:
+        return SLOAwareRequestQueue()
+    elif policy == SchedulingPolicy.FAULT_TOLERANT:
+        # Fault-tolerant mode uses SLO-aware queue for per-replica scheduling.
+        # The FT-specific logic (admission, routing, checkpointing) is handled
+        # by FaultTolerantScheduler which wraps the per-replica schedulers.
         return SLOAwareRequestQueue()
     else:
         raise ValueError(f"Unknown scheduling policy: {policy}")

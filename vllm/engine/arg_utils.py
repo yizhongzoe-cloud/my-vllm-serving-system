@@ -531,6 +531,15 @@ class EngineArgs:
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
+    # Fault-tolerant scheduling parameters (only effective when
+    # scheduling_policy="fault_tolerant").
+    max_gpu_failures: int = SchedulerConfig.max_gpu_failures
+    enable_checkpointing: bool = SchedulerConfig.enable_checkpointing
+    checkpoint_pool_bytes: int = SchedulerConfig.checkpoint_pool_bytes
+    failure_detection_time_ms: float = SchedulerConfig.failure_detection_time_ms
+    heartbeat_interval_sec: float = SchedulerConfig.heartbeat_interval_sec
+    failure_timeout_sec: float = SchedulerConfig.failure_timeout_sec
+
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
@@ -1111,6 +1120,33 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--scheduling-policy", **scheduler_kwargs["policy"]
         )
+
+        # Fault-tolerant scheduling CLI arguments.
+        scheduler_group.add_argument(
+            "--max-gpu-failures",
+            **scheduler_kwargs["max_gpu_failures"],
+        )
+        scheduler_group.add_argument(
+            "--enable-checkpointing",
+            **scheduler_kwargs["enable_checkpointing"],
+        )
+        scheduler_group.add_argument(
+            "--checkpoint-pool-bytes",
+            **scheduler_kwargs["checkpoint_pool_bytes"],
+        )
+        scheduler_group.add_argument(
+            "--failure-detection-time-ms",
+            **scheduler_kwargs["failure_detection_time_ms"],
+        )
+        scheduler_group.add_argument(
+            "--heartbeat-interval-sec",
+            **scheduler_kwargs["heartbeat_interval_sec"],
+        )
+        scheduler_group.add_argument(
+            "--failure-timeout-sec",
+            **scheduler_kwargs["failure_timeout_sec"],
+        )
+
         scheduler_group.add_argument(
             "--enable-chunked-prefill",
             **{
@@ -1651,6 +1687,12 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            max_gpu_failures=self.max_gpu_failures,
+            enable_checkpointing=self.enable_checkpointing,
+            checkpoint_pool_bytes=self.checkpoint_pool_bytes,
+            failure_detection_time_ms=self.failure_detection_time_ms,
+            heartbeat_interval_sec=self.heartbeat_interval_sec,
+            failure_timeout_sec=self.failure_timeout_sec,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

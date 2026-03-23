@@ -371,6 +371,30 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "Used for SLO-aware preemption decisions."
         ),
     )
+    tpot_slo_ms: float | None = Field(
+        default=None,
+        description=(
+            "Time Per Output Token SLO in milliseconds. "
+            "Maximum acceptable time between consecutive output tokens. "
+            "Used for fault-tolerant scheduling decisions."
+        ),
+    )
+    failure_gap_slo_ms: float | None = Field(
+        default=None,
+        description=(
+            "Failure gap SLO in milliseconds. "
+            "Maximum acceptable interruption time when a GPU failure occurs "
+            "and the request is migrated to a surviving replica."
+        ),
+    )
+    expected_output_len: int | None = Field(
+        default=None,
+        description=(
+            "Expected output length in tokens. "
+            "Used by the fault-tolerant scheduler for capacity planning "
+            "and checkpoint level decisions. Falls back to max_tokens."
+        ),
+    )
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -475,6 +499,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["ttft_slo_ms"] = self.ttft_slo_ms
         if self.e2e_latency_slo_ms is not None:
             extra_args["e2e_latency_slo_ms"] = self.e2e_latency_slo_ms
+        if self.tpot_slo_ms is not None:
+            extra_args["tpot_slo_ms"] = self.tpot_slo_ms
+        if self.failure_gap_slo_ms is not None:
+            extra_args["failure_gap_slo_ms"] = self.failure_gap_slo_ms
+        if self.expected_output_len is not None:
+            extra_args["expected_output_len"] = self.expected_output_len
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority", "slo_aware"]
+SchedulerPolicy = Literal["fcfs", "priority", "slo_aware", "fault_tolerant"]
 
 
 @config
@@ -108,7 +108,31 @@ class SchedulerConfig:
     value means earlier handling) and time of arrival deciding any ties).\n
     - "slo_aware" means requests are scheduled based on SLO slack time
     (deadline - current_time). Requests closer to violating their SLO are
-    prioritized. Requests with SLO are always prioritized over those without."""
+    prioritized. Requests with SLO are always prioritized over those without.\n
+    - "fault_tolerant" enables fault-tolerant scheduling with adaptive
+    KV-cache checkpointing. Jointly optimizes admission, routing, checkpoint
+    level, and failover re-routing to maximize goodput under GPU failures."""
+
+    # Fault-tolerant scheduling configuration
+    max_gpu_failures: int = 1
+    """Maximum number of simultaneous GPU failures the system should tolerate.
+    Corresponds to k in the uncertainty set Ω_k = {ω : |ω| ≤ k}."""
+
+    enable_checkpointing: bool = False
+    """Enable adaptive KV-cache checkpointing to host memory for fault
+    tolerance. Only effective when policy is 'fault_tolerant'."""
+
+    checkpoint_pool_bytes: int = 8 * 1024 * 1024 * 1024
+    """Host memory budget (bytes) for the KV checkpoint pool. Default 8 GB."""
+
+    failure_detection_time_ms: float = 100.0
+    """Expected failure detection time T^{det} in milliseconds."""
+
+    heartbeat_interval_sec: float = 1.0
+    """Interval between replica heartbeat checks."""
+
+    failure_timeout_sec: float = 5.0
+    """Time without heartbeat before declaring a replica as failed."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -157,6 +181,12 @@ class SchedulerConfig:
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
+            if self.policy == "fault_tolerant":
+                from vllm.v1.core.sched.ft_scheduler_impl import (
+                    FaultTolerantSchedulerImpl,
+                )
+
+                return FaultTolerantSchedulerImpl
             if self.async_scheduling:
                 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 

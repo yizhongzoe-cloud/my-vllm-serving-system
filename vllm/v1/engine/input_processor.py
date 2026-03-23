@@ -621,9 +621,17 @@ class InputProcessor:
         # Extract SLO parameters from sampling_params.extra_args
         ttft_slo_ms: float | None = None
         e2e_latency_slo_ms: float | None = None
+        tpot_slo_ms: float | None = None
+        failure_gap_slo_ms: float | None = None
+        expected_output_len: int | None = None
         if sampling_params is not None and sampling_params.extra_args is not None:
             ttft_slo_ms = sampling_params.extra_args.get("ttft_slo_ms")
             e2e_latency_slo_ms = sampling_params.extra_args.get("e2e_latency_slo_ms")
+            tpot_slo_ms = sampling_params.extra_args.get("tpot_slo_ms")
+            failure_gap_slo_ms = sampling_params.extra_args.get(
+                "failure_gap_slo_ms")
+            expected_output_len = sampling_params.extra_args.get(
+                "expected_output_len")
 
         return EngineCoreRequest(
             request_id=request_id,
@@ -642,6 +650,9 @@ class InputProcessor:
             resumable=resumable,
             ttft_slo_ms=ttft_slo_ms,
             e2e_latency_slo_ms=e2e_latency_slo_ms,
+            tpot_slo_ms=tpot_slo_ms,
+            failure_gap_slo_ms=failure_gap_slo_ms,
+            expected_output_len=expected_output_len,
         )
 
     def _validate_model_inputs(

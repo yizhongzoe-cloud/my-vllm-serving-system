@@ -6060,6 +6060,208 @@ class GPUModelRunner(
                     stats.encoder_forward_time += per_request_time
                     stats.num_encoder_calls += 1
 
+    # ---- Fault-tolerant KV checkpoint support ----
+
+    # Shared checkpoint directory — all engines on the same node write
+    # here so that a surviving engine can restore another engine's
+    # checkpoints after failover.  Uses /dev/shm (tmpfs, RAM-backed)
+    # for performance parity with host pinned memory.
+    _SHARED_CKPT_DIR = "/dev/shm/vllm_ft_checkpoints"
+
+    def _get_worker_rank(self) -> int:
+        """Get a unique rank for this worker across TP and PP dimensions."""
+        tp_rank = get_tp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_size = get_tp_group().world_size
+        return pp_rank * tp_size + tp_rank
+
+    def _shared_ckpt_path(self, request_id: str) -> str:
+        """Build the shared checkpoint path for this worker and request.
+
+        In multi-worker (TP/PP) setups, each worker holds a different
+        KV shard.  We include the worker rank in the filename so that
+        shards don't overwrite each other.
+        """
+        import os
+        rank = self._get_worker_rank()
+        return os.path.join(
+            self._SHARED_CKPT_DIR, f"{request_id}_rank{rank}.pt"
+        )
+
+    def _ensure_shared_ckpt_dir(self) -> str:
+        """Create the shared checkpoint directory if it doesn't exist."""
+        import os
+        os.makedirs(self._SHARED_CKPT_DIR, exist_ok=True)
+        return self._SHARED_CKPT_DIR
+
+    def checkpoint_kv_blocks(
+        self,
+        request_block_map: list[tuple[str, list[int], int]],
+    ) -> list[tuple[str, int]]:
+        """Checkpoint KV cache blocks from GPU to CPU pinned memory.
+
+        Called via collective_rpc from EngineCore for fault-tolerant serving.
+        Saves to both a local pool (fast path) and a shared /dev/shm
+        directory (cross-engine restore path).
+
+        Args:
+            request_block_map: List of (request_id, block_ids, num_tokens)
+                tuples identifying which blocks to checkpoint.
+
+        Returns:
+            List of (request_id, bytes_copied) for each successful checkpoint.
+        """
+        import os
+        import torch
+
+        if not self.kv_caches:
+            return []
+
+        from vllm.v1.core.kv_checkpoint_pool import KVCheckpointPool
+
+        # Get or create the checkpoint pool (lazy init with configured budget).
+        if not hasattr(self, "_ft_checkpoint_pool"):
+            pool_bytes = getattr(
+                self.vllm_config.scheduler_config,
+                "checkpoint_pool_bytes",
+                8 * 1024 * 1024 * 1024,
+            )
+            self._ft_checkpoint_pool = KVCheckpointPool(
+                max_memory_bytes=pool_bytes,
+            )
+
+        shared_dir = self._ensure_shared_ckpt_dir()
+
+        results = []
+        for request_id, block_ids, num_tokens in request_block_map:
+            entry = self._ft_checkpoint_pool.save_checkpoint(
+                request_id=request_id,
+                gpu_kv_caches=self.kv_caches,
+                block_ids=block_ids,
+                num_tokens=num_tokens,
+                async_copy=True,
+            )
+            if entry is not None:
+                results.append((request_id, entry.size_bytes))
+
+                # Also persist to shared directory for cross-engine restore.
+                try:
+                    shared_path = self._shared_ckpt_path(request_id)
+                    torch.save(
+                        {
+                            "kv_tensors": entry.kv_tensors,
+                            "block_ids": entry.block_ids,
+                            "num_tokens": entry.num_tokens,
+                            "size_bytes": entry.size_bytes,
+                        },
+                        shared_path,
+                    )
+                except Exception:
+                    # Shared save is best-effort; local pool is primary.
+                    pass
+        return results
+
+    def restore_kv_blocks(
+        self,
+        request_id: str,
+        target_block_ids: list[int],
+    ) -> int:
+        """Restore checkpointed KV cache from CPU to GPU.
+
+        Called via collective_rpc during failover recovery.
+        First checks the local pool, then falls back to the shared
+        /dev/shm directory (for cross-engine checkpoints).
+
+        Args:
+            request_id: The request whose checkpoint to restore.
+            target_block_ids: Block IDs on this GPU to write into.
+
+        Returns:
+            Number of tokens restored, or 0 if no checkpoint found.
+        """
+        import os
+        import torch
+
+        if not self.kv_caches:
+            return 0
+
+        # Try local pool first (same-engine restore).
+        if hasattr(self, "_ft_checkpoint_pool"):
+            tokens = self._ft_checkpoint_pool.restore_checkpoint(
+                request_id=request_id,
+                gpu_kv_caches=self.kv_caches,
+                target_block_ids=target_block_ids,
+            )
+            if tokens > 0:
+                return tokens
+
+        # Fall back to shared directory (cross-engine restore).
+        shared_path = self._shared_ckpt_path(request_id)
+        if not os.path.exists(shared_path):
+            return 0
+
+        try:
+            data = torch.load(shared_path, weights_only=False)
+            kv_tensors: dict[int, torch.Tensor] = data["kv_tensors"]
+            stored_block_ids: list[int] = data["block_ids"]
+            num_tokens: int = data["num_tokens"]
+
+            num_stored_blocks = len(stored_block_ids)
+            num_checkpoint_blocks = min(num_stored_blocks, len(target_block_ids))
+
+            device = self.kv_caches[0].device
+            target_indices = torch.tensor(
+                target_block_ids[:num_checkpoint_blocks],
+                dtype=torch.int64,
+                device=device,
+            )
+
+            if torch.cuda.is_available():
+                stream = torch.cuda.Stream()
+                with torch.cuda.stream(stream):
+                    for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                        host_tensor = kv_tensors.get(layer_idx)
+                        if host_tensor is None:
+                            continue
+                        src = host_tensor[:, :num_checkpoint_blocks].to(
+                            device, non_blocking=True
+                        )
+                        gpu_tensor[:, target_indices, :, :] = src
+                stream.synchronize()
+            else:
+                for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                    host_tensor = kv_tensors.get(layer_idx)
+                    if host_tensor is None:
+                        continue
+                    src = host_tensor[:, :num_checkpoint_blocks].to(device)
+                    gpu_tensor[:, target_indices, :, :] = src
+
+            # Clean up shared file after successful restore.
+            try:
+                os.remove(shared_path)
+            except OSError:
+                pass
+
+            # Return actual tokens restored, not the original num_tokens.
+            # If we truncated blocks (target < stored), the actual
+            # restored tokens = blocks_copied * block_size, capped at
+            # num_tokens.
+            if num_checkpoint_blocks < num_stored_blocks:
+                block_size = self.cache_config.block_size
+                actual_tokens = min(
+                    num_checkpoint_blocks * block_size, num_tokens
+                )
+                return actual_tokens
+            return num_tokens
+        except Exception:
+            return 0
+
+    def get_checkpoint_stats(self) -> dict:
+        """Get checkpoint pool statistics."""
+        if not hasattr(self, "_ft_checkpoint_pool"):
+            return {}
+        return self._ft_checkpoint_pool.get_stats()
+
 
 @dataclass
 class EncoderTimingStats:

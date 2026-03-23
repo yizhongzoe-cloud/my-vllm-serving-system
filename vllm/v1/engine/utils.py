@@ -836,10 +836,25 @@ def launch_core_engines(
     )
 
     if run_coordinator:
-        coordinator = DPCoordinator(
-            parallel_config,
-            enable_wave_coordination=vllm_config.model_config.is_moe,
-        )
+        # Use FT coordinator when fault-tolerant scheduling is enabled.
+        use_ft = vllm_config.scheduler_config.policy == "fault_tolerant"
+        if use_ft:
+            from vllm.v1.engine.ft_coordinator import FTCoordinator
+
+            coordinator = FTCoordinator(
+                parallel_config,
+                enable_wave_coordination=vllm_config.model_config.is_moe,
+                failure_timeout_sec=getattr(
+                    vllm_config.scheduler_config,
+                    "failure_timeout_sec",
+                    10.0,
+                ),
+            )
+        else:
+            coordinator = DPCoordinator(
+                parallel_config,
+                enable_wave_coordination=vllm_config.model_config.is_moe,
+            )
 
         addresses.coordinator_input, addresses.coordinator_output = (
             coordinator.get_engine_socket_addresses()
