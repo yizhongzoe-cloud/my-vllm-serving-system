@@ -6,7 +6,7 @@ set -euo pipefail
 #   RUN_IDS=(1 2 3 4 5)
 #   RUN_IDS=(1 4)
 #   RUN_IDS=()
-RUN_IDS=(4 5)
+RUN_IDS=(1)
 
 # 1 = run suite.py, 0 = skip experiment execution
 RUN_EXPERIMENTS=1

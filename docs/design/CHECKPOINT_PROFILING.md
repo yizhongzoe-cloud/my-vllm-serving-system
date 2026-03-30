@@ -242,7 +242,110 @@ python -m pytest tests/ft/test_experiment_log_parser.py -v -k "checkpoint"
 
 ---
 
-## Phase 1: [To be added...]
+## Phase 1: Profile-Driven Checkpoint Decision in Runtime
+
+### Overview
+
+Phase 1 integrates the checkpoint cost profile into the runtime's adaptive checkpoint controller. The goal is to replace hardcoded linear throughput/bandwidth assumptions with real measured cost functions.
+
+**Design Principle**: Only change the adaptive (`economic_policy`) path in CheckpointController. Fixed baselines (Fixed-High/Low, Robust-Routing-Only) are unaffected.
+
+### Implementation Details
+
+#### 1. CheckpointCostModel Runtime Module
+
+**File**: `vllm/v1/core/checkpoint_cost_model.py`
+
+- **Loads profile JSON** and validates `is_real_measurement` flag (rejects placeholder data immediately with ValueError)
+- **Provides three cost functions** via piecewise linear interpolation:
+  - `t_prefill(n)` → T_prefill(n)
+  - `t_load(S)` → T_load(S)
+  - `t_ckpt(S)` → T_ckpt(S)
+- **Implements decision rule**:
+  ```python
+  def should_publish(L, u, S, delta_S, lambda_=1.0) -> bool:
+      replay = t_prefill(L+u) - t_prefill(L)
+      load   = t_load(S+delta_S) - t_load(S)
+      ckpt   = t_ckpt(delta_S)
+      return replay > load + lambda_ * ckpt + c0
+  ```
+
+#### 2. CheckpointController Integration
+
+**File**: `vllm/v1/core/checkpoint_controller.py`
+
+- **New parameter**: `cost_profile_path: str = ""` in `__init__`
+- **Gate logic update**: `_economic_policy_available` now returns True if EITHER:
+  - Profile is loaded (cost_model is not None), OR
+  - Linear model inputs are provided (replay_throughput > 0 AND load_bandwidth > 0 AND checkpoint_bandwidth > 0)
+- **Decision logic**: In `_should_checkpoint_by_economic_policy()`:
+  - If `_cost_model is not None`: use profile-driven costs
+  - Else: fall back to linear model
+
+**Key insight**: Profile-driven takes precedence when both are available, but system works with either or neither.
+
+#### 3. Config Chain (10 touchpoints)
+
+All components from CLI to CheckpointController properly thread the profile path:
+
+| Component | Field Name | Type |
+|-----------|-----------|------|
+| CLI / EngineArgs | `ft_checkpoint_cost_profile` | str |
+| SchedulerConfig | `ft_checkpoint_cost_profile` | str |
+| FTSchedulerConfig | `checkpoint_cost_profile` | str |
+| FaultTolerantScheduler | `cost_profile_path` param | str |
+| CheckpointController | `cost_profile_path` param | str |
+
+Both FaultTolerantSchedulerImpl and BendersFTSchedulerImpl pass the config through.
+
+#### 4. Experiment Integration
+
+**File**: `experiments/run.py`
+
+Server launch command now includes:
+```bash
+--ft-checkpoint-cost-profile <path>  # If provided in experiment config
+```
+
+This allows experiments to specify profile paths in YAML for Checkpoint-Only and Our-System baselines.
+
+### Validation & Safeguards
+
+1. **Fail-fast on placeholder data**: If `is_real_measurement=False`, CheckpointCostModel raises ValueError immediately during construction. This prevents silent fallback to broken data.
+
+2. **Graceful fallback**: If profile path is empty or invalid, system falls back to linear model (if available) or legacy level-based checkpointing.
+
+3. **No gate coupling**: Profile and linear inputs are independent. Profile path doesn't require throughput values, and vice versa.
+
+### Test Coverage
+
+**File**: `tests/ft/test_checkpoint_cost_model.py` (10 tests)
+
+- ✅ Real profile loads successfully
+- ✅ Placeholder profile rejected with clear error
+- ✅ Interpolation correctness (T_prefill, T_load, T_ckpt)
+- ✅ Decision rule (should_publish) correctness
+- ✅ CheckpointController accepts profile
+- ✅ CheckpointController rejects placeholder profile
+- ✅ Fallback to linear model when no profile
+- ✅ Economic policy unavailable without profile or linear inputs
+- ✅ Profile takes precedence over linear
+
+**Regression**: All 32 existing tests in test_ft_system.py pass unchanged.
+
+### Baseline Impact
+
+| Baseline | Affected | Reason |
+|----------|----------|--------|
+| Fixed-High (1 block) | No | Uses fixed blocks dispatch, never reaches economic policy |
+| Fixed-Low (10 blocks) | No | Uses fixed blocks dispatch |
+| Robust-Routing-Only | No | Uses fixed blocks dispatch |
+| Checkpoint-Only | Yes | Walks economic policy path; profile preferred over linear |
+| Our-System | Yes | Walks economic policy path; profile preferred over linear |
+
+---
+
+## Phase 2: [To be added...]
 
 ---
 

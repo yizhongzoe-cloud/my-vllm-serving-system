@@ -62,6 +62,8 @@ class FTSchedulerConfig:
     checkpoint_lambda: float = 1.0
     # Estimated KV bytes per token used by the controller/cost model.
     kv_bytes_per_token: int = 8192
+    # Path to checkpoint_cost_profile.json for profile-driven decisions.
+    checkpoint_cost_profile: str = ""
 
 
 class FaultTolerantScheduler:
@@ -110,6 +112,7 @@ class FaultTolerantScheduler:
             ),
             checkpoint_lambda=self.config.checkpoint_lambda,
             default_kv_bytes_per_token=self.config.kv_bytes_per_token,
+            cost_profile_path=self.config.checkpoint_cost_profile,
         )
 
         self.checkpoint_pool = KVCheckpointPool(

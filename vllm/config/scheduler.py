@@ -193,6 +193,10 @@ class SchedulerConfig:
     ft_planning_horizon: float = 1.0
     """Planning horizon H (seconds) for the solver's capacity accounting."""
 
+    ft_checkpoint_cost_profile: str = ""
+    """Path to checkpoint_cost_profile.json for profile-driven checkpoint decisions.
+    Empty string means use linear economic policy with ft_prefill_throughput/ft_load_bandwidth."""
+
     default_ttft_slo_ms: float = 0.0
     """Default TTFT SLO (ms) applied to all requests. 0 means no SLO."""
 

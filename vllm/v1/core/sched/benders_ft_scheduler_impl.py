@@ -139,6 +139,7 @@ class BendersFTSchedulerImpl(SchedulerInterface):
             ),
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
             kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
+            checkpoint_cost_profile=sched_cfg.ft_checkpoint_cost_profile,
         )
         self._ft = FaultTolerantScheduler(config=ft_config, dp_size=dp_size)
 

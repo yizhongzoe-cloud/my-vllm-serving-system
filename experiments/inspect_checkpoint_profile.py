@@ -8,20 +8,35 @@ interactive inspection of checkpoint decisions under various (L, u, S, ΔS) scen
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Add repo root to path for imports
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from vllm.v1.core.checkpoint_cost_model import CheckpointCostModel
 
 
 class ProfileInspector:
-    """Load, validate, and inspect checkpoint cost profile."""
+    """Load, validate, and inspect checkpoint cost profile.
+
+    Uses CheckpointCostModel from vllm.v1.core for cost evaluation.
+    """
 
     def __init__(self, profile_path: str):
         with open(profile_path) as f:
             self.profile = json.load(f)
 
+        # Load cost model (will raise if profile is placeholder)
+        self.cost_model = CheckpointCostModel(profile_path)
+        self.c0 = self.profile["publication_overhead_ms"]
+
+        # Parse data for validation checks
         self.prefill_data = {int(k): v for k, v in self.profile["prefill_ms_by_tokens"].items()}
         self.load_data = {int(k): v for k, v in self.profile["load_ms_by_bytes"].items()}
         self.ckpt_data = {int(k): v for k, v in self.profile["checkpoint_ms_by_bytes"].items()}
-        self.c0 = self.profile["publication_overhead_ms"]
 
         # Sort for interpolation
         self.prefill_sorted = sorted(self.prefill_data.items())
@@ -113,38 +128,17 @@ class ProfileInspector:
         print("  ✅ Validation passed")
         return True
 
-    def interpolate_linear(self, x: int, x_data: list[tuple[int, float]]) -> float:
-        """Linear interpolation with clamping."""
-        if not x_data:
-            return 0.0
-
-        if x <= x_data[0][0]:
-            return x_data[0][1]
-        if x >= x_data[-1][0]:
-            return x_data[-1][1]
-
-        # Find surrounding points
-        for i in range(len(x_data) - 1):
-            x1, y1 = x_data[i]
-            x2, y2 = x_data[i + 1]
-            if x1 <= x <= x2:
-                # Linear interpolation
-                t = (x - x1) / (x2 - x1) if x2 != x1 else 0
-                return y1 + t * (y2 - y1)
-
-        return x_data[-1][1]
-
     def t_prefill(self, n_tokens: int) -> float:
-        """Get T_prefill(n) via linear interpolation."""
-        return self.interpolate_linear(n_tokens, self.prefill_sorted)
+        """Get T_prefill(n) via cost model."""
+        return self.cost_model.t_prefill(n_tokens)
 
     def t_load(self, n_bytes: int) -> float:
-        """Get T_load(S) via linear interpolation."""
-        return self.interpolate_linear(n_bytes, self.load_sorted)
+        """Get T_load(S) via cost model."""
+        return self.cost_model.t_load(n_bytes)
 
     def t_ckpt(self, n_bytes: int) -> float:
-        """Get T_ckpt(S) via linear interpolation."""
-        return self.interpolate_linear(n_bytes, self.ckpt_sorted)
+        """Get T_ckpt(S) via cost model."""
+        return self.cost_model.t_ckpt(n_bytes)
 
     def check_should_publish(
         self,
@@ -155,20 +149,20 @@ class ProfileInspector:
         lambda_: float = 1.0,
     ) -> tuple[bool, dict]:
         """
-        Check if checkpoint should be published under new profile-driven rule.
+        Check if checkpoint should be published under profile-driven rule.
 
         Rule: T_replay(L, u) > T_load(ΔS) + λ * T_ckpt(ΔS) + c0
 
         Returns:
             (should_publish, details)
         """
+        should_publish = self.cost_model.should_publish(L, u, S, delta_S, lambda_)
+
+        # Compute details for display
         replay_cost = self.t_prefill(L + u) - self.t_prefill(L)
         load_cost = self.t_load(S + delta_S) - self.t_load(S)
         ckpt_cost = self.t_ckpt(delta_S)
-
         total_cost = load_cost + lambda_ * ckpt_cost + self.c0
-
-        should_publish = replay_cost > total_cost
 
         return should_publish, {
             "L": L,

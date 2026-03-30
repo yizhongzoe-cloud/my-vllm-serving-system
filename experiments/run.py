@@ -928,6 +928,7 @@ def _build_server_cmd(config: dict, baseline_name: str, port: int) -> list[str]:
         ("ft_decode_throughput", "--ft-decode-throughput"),
         ("ft_load_bandwidth", "--ft-load-bandwidth"),
         ("ft_planning_horizon", "--ft-planning-horizon"),
+        ("ft_checkpoint_cost_profile", "--ft-checkpoint-cost-profile"),
     ]:
         val = config.get(cfg_key)
         if val is not None:

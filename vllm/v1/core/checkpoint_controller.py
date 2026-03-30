@@ -150,6 +150,7 @@ class CheckpointController:
         checkpoint_bandwidth_bytes_per_sec: float = 0.0,
         checkpoint_lambda: float = 1.0,
         default_kv_bytes_per_token: int = DEFAULT_KV_BYTES_PER_TOKEN,
+        cost_profile_path: str = "",
     ) -> None:
         self.config = config or CheckpointConfig()
         self._fixed_level = fixed_level
@@ -160,10 +161,23 @@ class CheckpointController:
         self._checkpoint_bandwidth = checkpoint_bandwidth_bytes_per_sec
         self._checkpoint_lambda = checkpoint_lambda
         self._default_kv_bytes_per_token = max(1, default_kv_bytes_per_token)
+
+        # Load profile-driven cost model if provided
+        self._cost_model = None
+        if cost_profile_path:
+            from vllm.v1.core.checkpoint_cost_model import CheckpointCostModel
+            self._cost_model = CheckpointCostModel(cost_profile_path)
+
+        # Economic policy is available if we have either:
+        # - A profile-driven cost model (preferred), OR
+        # - Linear model inputs (fallback)
         self._economic_policy_available = (
-            self._replay_throughput > 0
-            and self._load_bandwidth > 0
-            and self._checkpoint_bandwidth > 0
+            self._cost_model is not None
+            or (
+                self._replay_throughput > 0
+                and self._load_bandwidth > 0
+                and self._checkpoint_bandwidth > 0
+            )
         )
         self._warned_missing_economic_inputs = False
 
@@ -249,9 +263,10 @@ class CheckpointController:
         return (stable_full_tokens - published_tokens) >= required_tokens
 
     def _should_checkpoint_by_economic_policy(self, request: Request) -> bool:
-        estimate = self._estimate_online_publication(request)
-        stable_full_tokens = estimate.stable_full_tokens
+        stable_full_tokens = (request.num_computed_tokens // self._block_size) * self._block_size
         published_tokens = request.num_checkpointed_tokens
+
+        # Guard: only re-evaluate if a new stable block has been produced
         if stable_full_tokens <= published_tokens:
             self._last_evaluated_stable_tokens[request.request_id] = stable_full_tokens
             return False
@@ -262,7 +277,26 @@ class CheckpointController:
         )
         if stable_full_tokens <= last_evaluated_tokens:
             return False
+
         self._last_evaluated_stable_tokens[request.request_id] = stable_full_tokens
+
+        # Use profile-driven model if available
+        if self._cost_model is not None:
+            L = published_tokens
+            u = stable_full_tokens - L
+            S = request.last_checkpoint_size_bytes
+
+            # Estimate KV bytes per token from last checkpoint, fall back to default
+            if request.num_checkpointed_tokens > 0 and S > 0:
+                kv_bytes_per_token = S / request.num_checkpointed_tokens
+            else:
+                kv_bytes_per_token = self._default_kv_bytes_per_token
+
+            delta_S = int(u * kv_bytes_per_token)
+            return self._cost_model.should_publish(L, u, S, delta_S, self._checkpoint_lambda)
+
+        # Fall back to linear economic policy
+        estimate = self._estimate_online_publication(request)
         return estimate.should_publish
 
     def get_checkpoint_level(self, request: Request) -> int:
