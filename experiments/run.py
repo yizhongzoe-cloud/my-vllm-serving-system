@@ -40,9 +40,12 @@ import numpy as np
 import yaml
 
 # ---------------------------------------------------------------------------
-# Allow ``from experiments.run import ...`` when run as a module.
+# Allow ``python experiments/run.py`` to resolve the repo root package.
 # ---------------------------------------------------------------------------
 _THIS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _THIS_DIR.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from experiments.workloads import RequestSpec, generate_trace  # noqa: E402
 
@@ -93,6 +96,7 @@ class RequestResult:
     # Recovery (populated post-hoc from log data).
     detection_ms: float | None = None
     restore_time_ms: float | None = None
+    tokens_restored: int | None = None
     replay_tokens: int | None = None
     replay_time_ms: float | None = None
     initial_gpu: int | None = None
@@ -106,6 +110,73 @@ class RequestResult:
     ttft_violated: bool = False
     tpot_violated: bool = False
     gap_violated: bool = False
+    admitted: bool = True
+
+    def finalize_metrics(self) -> None:
+        """Compute derived metrics (tpot) and SLO violations in one place."""
+        if self.output_tokens > 1 and self.ttft_ms is not None and self.e2e_ms is not None:
+            self.tpot_ms = (self.e2e_ms - self.ttft_ms) / (self.output_tokens - 1)
+
+        self.ttft_violated = (
+            self.ttft_ms is not None
+            and self.ttft_slo_ms > 0
+            and self.ttft_ms > self.ttft_slo_ms
+        )
+        self.tpot_violated = (
+            self.tpot_ms is not None
+            and self.tpot_slo_ms > 0
+            and self.tpot_ms > self.tpot_slo_ms
+        )
+        self.gap_violated = (
+            self.affected_by_failure
+            and self.failure_gap_slo_ms > 0
+            and self.max_gap_ms > self.failure_gap_slo_ms
+        )
+
+    def to_csv_row(self) -> dict[str, Any]:
+        """Serialize to a dict suitable for csv.DictWriter."""
+        def _csv_val(v: Any) -> Any:
+            if v is None:
+                return ""
+            if isinstance(v, bool):
+                return "True" if v else "False"
+            return v
+
+        row = {
+            "request_id": self.request_id,
+            "server_request_id": self.server_request_id,
+            "arrival_time": self.arrival_time,
+            "prompt_len": self.prompt_len,
+            "expected_output_len": self.expected_output_len,
+            "send_time": self.send_time,
+            "end_time": self.end_time,
+            "ttft_ms": self.ttft_ms,
+            "e2e_ms": self.e2e_ms,
+            "output_tokens": self.output_tokens,
+            "tpot_ms": self.tpot_ms,
+            "max_gap_ms": self.max_gap_ms,
+            "success": self.success,
+            "error": self.error,
+            "admitted": self.admitted,
+            "was_rerouted": self.was_rerouted,
+            "affected_by_failure": self.affected_by_failure,
+            "ownership_known": self.ownership_known,
+            "detection_ms": self.detection_ms,
+            "restore_time_ms": self.restore_time_ms,
+            "tokens_restored": self.tokens_restored,
+            "replay_tokens": self.replay_tokens,
+            "replay_time_ms": self.replay_time_ms,
+            "initial_gpu": self.initial_gpu,
+            "resumed_gpu": self.resumed_gpu,
+            "checkpoint_class": self.checkpoint_class,
+            "ttft_slo_ms": self.ttft_slo_ms,
+            "tpot_slo_ms": self.tpot_slo_ms,
+            "failure_gap_slo_ms": self.failure_gap_slo_ms,
+            "ttft_violated": self.ttft_violated,
+            "tpot_violated": self.tpot_violated,
+            "gap_violated": self.gap_violated,
+        }
+        return {k: _csv_val(row[k]) for k in _CSV_FIELDS}
 
 
 @dataclass
@@ -131,6 +202,7 @@ class ExperimentMetadata:
     fault_injection_time: float | None = None
     failed_gpu_id: int | None = None
     active_requests_at_fault: int | None = None
+    in_flight_at_fault: list[str] = field(default_factory=list)
 
 
 # ===================================================================
@@ -143,7 +215,7 @@ class LogParser:
 
     # -- Reroute (ft_client human-readable line) --
     _REROUTE_RE = re.compile(
-        r"Request (\S+): re-routed (\d+).(\d+), "
+        r"Request (\S+): re-routed (\d+)→(\d+), "
         r"restored=(\d+) tokens, replay=(\d+) tokens, "
         r"est_gap=([\d.]+)ms, slo_met=(\w+)"
         r"(?:, wall_time=(\d+\.\d+))?"
@@ -179,10 +251,12 @@ class LogParser:
 
     # -- Legacy ft_client patterns (no FAULT_EVENT prefix) --
     _LEGACY_FAILOVER_START_RE = re.compile(
-        r"engine (\d+) declared FAILED"
+        r"(?:Centralized )?FT Client: engine (\d+) declared FAILED\. "
+        r"Starting failover for displaced requests\."
     )
     _LEGACY_FAILOVER_COMPLETE_RE = re.compile(
-        r"Re-routed (\d+)/(\d+) requests"
+        r"(?:Centralized )?FT Client: failover complete\. Re-routed "
+        r"(\d+)/(\d+) requests\."
     )
     _LEGACY_KV_RESTORE_RE = re.compile(
         r"KV restore for request (\S+): restored (\d+) tokens "
@@ -191,9 +265,6 @@ class LogParser:
 
     # -- Checkpoint class assignments --
     _CKPT_CLASSES_RE = re.compile(r"ckpt_classes:\s*(.*)")
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
     # -- Epoch / solver output --
     _EPOCH_CONVERGED_RE = re.compile(
@@ -209,7 +280,7 @@ if str(REPO_ROOT) not in sys.path:
         r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}),(\d{3})"
     )
     _TS_RE_SHORT = re.compile(
-        r"(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})"
+        r"(?<!\d)(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?!\d)"
     )
 
     @classmethod
@@ -451,6 +522,47 @@ if str(REPO_ROOT) not in sys.path:
 # Result enrichment
 # ===================================================================
 
+
+def _find_failed_replica(recoveries: list[dict]) -> int | None:
+    """Discover which replica failed from recovery events."""
+    for event in recoveries:
+        if event.get("type") == "failure_declared":
+            rid = event.get("replica_id")
+            if rid is not None:
+                return int(rid)
+    for event in recoveries:
+        if event.get("type") == "failover_start":
+            rid = event.get("replica_id")
+            if rid is not None:
+                return int(rid)
+    return None
+
+
+def _coarse_split_gap(
+    max_gap_ms: float,
+    tokens_restored: int,
+    replay_tokens: int,
+) -> tuple[float, float]:
+    """Split max_gap_ms proportionally by token counts when no precise
+    wall_time timestamps are available."""
+    if max_gap_ms <= 0:
+        return 0.0, 0.0
+
+    total_tokens = max(tokens_restored, 0) + max(replay_tokens, 0)
+    if total_tokens <= 0:
+        return 0.0, max_gap_ms
+
+    restore_ms = max_gap_ms * (max(tokens_restored, 0) / total_tokens)
+    replay_ms = max_gap_ms - restore_ms
+    if tokens_restored <= 0:
+        restore_ms = 0.0
+        replay_ms = max_gap_ms
+    if replay_tokens <= 0:
+        restore_ms = max_gap_ms
+        replay_ms = 0.0
+    return restore_ms, replay_ms
+
+
 def _enrich_results(
     results: list[RequestResult],
     recoveries: list[dict],
@@ -468,42 +580,36 @@ def _enrich_results(
     - ckpt_classes: solver-assigned checkpoint class per request
     """
 
-    def _normalize_server_request_id(request_id: str) -> str:
-        """Strip the stream/session hex suffix from a server request ID.
-
-        ``chatcmpl-req-00001-9feb7337`` → ``chatcmpl-req-00001``
-        """
-        if not request_id:
-            return request_id
-        parts = request_id.rsplit("-", 1)
-        if len(parts) == 2 and len(parts[1]) >= 4:
-            # Check if the last segment looks like a hex suffix.
-            try:
-                int(parts[1], 16)
-                return parts[0]
-            except ValueError:
-                pass
-        return request_id
+    # Discover failed replica from recovery events if not passed explicitly.
+    if failed_gpu_id is None:
+        failed_gpu_id = _find_failed_replica(recoveries)
 
     def _request_lookup_keys(request_id: str | None) -> set[str]:
         """Generate all ID variants for fuzzy matching between client-side
         ``req-NNNNN`` and server-side ``chatcmpl-req-NNNNN-suffix``."""
         if not request_id:
             return set()
-        candidates = {request_id}
-        normalized = _normalize_server_request_id(request_id)
-        if normalized != request_id:
-            candidates.add(normalized)
-        prefixes = ("chatcmpl-", "cmpl-", "resp-")
-        expanded: set[str] = set()
-        for c in candidates:
-            expanded.add(c)
-            for p in prefixes:
-                if c.startswith(p):
-                    expanded.add(c[len(p):])
+
+        keys = {request_id}
+        # Strip last segment for chatcmpl- IDs with a stream/session suffix.
+        if request_id.startswith("chatcmpl-") and request_id.count("-") >= 2:
+            keys.add(request_id.rsplit("-", 1)[0])
+
+        # Match chatcmpl-req-NNNNN-xxx patterns.
+        m = re.match(r"^(chatcmpl-req-\d+)(?:-.+)?$", request_id)
+        if m:
+            keys.add(m.group(1))
+            keys.add(m.group(1).removeprefix("chatcmpl-"))
+
+        # Expand with/without common prefixes.
+        for candidate in tuple(keys):
+            for prefix in ("chatcmpl-", "cmpl-", "resp-"):
+                if candidate.startswith(prefix):
+                    keys.add(candidate[len(prefix):])
                 else:
-                    expanded.add(p + c)
-        return expanded
+                    keys.add(f"{prefix}{candidate}")
+
+        return {key for key in keys if key}
 
     def _has_subsecond_precision(ts: float | None) -> bool:
         if ts is None:
@@ -578,6 +684,7 @@ def _enrich_results(
             r.ownership_known = True
             r.initial_gpu = rec["initial_gpu"]
             r.resumed_gpu = rec["resumed_gpu"]
+            r.tokens_restored = rec.get("tokens_restored")
             r.replay_tokens = rec["replay_tokens"]
 
             # Direct phase computation from wall_time timestamps.
@@ -710,8 +817,12 @@ def compute_metrics(
 
     completion_rate = completed / total if total > 0 else 0.0
 
-    # Goodput: completed output tokens / actual runtime.
-    total_output_tokens = sum(r.output_tokens for r in successful)
+    # Goodput: output tokens from requests satisfying SLO / actual runtime.
+    slo_satisfied = [
+        r for r in successful
+        if not (r.ttft_violated or r.tpot_violated or r.gap_violated)
+    ]
+    total_output_tokens = sum(r.output_tokens for r in slo_satisfied)
     goodput = total_output_tokens / actual_runtime if actual_runtime > 0 else 0.0
 
     # Percentile helpers.
@@ -736,11 +847,11 @@ def compute_metrics(
     )
     slo_violation_rate = violated / completed if completed > 0 else 0.0
 
-    # Recovery success rate.
-    rerouted = [r for r in results if r.was_rerouted]
-    rerouted_ok = [r for r in rerouted if r.success]
+    # Recovery success rate: fraction of failure-affected requests that succeeded.
+    affected = [r for r in results if r.affected_by_failure]
+    affected_ok = [r for r in affected if r.success]
     recovery_success_rate = (
-        len(rerouted_ok) / len(rerouted) if rerouted else 1.0
+        len(affected_ok) / len(affected) if affected else 1.0
     )
 
     # Time to stable.
@@ -752,7 +863,7 @@ def compute_metrics(
         "total_requests": total,
         "completed": completed,
         "failed": failed,
-        "admission_rate": total / total if total > 0 else 0.0,
+        "admission_rate": sum(1 for r in results if r.admitted) / total if total > 0 else 0.0,
         "completion_rate": completion_rate,
         "goodput": goodput,
         "ttft_p50_ms": pct(ttft_vals, 50),
@@ -991,6 +1102,7 @@ async def _send_single_request(
     port: int,
     timeout_sec: float,
     experiment_start: float,
+    model_name: str,
 ) -> RequestResult:
     """Send one request and collect streaming metrics."""
     result = RequestResult(
@@ -1011,15 +1123,24 @@ async def _send_single_request(
 
     url = f"http://localhost:{port}/v1/chat/completions"
     payload = {
-        "model": "default",
+        "model": model_name,
         "messages": [{"role": "user", "content": spec.prompt_text}],
         "max_tokens": spec.expected_output_len,
         "stream": True,
+        "stream_options": {"include_usage": True},
+        "return_token_ids": True,
+        "request_id": spec.request_id,
+        "ttft_slo_ms": spec.ttft_slo_ms,
+        "tpot_slo_ms": spec.tpot_slo_ms,
+        "failure_gap_slo_ms": spec.failure_gap_slo_ms,
+        "expected_output_len": spec.expected_output_len,
     }
 
     result.send_time = time.time()
     token_times: list[float] = []
-    output_tokens = 0
+    streamed_tokens = 0
+    completion_tokens: int | None = None
+    finish_reason: str | None = None
 
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_sec)
@@ -1027,6 +1148,7 @@ async def _send_single_request(
             if resp.status != 200:
                 result.error = f"HTTP {resp.status}"
                 result.end_time = time.time()
+                result.admitted = False
                 return result
 
             async for raw_line in resp.content:
@@ -1045,15 +1167,24 @@ async def _send_single_request(
                 if result.server_request_id is None:
                     result.server_request_id = data.get("id")
 
+                # Extract completion token count from usage.
+                usage = data.get("usage")
+                if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
+                    completion_tokens = int(usage["completion_tokens"])
+
                 choices = data.get("choices", [])
                 if not choices:
                     continue
                 delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if content:
+                # token_ids is at choice level, not in delta.
+                token_ids = choices[0].get("token_ids") or []
+                if token_ids:
                     now_tok = time.time()
                     token_times.append(now_tok)
-                    output_tokens += 1
+                    streamed_tokens += len(token_ids)
+
+                # finish_reason is at choice level, not in delta.
+                finish_reason = choices[0].get("finish_reason") or finish_reason
 
     except asyncio.TimeoutError:
         result.error = "timeout"
@@ -1063,7 +1194,8 @@ async def _send_single_request(
         result.error = str(e)
 
     result.end_time = time.time()
-    result.output_tokens = output_tokens
+    # Use completion_tokens from usage if available; fall back to streamed token count.
+    result.output_tokens = max(streamed_tokens, completion_tokens or 0)
     result.token_timestamps = token_times
 
     if token_times:
@@ -1071,13 +1203,13 @@ async def _send_single_request(
         result.last_token_time = token_times[-1]
         result.ttft_ms = (token_times[0] - result.send_time) * 1000
         result.e2e_ms = (result.end_time - result.send_time) * 1000
-        if output_tokens > 1:
+        if result.output_tokens > 1:
             result.tpot_ms = (
                 (token_times[-1] - token_times[0]) * 1000
-                / (output_tokens - 1)
+                / (result.output_tokens - 1)
             )
 
-        # Max gap.
+        # Max gap between token arrivals.
         max_gap = 0.0
         for i in range(1, len(token_times)):
             gap = (token_times[i] - token_times[i - 1]) * 1000
@@ -1085,7 +1217,24 @@ async def _send_single_request(
                 max_gap = gap
         result.max_gap_ms = max_gap
 
-    if result.error is None and output_tokens > 0:
+    # Mark success: no error and received tokens.
+    if result.error is None and result.output_tokens > 0:
+        result.success = True
+
+    # Mark admission: server accepted the request (HTTP 200 with valid response).
+    # Only mark as admitted if we received a valid response from server (got usage or tokens).
+    # HTTP errors, timeouts, and connection errors mean the server did not admit.
+    if result.error is None or result.error.startswith("HTTP"):
+        result.admitted = result.error is None
+    else:
+        # Other errors (timeout, transport errors) also mean not admitted.
+        result.admitted = False
+
+    # Handle finish_reason for admitted cases.
+    if finish_reason in {"abort", "error"}:
+        result.success = False
+        result.error = finish_reason
+    elif result.error is None:
         result.success = True
 
     # SLO violations.
@@ -1104,12 +1253,13 @@ async def _send_requests(
     port: int,
     timeout_sec: float,
     experiment_start: float,
+    model_name: str,
 ) -> list[RequestResult]:
     """Send all requests concurrently, respecting arrival times."""
     connector = aiohttp.TCPConnector(limit=200)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [
-            _send_single_request(session, spec, port, timeout_sec, experiment_start)
+            _send_single_request(session, spec, port, timeout_sec, experiment_start, model_name)
             for spec in trace
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1138,9 +1288,9 @@ async def _send_requests(
 _CSV_FIELDS = [
     "request_id", "server_request_id", "arrival_time", "prompt_len",
     "expected_output_len", "send_time", "end_time", "ttft_ms", "e2e_ms",
-    "output_tokens", "tpot_ms", "max_gap_ms", "success", "error",
+    "output_tokens", "tpot_ms", "max_gap_ms", "success", "error", "admitted",
     "was_rerouted", "affected_by_failure", "ownership_known",
-    "detection_ms", "restore_time_ms", "replay_tokens", "replay_time_ms",
+    "detection_ms", "restore_time_ms", "tokens_restored", "replay_tokens", "replay_time_ms",
     "initial_gpu", "resumed_gpu", "checkpoint_class",
     "ttft_slo_ms", "tpot_slo_ms", "failure_gap_slo_ms",
     "ttft_violated", "tpot_violated", "gap_violated",
@@ -1178,8 +1328,7 @@ def _save_results(
         writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
         writer.writeheader()
         for r in results:
-            row = asdict(r)
-            writer.writerow({k: row.get(k, "") for k in _CSV_FIELDS})
+            writer.writerow(r.to_csv_row())
 
     # epochs.csv
     with open(os.path.join(output_dir, "epochs.csv"), "w", newline="") as f:
@@ -1296,38 +1445,109 @@ def main():
             _stop_server(server_proc)
             sys.exit(1)
 
-        # Send requests.
+        # Send requests with optional fault injection.
         experiment_start = time.time()
-        request_results: list[RequestResult] = []
 
-        # Schedule fault injection in background.
-        fault_task = None
         if fault_time_sec is not None and args.fault != "none":
-            async def _run_experiment():
-                nonlocal request_results
-                loop = asyncio.get_event_loop()
+            # Run with fault injection: need to track in-flight requests.
+            async def _run_with_fault():
+                in_flight: set[str] = set()
 
-                # Schedule fault injection.
-                async def _delayed_fault():
+                async def send_one(session: aiohttp.ClientSession, spec: RequestSpec) -> tuple[str, RequestResult]:
+                    # Schedule at arrival time.
+                    sleep_sec = max(0.0, experiment_start + spec.arrival_time - time.time())
+                    if sleep_sec > 0:
+                        await asyncio.sleep(sleep_sec)
+
+                    in_flight.add(spec.request_id)
+                    try:
+                        result = await _send_single_request(
+                            session, spec, args.port, timeout_sec, experiment_start,
+                            config["model"],
+                        )
+                        return spec.request_id, result
+                    finally:
+                        in_flight.discard(spec.request_id)
+
+                async def inject_fault_delayed():
+                    nonlocal metadata
                     await asyncio.sleep(fault_time_sec)
-                    _inject_fault_at(server_proc, metadata, request_results)
+                    metadata.in_flight_at_fault = list(in_flight)
+                    metadata.fault_injection_time = time.time()
 
-                fault_coro = asyncio.ensure_future(_delayed_fault())
-                request_results = await _send_requests(
-                    trace, args.port, timeout_sec, experiment_start,
-                )
-                # Wait for fault task if it hasn't fired yet.
-                if not fault_coro.done():
-                    fault_coro.cancel()
-                return request_results
+                    # Kill first engine process.
+                    engines = _find_engine_pids(server_proc.pid)
+                    if engines:
+                        killed_idx, killed_pid = engines[0]
+                        try:
+                            os.kill(killed_pid, signal.SIGKILL)
+                            metadata.failed_gpu_id = killed_idx
+                            logger.info("Fault injected: engine=%d, pid=%d, in_flight=%d",
+                                      killed_idx, killed_pid, len(metadata.in_flight_at_fault))
+                        except OSError:
+                            pass
 
-            request_results = asyncio.run(_run_experiment())
+                # Use a single session for all requests (same as no-fault path).
+                async with aiohttp.ClientSession() as session:
+                    # Run requests and fault injection concurrently.
+                    send_tasks = [
+                        asyncio.create_task(send_one(session, spec)) for spec in trace
+                    ]
+                    fault_task = asyncio.create_task(inject_fault_delayed())
+
+                    results_by_id = {}
+                    for spec, task in zip(trace, send_tasks, strict=True):
+                        try:
+                            rid, result = await task
+                            results_by_id[spec.request_id] = result
+                        except Exception as e:
+                            results_by_id[spec.request_id] = RequestResult(
+                                request_id=spec.request_id,
+                                arrival_time=spec.arrival_time,
+                                prompt_len=spec.prompt_len,
+                                expected_output_len=spec.expected_output_len,
+                                error=str(e),
+                                end_time=time.time(),
+                            )
+
+                    await fault_task
+                    return [results_by_id[spec.request_id] for spec in trace]
+
+            request_results = asyncio.run(_run_with_fault())
         else:
-            request_results = asyncio.run(
-                _send_requests(trace, args.port, timeout_sec, experiment_start)
-            )
+            # No fault: just send requests.
+            async def _send_no_fault():
+                async with aiohttp.ClientSession() as session:
+                    send_tasks = [
+                        _send_single_request(session, spec, args.port, timeout_sec, experiment_start, config["model"])
+                        for spec in trace
+                    ]
+                    results = await asyncio.gather(*send_tasks, return_exceptions=True)
 
-        actual_runtime = time.time() - experiment_start
+                final = []
+                for spec, result in zip(trace, results, strict=True):
+                    if isinstance(result, RequestResult):
+                        final.append(result)
+                    else:
+                        final.append(RequestResult(
+                            request_id=spec.request_id,
+                            arrival_time=spec.arrival_time,
+                            prompt_len=spec.prompt_len,
+                            expected_output_len=spec.expected_output_len,
+                            error=str(result),
+                            end_time=time.time(),
+                        ))
+                return final
+
+            request_results = asyncio.run(_send_no_fault())
+
+        # Calculate actual runtime excluding warmup: from first to last request completion.
+        if request_results:
+            first_send = min(r.send_time for r in request_results if r.send_time > 0)
+            last_end = max(r.end_time for r in request_results if r.end_time is not None)
+            actual_runtime = last_end - first_send
+        else:
+            actual_runtime = time.time() - experiment_start
         metadata.actual_runtime_sec = actual_runtime
 
     finally:
@@ -1351,6 +1571,17 @@ def main():
         ckpt_classes=ckpt_classes,
         failed_gpu_id=metadata.failed_gpu_id,
     )
+
+    # Calculate active requests on failed GPU at fault time.
+    if metadata.failed_gpu_id is not None and metadata.in_flight_at_fault:
+        active_on_failed_gpu = sum(
+            1 for r in request_results
+            if r.request_id in metadata.in_flight_at_fault
+            and r.initial_gpu == metadata.failed_gpu_id
+        )
+        metadata.active_requests_at_fault = active_on_failed_gpu
+        logger.info("Active requests on failed GPU %d at fault time: %d",
+                    metadata.failed_gpu_id, active_on_failed_gpu)
 
     # Compute metrics.
     metrics = compute_metrics(
