@@ -197,6 +197,48 @@ class TestFTCoordinator(unittest.TestCase):
         self.assertEqual(state.engine_index, 0)
         self.assertTrue(state.is_alive)
         self.assertEqual(state.request_counts, [0, 0])
+        self.assertIsNone(state.last_message_time)
+
+    def test_ft_coordinator_skips_pre_heartbeat_timeout(self):
+        """Engines should not be declared failed before their first message."""
+        import msgspec.msgpack
+
+        from vllm.v1.engine import EngineCoreRequestType
+        from vllm.v1.engine.ft_coordinator import FTCoordinatorProc
+
+        class DummySocket:
+            def __init__(self):
+                self.messages = []
+                self.multipart_messages = []
+
+            def send(self, msg):
+                self.messages.append(msg)
+
+            def send_multipart(self, frames):
+                self.multipart_messages.append(frames)
+
+        coord = FTCoordinatorProc(engine_count=2, failure_timeout_sec=0.01)
+        front = DummySocket()
+        back = DummySocket()
+
+        coord._check_engine_health(front, back)
+
+        self.assertEqual(front.messages, [])
+        self.assertEqual(back.multipart_messages, [])
+        self.assertTrue(all(engine.is_alive for engine in coord.engines))
+
+        coord.engines[0].last_message_time = 0.0
+        coord._check_engine_health(front, back)
+
+        self.assertFalse(coord.engines[0].is_alive)
+        self.assertEqual(
+            msgspec.msgpack.decode(front.messages[0]),
+            ["ENGINE_FAILED", 0],
+        )
+        self.assertEqual(
+            back.multipart_messages[0][0],
+            EngineCoreRequestType.REPLICA_FAILED.value,
+        )
 
     def test_ft_client_routing(self):
         """Test that FTDPClient skips dead engines in routing."""

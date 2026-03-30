@@ -11,6 +11,7 @@ and orchestration logic using mock KV cache tensors.
 """
 
 import time
+from types import SimpleNamespace
 
 import torch
 import pytest
@@ -22,6 +23,8 @@ from vllm.v1.core.recovery_manager import RecoveryManager
 from vllm.v1.core.replica_manager import ReplicaManager
 from vllm.v1.core.request_pool import RequestPool, RequestPoolStatus
 from vllm.v1.core.sched.ft_scheduler import FaultTolerantScheduler, FTSchedulerConfig
+from vllm.v1.engine import FinishReason
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.request import Request, RequestStatus
 from vllm.sampling_params import SamplingParams
 from slo_benchmark.src.benchmark.fault_injection import (
@@ -227,6 +230,97 @@ class TestCheckpointController:
         # Generate more tokens past interval.
         req.append_output_token_ids(list(range(10)))
         assert ctrl.should_checkpoint(req)
+
+    def test_should_checkpoint_fixed_one_block(self):
+        ctrl = CheckpointController(fixed_blocks=1, block_size=16)
+        req = make_request("r-fixed-1", max_tokens=200, expected_output_len=200)
+
+        req.num_computed_tokens = 15
+        assert not ctrl.should_checkpoint(req)
+
+        req.num_computed_tokens = 16
+        assert ctrl.should_checkpoint(req)
+
+        ctrl.record_checkpoint(req)
+        assert not ctrl.should_checkpoint(req)
+
+        req.num_computed_tokens = 32
+        assert ctrl.should_checkpoint(req)
+
+    def test_should_checkpoint_fixed_ten_blocks(self):
+        ctrl = CheckpointController(fixed_blocks=10, block_size=16)
+        req = make_request("r-fixed-10", max_tokens=400, expected_output_len=400)
+
+        req.num_computed_tokens = 16 * 9
+        assert not ctrl.should_checkpoint(req)
+
+        req.num_computed_tokens = 16 * 10
+        assert ctrl.should_checkpoint(req)
+
+        ctrl.record_checkpoint(req)
+        assert not ctrl.should_checkpoint(req)
+
+        req.num_computed_tokens = 16 * 19
+        assert not ctrl.should_checkpoint(req)
+
+        req.num_computed_tokens = 16 * 20
+        assert ctrl.should_checkpoint(req)
+
+
+class TestDPLBGracefulDegradation:
+    def _make_client(self) -> DPLBAsyncMPClient:
+        client = DPLBAsyncMPClient.__new__(DPLBAsyncMPClient)
+        client.client_count = 1
+        client.eng_start_index = 0
+        client.core_engines = [b"\x00\x00", b"\x01\x00"]
+        client.engine_ranks_managed = [0, 1]
+        client.lb_engines = [[2, 2], [0, 0]]
+        client.reqs_in_flight = {}
+        client.outputs_queue = SimpleNamespace(put_nowait=lambda _outputs: None)
+        client.resources = SimpleNamespace(engine_dead=False)
+        DPLBAsyncMPClient._rebuild_engine_maps(client)
+        return client
+
+    def test_routing_skips_dead_engine(self):
+        client = self._make_client()
+        client._engine_alive[client.core_engines[0]] = False
+
+        request = SimpleNamespace(request_id="req-new", data_parallel_rank=None)
+        chosen = DPLBAsyncMPClient.get_core_engine_for_request(client, request)
+
+        assert chosen == client.core_engines[1]
+        assert client.reqs_in_flight["req-new"] == client.core_engines[1]
+
+    def test_pinned_dead_engine_falls_back_to_live_engine(self):
+        client = self._make_client()
+        client._engine_alive[client.core_engines[0]] = False
+
+        request = SimpleNamespace(request_id="req-pinned", data_parallel_rank=0)
+        chosen = DPLBAsyncMPClient.get_core_engine_for_request(client, request)
+
+        assert chosen == client.core_engines[1]
+        assert client.reqs_in_flight["req-pinned"] == client.core_engines[1]
+
+    def test_failure_aborts_only_displaced_requests(self):
+        client = self._make_client()
+        captured = []
+        client.outputs_queue = SimpleNamespace(
+            put_nowait=lambda outputs: captured.append(outputs)
+        )
+        dead_engine, live_engine = client.core_engines
+        client.reqs_in_flight = {
+            "req-dead": dead_engine,
+            "req-live": live_engine,
+        }
+
+        client._handle_engine_failure(0)
+
+        assert not client._engine_alive[dead_engine]
+        assert client._engine_alive[live_engine]
+        assert client.reqs_in_flight == {"req-live": live_engine}
+        assert len(captured) == 1
+        assert [out.request_id for out in captured[0].outputs] == ["req-dead"]
+        assert captured[0].outputs[0].finish_reason == FinishReason.ERROR
 
 
 class TestFailureDetector:
@@ -452,6 +546,56 @@ class TestFaultTolerantScheduler:
 
         stats = scheduler.get_stats()
         assert stats["request_pool"]["admitted"] == 0
+
+    def test_fallback_checkpoint_saves_only_stable_full_block_prefix(self):
+        config = FTSchedulerConfig(
+            max_gpu_failures=1,
+            enable_checkpointing=True,
+            fixed_checkpoint_blocks=1,
+            block_size=16,
+        )
+        scheduler = FaultTolerantScheduler(config)
+
+        req = make_request("r-fallback", max_tokens=200, expected_output_len=200)
+        req.num_computed_tokens = 39  # 2 full blocks + 1 partial frontier block
+        req.append_output_token_ids(list(range(39)))
+
+        captured = {}
+
+        def _save_checkpoint(
+            request_id,
+            gpu_kv_caches,
+            block_ids,
+            num_tokens,
+            async_copy=True,
+        ):
+            captured["request_id"] = request_id
+            captured["block_ids"] = list(block_ids)
+            captured["num_tokens"] = num_tokens
+            return SimpleNamespace(size_bytes=4096)
+
+        scheduler.checkpoint_pool.save_checkpoint = _save_checkpoint
+
+        kv_cache_manager = SimpleNamespace(
+            get_block_ids=lambda req_id: ([11, 12, 13],)
+            if req_id == "r-fallback" else ([],),
+        )
+
+        checkpointed = scheduler.run_checkpoint_step(
+            [req],
+            gpu_kv_caches=[object()],
+            kv_cache_manager=kv_cache_manager,
+        )
+
+        assert checkpointed == ["r-fallback"]
+        assert captured == {
+            "request_id": "r-fallback",
+            "block_ids": [11, 12],
+            "num_tokens": 32,
+        }
+        assert req.num_checkpointed_tokens == 32
+        assert req.last_checkpoint_size_bytes == 4096
+        assert scheduler.get_checkpoint_metadata("r-fallback") == (32, 4096)
 
 
 class TestFaultInjection:

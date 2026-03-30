@@ -1,25 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Fault-Tolerant Request Scheduler.
+"""Fault-tolerant request scheduler.
 
-Implements the joint optimization of admission, routing, checkpoint level,
-and failover decisions described in the paper. Extends the existing
-SLO-aware scheduler with:
-
-1. **Admission control (y_j)**: Only admit requests when the system can
-   still satisfy all constraints under up to k GPU failures.
-2. **Initial routing (x_{j,r})**: Assign requests to replicas considering
-   load balance and failure robustness.
-3. **Checkpoint level (ℓ_j)**: Assign adaptive checkpoint levels based on
-   generation progress and failover-gap SLO.
-4. **Failover re-routing (x̃_{j,r}(ω))**: When failures occur, re-assign
-   displaced requests to surviving replicas via RecoveryManager.
-
-The objective is to maximize output-token goodput: max ∑ G_j * y_j.
-When multiple pending requests compete for admission, the scheduler
-prefers requests with larger expected output (G_j), as they contribute
-more to total goodput.
+The scheduler coordinates admission, routing, online checkpointing, and
+failover recovery. Checkpoint publication is now a pure runtime policy:
+each engine evaluates whether publishing the current unpublished stable
+prefix is worthwhile, while the scheduler handles admission/routing and
+recovery orchestration.
 """
 
 import time
@@ -58,6 +46,22 @@ class FTSchedulerConfig:
     checkpoint_config: CheckpointConfig | None = None
     # Whether to enable checkpointing at all.
     enable_checkpointing: bool = True
+    # Deprecated legacy fixed checkpoint level (0/1/2).
+    fixed_checkpoint_level: int = -1
+    # Fixed checkpoint cadence in stable full blocks. 0 = online policy.
+    fixed_checkpoint_blocks: int = 0
+    # Stable KV block size in tokens.
+    block_size: int = 1
+    # Replay throughput estimate (tokens/sec) for the online checkpoint rule.
+    replay_throughput_tokens_per_sec: float = 0.0
+    # Host→GPU load bandwidth (bytes/sec) for restore cost.
+    load_bandwidth_bytes_per_sec: float = 0.0
+    # GPU→Host checkpoint bandwidth (bytes/sec) for publish cost.
+    checkpoint_bandwidth_bytes_per_sec: float = 0.0
+    # λ weight on steady-state checkpoint copy overhead.
+    checkpoint_lambda: float = 1.0
+    # Estimated KV bytes per token used by the controller/cost model.
+    kv_bytes_per_token: int = 8192
 
 
 class FaultTolerantScheduler:
@@ -73,13 +77,17 @@ class FaultTolerantScheduler:
     - RecoveryManager: failover orchestration.
     """
 
-    def __init__(self, config: FTSchedulerConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: FTSchedulerConfig | None = None,
+        dp_size: int = 1,
+    ) -> None:
         self.config = config or FTSchedulerConfig()
 
         # Initialize all FT components.
         self.request_pool = RequestPool()
 
-        self.replica_manager = ReplicaManager()
+        self.replica_manager = ReplicaManager(dp_size=dp_size)
 
         self.failure_detector = FailureDetector(
             heartbeat_interval_sec=self.config.heartbeat_interval_sec,
@@ -87,7 +95,21 @@ class FaultTolerantScheduler:
         )
 
         self.checkpoint_controller = CheckpointController(
-            config=self.config.checkpoint_config
+            config=self.config.checkpoint_config,
+            fixed_level=self.config.fixed_checkpoint_level,
+            fixed_blocks=self.config.fixed_checkpoint_blocks,
+            block_size=self.config.block_size,
+            replay_throughput_tokens_per_sec=(
+                self.config.replay_throughput_tokens_per_sec
+            ),
+            load_bandwidth_bytes_per_sec=(
+                self.config.load_bandwidth_bytes_per_sec
+            ),
+            checkpoint_bandwidth_bytes_per_sec=(
+                self.config.checkpoint_bandwidth_bytes_per_sec
+            ),
+            checkpoint_lambda=self.config.checkpoint_lambda,
+            default_kv_bytes_per_token=self.config.kv_bytes_per_token,
         )
 
         self.checkpoint_pool = KVCheckpointPool(
@@ -268,7 +290,7 @@ class FaultTolerantScheduler:
         self.request_pool.admit_request(request.request_id, replica_id)
         self.replica_manager.assign_request(request, replica_id)
 
-        # Assign initial checkpoint level.
+        # Assign initial coarse checkpoint stage for telemetry/costing.
         level = self.checkpoint_controller.get_checkpoint_level(request)
         request.checkpoint_level = level
 
@@ -292,8 +314,9 @@ class FaultTolerantScheduler:
         """Called each scheduling step to handle adaptive checkpointing.
 
         For each running request:
-        1. Update its checkpoint level based on generation progress.
-        2. If it's time to checkpoint, trigger a save to host memory.
+        1. Update its coarse checkpoint stage for telemetry/costing.
+        2. Use the runtime controller to decide whether to publish a new
+           incremental checkpoint now.
 
         Caches checkpoint decisions so that get_checkpoint_requests()
         can retrieve them without re-evaluating.
@@ -319,7 +342,7 @@ class FaultTolerantScheduler:
 
         checkpointed_ids = []
         for request in to_checkpoint:
-            # Always update checkpoint level decisions regardless of
+            # Always update coarse checkpoint stage regardless of
             # whether GPU tensors are available.
             level = self.checkpoint_controller.get_checkpoint_level(request)
             request.checkpoint_level = level
@@ -327,17 +350,26 @@ class FaultTolerantScheduler:
             # Actual GPU→CPU copy requires both the KV cache tensors
             # (on the GPU workers) and the kv_cache_manager (for block IDs).
             if gpu_kv_caches is not None and kv_cache_manager is not None:
-                block_ids = self._get_request_kv_block_ids(request, kv_cache_manager)
+                block_ids, covered_tokens = self._get_request_stable_checkpoint_view(
+                    request,
+                    kv_cache_manager,
+                )
                 if block_ids:
                     entry = self.checkpoint_pool.save_checkpoint(
                         request_id=request.request_id,
                         gpu_kv_caches=gpu_kv_caches,
                         block_ids=block_ids,
-                        num_tokens=request.num_computed_tokens,
+                        num_tokens=covered_tokens,
                         async_copy=True,
                     )
                     if entry is not None:
                         self.checkpoint_controller.record_checkpoint(request)
+                        request.num_checkpointed_tokens = covered_tokens
+                        request.last_checkpoint_size_bytes = entry.size_bytes
+                        self._checkpoint_metadata[request.request_id] = (
+                            covered_tokens,
+                            entry.size_bytes,
+                        )
                         checkpointed_ids.append(request.request_id)
 
         return checkpointed_ids
@@ -359,14 +391,56 @@ class FaultTolerantScheduler:
     ) -> list[int]:
         """Extract block IDs for a request from the KV cache manager."""
         try:
+            all_ids = kv_cache_manager.get_block_ids(request.request_id)
+            if all_ids:
+                return list(all_ids[0])  # First KV cache group.
+        except (AttributeError, KeyError, TypeError):
+            pass
+
+        # Older/specialized KV managers may only expose raw req_to_blocks.
+        try:
             blocks = kv_cache_manager.req_to_blocks.get(request.request_id)
-            if blocks is not None:
-                all_ids = blocks.get_block_ids()
-                if all_ids:
-                    return list(all_ids[0])  # First KV cache group.
-        except (AttributeError, KeyError):
+            if blocks:
+                return [blk.block_id for blk in blocks]
+        except (AttributeError, KeyError, TypeError):
             pass
         return []
+
+    def _get_request_stable_checkpoint_view(
+        self,
+        request: Request,
+        kv_cache_manager: "KVCacheManager",
+    ) -> tuple[list[int], int]:
+        """Return the stable full-block prefix eligible for fallback save.
+
+        The scheduler-local fallback path must mirror the worker/shared
+        incremental checkpoint semantics: only the stable full-block prefix is
+        published, and frontier/partial blocks are left for replay.
+        """
+        stable_full_tokens = max(
+            0,
+            (request.num_computed_tokens // self.config.block_size)
+            * self.config.block_size,
+        )
+        if stable_full_tokens <= 0:
+            return [], 0
+
+        stable_full_blocks = stable_full_tokens // self.config.block_size
+        block_ids = self._get_request_kv_block_ids(request, kv_cache_manager)
+        if not block_ids:
+            return [], 0
+
+        if len(block_ids) < stable_full_blocks:
+            logger.warning(
+                "Request %s: expected %d stable KV blocks but found only %d; "
+                "skipping scheduler-local fallback checkpoint this step",
+                request.request_id,
+                stable_full_blocks,
+                len(block_ids),
+            )
+            return [], 0
+
+        return block_ids[:stable_full_blocks], stable_full_tokens
 
     # ---- Checkpoint metadata (synced from EngineCore workers) ----
 
@@ -391,6 +465,7 @@ class FaultTolerantScheduler:
             request = self.request_pool.get_request(req_id)
             if request is not None:
                 request.num_checkpointed_tokens = num_tokens
+                request.last_checkpoint_size_bytes = size_bytes
 
     def get_checkpoint_metadata(
         self, request_id: str

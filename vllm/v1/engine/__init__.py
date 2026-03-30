@@ -86,6 +86,17 @@ class EngineCoreRequest(
     # from the shared checkpoint store instead of recomputing from scratch.
     num_checkpointed_tokens: int = 0
 
+    # FT: whether this request was rerouted from a failed engine.
+    # Set explicitly by ft_client during failover — includes replay-only
+    # requests where num_checkpointed_tokens == 0.
+    is_rerouted: bool = False
+
+    # FT: output tokens generated before failover.  Populated by
+    # ft_client during re-routing so the new engine can restore
+    # sampling penalties (frequency/repetition/presence) and
+    # bad-words matching that depend on output history.
+    previous_output_token_ids: list[int] | None = None
+
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
 
@@ -175,6 +186,52 @@ class UtilityOutput(
     result: UtilityResult | None = None
 
 
+class RequestSnapshot(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """Lightweight snapshot of one active/pending request for centralized solver.
+
+    Sent by each EngineCore so the client-side Benders solver can build
+    a global cost table without needing full Request objects.
+    """
+
+    request_id: str
+    prompt_len: int
+    generation_len: int  # G_j = expected output length
+    num_computed_tokens: int
+    num_output_tokens: int
+    num_checkpointed_tokens: int = 0
+    checkpoint_size_bytes: int = 0
+    checkpoint_level: int = 0
+    assigned_replica_id: int | None = None
+    ttft_slo_ms: float | None = None
+    tpot_slo_ms: float | None = None
+    failure_gap_slo_ms: float | None = None
+
+
+class ReplicaSnapshot(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """Per-GPU/replica state snapshot for the centralized solver.
+
+    Sent alongside RequestSnapshots so the solver has a global view
+    of system resources, not just requests.
+    """
+
+    replica_id: int
+    is_healthy: bool = True
+    num_waiting_reqs: int = 0
+    num_running_reqs: int = 0
+    gpu_kv_cache_usage: float = 0.0  # [0, 1]
+    available_kv_blocks: int = 0
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -200,6 +257,16 @@ class EngineCoreOutputs(
     # checkpoint progress for failover restore.
     checkpoint_updates: dict[str, int] | None = None
 
+    # FT Benders: solver-planned recovery targets for this replica's requests.
+    # Maps request_id -> target_replica_index for failover routing.
+    # Updated each solve epoch by BendersFTSchedulerImpl.
+    recovery_targets: dict[str, int] | None = None
+
+    # FT Benders centralized: per-engine request and replica snapshots
+    # for the client-side global solver.
+    active_request_snapshots: list[RequestSnapshot] | None = None
+    replica_snapshot: ReplicaSnapshot | None = None
+
     # In DP case, used to signal that the current wave of requests
     # has finished and the engines are paused.
     wave_complete: int | None = None
@@ -224,6 +291,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Coordinator → engine: a remote replica has failed.
+    REPLICA_FAILED = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

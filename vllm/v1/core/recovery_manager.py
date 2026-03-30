@@ -17,11 +17,12 @@ The key constraint is the failover-gap SLO:
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.v1.core.checkpoint_controller import CheckpointController
-from vllm.v1.core.failure_detector import FailureDetector
+from vllm.v1.core.failure_detector import FailureDetector, ReplicaStatus
 from vllm.v1.core.kv_checkpoint_pool import KVCheckpointPool
 from vllm.v1.core.replica_manager import ReplicaManager
 from vllm.v1.core.request_pool import RequestPool
@@ -89,11 +90,19 @@ class RecoveryManager:
         # EngineCore worker reports.
         self._checkpoint_metadata = checkpoint_metadata
 
+        # Optional callback for solver-planned recovery targets.
+        # Signature: (failed_replica_id, request_id) -> target_replica_id | None
+        # Set by BendersFTSchedulerImpl to provide pre-computed recovery plans.
+        self._solver_recovery_lookup: (
+            Callable[[int, str], int | None] | None
+        ) = None
+
         # Register ourselves as a failure callback.
         self.failure_detector.register_callback(self._on_failure)
 
         # History of failover events.
         self._failover_history: list[FailoverReport] = []
+        self._active_recovery_threads: dict[int, threading.Thread] = {}
 
     def _on_failure(self, failed_replica_id: int) -> None:
         """Callback triggered when FailureDetector reports a GPU failure.
@@ -109,6 +118,7 @@ class RecoveryManager:
             daemon=True,
             name=f"recovery-replica-{failed_replica_id}",
         )
+        self._active_recovery_threads[failed_replica_id] = thread
         thread.start()
 
     def _handle_failure_thread(self, failed_replica_id: int) -> None:
@@ -134,6 +144,8 @@ class RecoveryManager:
                 "of replica %d",
                 failed_replica_id,
             )
+        finally:
+            self._active_recovery_threads.pop(failed_replica_id, None)
 
     def handle_failure(self, failed_replica_id: int) -> FailoverReport:
         """Execute the full failover process for a failed replica.
@@ -208,9 +220,29 @@ class RecoveryManager:
         e. Re-admit the request to the target replica.
         """
         # Step a: Find target replica.
-        target_replica_id = self.replica_manager.route_request_for_failover(
-            request, exclude_replica_ids={failed_replica_id}
-        )
+        # Prefer solver-planned recovery target if available (Benders policy).
+        target_replica_id = None
+        if self._solver_recovery_lookup is not None:
+            solver_target = self._solver_recovery_lookup(
+                failed_replica_id, request.request_id
+            )
+            if solver_target is not None:
+                # Verify the solver target is still healthy.
+                replica_info = self.replica_manager.get_replica(solver_target)
+                if (replica_info is not None
+                        and replica_info.status == ReplicaStatus.HEALTHY):
+                    target_replica_id = solver_target
+                    logger.debug(
+                        "Using solver-planned recovery: %s → replica %d",
+                        request.request_id,
+                        solver_target,
+                    )
+
+        # Fall back to greedy least-loaded routing.
+        if target_replica_id is None:
+            target_replica_id = self.replica_manager.route_request_for_failover(
+                request, exclude_replica_ids={failed_replica_id}
+            )
 
         if target_replica_id is None:
             logger.warning(
@@ -346,6 +378,11 @@ class RecoveryManager:
 
     @property
     def failover_history(self) -> list[FailoverReport]:
+        # Best-effort drain of in-flight recovery callbacks so callers that
+        # immediately inspect history after report_failure() (common in unit
+        # tests and debugging code) observe recently completed failovers.
+        for thread in list(self._active_recovery_threads.values()):
+            thread.join(timeout=0.1)
         return self._failover_history
 
     def get_stats(self) -> dict:

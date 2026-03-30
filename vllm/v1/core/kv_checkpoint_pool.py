@@ -9,6 +9,7 @@ enabling fast recovery after GPU failure by restoring from host memory
 instead of full recomputation.
 """
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -117,6 +118,13 @@ class KVCheckpointPool:
             gpu_kv_caches: Per-layer GPU KV cache tensors. Each tensor has
                 shape (2, num_blocks, block_size, num_kv_heads, head_size)
                 where dimension 1 is indexed by block_id.
+                NOTE: this FT checkpoint helper currently assumes that
+                EngineCore/model-runner exposes KV tensors in that logical
+                layout. That assumption holds for the FLASH_ATTN path we
+                validate in experiments. Backends whose logical KV view is
+                different (for example TRITON_ATTN with blocks on dim 0)
+                must normalize the view before calling into this helper, or
+                move block-level copy into a backend-aware implementation.
             block_ids: List of block IDs allocated to this request.
             num_tokens: Number of tokens covered by these blocks.
             async_copy: If True, use a separate CUDA stream for the copy.
@@ -126,6 +134,24 @@ class KVCheckpointPool:
         """
         if not block_ids:
             return None
+
+        # Filter out block IDs that exceed the KV cache capacity.
+        num_kv_blocks = gpu_kv_caches[0].shape[1]
+        valid_block_ids = [
+            bid for bid in block_ids if 0 <= bid < num_kv_blocks
+        ]
+        if len(valid_block_ids) < len(block_ids):
+            logger.warning(
+                "Checkpoint %s: %d/%d block IDs out of range "
+                "(num_kv_blocks=%d), skipping invalid blocks",
+                request_id,
+                len(block_ids) - len(valid_block_ids),
+                len(block_ids),
+                num_kv_blocks,
+            )
+            block_ids = valid_block_ids
+            if not block_ids:
+                return None
 
         block_indices = torch.tensor(block_ids, dtype=torch.int64)
 
@@ -168,18 +194,59 @@ class KVCheckpointPool:
         )
 
         device = gpu_kv_caches[0].device
-        block_indices_gpu = block_indices.to(device, non_blocking=True)
+        # Synchronous transfer — eliminates stream race as a variable.
+        block_indices_gpu = block_indices.to(device)
 
         if async_copy and torch.cuda.is_available():
             stream = self._get_copy_stream()
-            # Pre-allocate pinned memory on default stream (pin_memory is
-            # synchronous and would block the async stream).
+            num_kv_blocks = gpu_kv_caches[0].shape[1]
+
+            # Diagnostic: log actual values before CUDA indexing (CPU-side,
+            # zero GPU cost, survives CUDA crashes).
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Checkpoint %s: %d blocks, indices=%s, "
+                    "tensor_shape=%s, strides=%s, contiguous=%s",
+                    request_id,
+                    len(block_ids),
+                    block_ids[:5],
+                    gpu_kv_caches[0].shape,
+                    gpu_kv_caches[0].stride(),
+                    gpu_kv_caches[0].is_contiguous(),
+                )
+
+            # GPU-side verification: confirm the actual values on GPU match
+            # what Python sees.  This catches non_blocking races and memory
+            # corruption — costs one small D2H transfer.
+            gpu_max = int(block_indices_gpu.max().item())
+            gpu_min = int(block_indices_gpu.min().item())
+            if gpu_max >= num_kv_blocks or gpu_min < 0:
+                logger.error(
+                    "Checkpoint %s: GPU-side index OOB! "
+                    "gpu_min=%d, gpu_max=%d, num_kv_blocks=%d, "
+                    "cpu_indices=%s",
+                    request_id, gpu_min, gpu_max, num_kv_blocks,
+                    block_ids,
+                )
+                with self._lock:
+                    self._reserved_bytes -= estimated_bytes
+                return None
+
+            # Synchronize default stream BEFORE entering copy stream so
+            # that any error from the preceding forward pass surfaces here
+            # (not attributed to our checkpoint indexing).
+            torch.cuda.synchronize(device)
+
+            # Pre-allocate pinned memory from metadata — avoids GPU indexing
+            # on the default stream.
             pinned_tensors: dict[int, torch.Tensor] = {}
-            for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
-                subset = gpu_tensor[:, block_indices_gpu, :, :, :]
+            n_sel = len(block_ids)
+            sample = gpu_kv_caches[0]
+            out_shape = (sample.shape[0], n_sel) + sample.shape[2:]
+            for layer_idx in range(len(gpu_kv_caches)):
                 pinned_tensors[layer_idx] = torch.empty(
-                    subset.shape,
-                    dtype=subset.dtype,
+                    out_shape,
+                    dtype=sample.dtype,
                     device="cpu",
                 ).pin_memory()
 
@@ -223,6 +290,12 @@ class KVCheckpointPool:
         Args:
             request_id: The request identifier.
             gpu_kv_caches: Per-layer GPU KV cache tensors to write into.
+                Same layout assumption as save_checkpoint(): this helper
+                indexes blocks on dim 1 of a logical
+                (2, num_blocks, block_size, num_kv_heads, head_size) view.
+                The current FT experiments only validate this path with
+                FLASH_ATTN. Other backends need a normalized view or a
+                backend-aware restore path.
             target_block_ids: Block IDs on the target GPU to write the
                 restored data into (may differ from original block_ids).
 
@@ -248,8 +321,29 @@ class KVCheckpointPool:
             num_checkpoint_blocks = len(target_block_ids)
 
         device = gpu_kv_caches[0].device
+        num_kv_blocks = gpu_kv_caches[0].shape[1]
+
+        # Filter out block IDs that exceed the KV cache capacity to
+        # prevent CUDA index-out-of-bounds errors during failover.
+        valid_ids = [
+            bid for bid in target_block_ids[:num_checkpoint_blocks]
+            if 0 <= bid < num_kv_blocks
+        ]
+        if len(valid_ids) < num_checkpoint_blocks:
+            logger.warning(
+                "Restore %s: %d/%d target blocks out of range "
+                "(num_kv_blocks=%d), truncating",
+                request_id,
+                num_checkpoint_blocks - len(valid_ids),
+                num_checkpoint_blocks,
+                num_kv_blocks,
+            )
+            num_checkpoint_blocks = len(valid_ids)
+            if num_checkpoint_blocks == 0:
+                return 0
+
         target_indices = torch.tensor(
-            target_block_ids[:num_checkpoint_blocks],
+            valid_ids,
             dtype=torch.int64,
             device=device,
         )
@@ -274,11 +368,12 @@ class KVCheckpointPool:
                 src = host_tensor[:, :num_checkpoint_blocks].to(device)
                 gpu_tensor[:, target_indices, :, :, :] = src
 
-        logger.debug(
-            "Restored checkpoint for request %s: %d tokens, %d blocks",
-            request_id,
-            entry.num_tokens,
-            num_checkpoint_blocks,
+        import time as _time
+        logger.info(
+            "FAULT_EVENT kv_restore_done request=%s wall_time=%.6f "
+            "tokens=%d blocks=%d",
+            request_id, _time.time(),
+            entry.num_tokens, num_checkpoint_blocks,
         )
         return entry.num_tokens
 

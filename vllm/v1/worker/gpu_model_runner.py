@@ -4,6 +4,8 @@
 import functools
 import gc
 import itertools
+import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -191,6 +193,56 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+@dataclass
+class SharedCheckpointManifest:
+    req_id: str
+    generation: int
+    covered_tokens: int
+    num_blocks: int
+    block_map: dict[int, tuple[str, int]]
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "req_id": self.req_id,
+            "generation": self.generation,
+            "covered_tokens": self.covered_tokens,
+            "num_blocks": self.num_blocks,
+            "block_map": {
+                str(logical_idx): [chunk_filename, chunk_slot_idx]
+                for logical_idx, (chunk_filename, chunk_slot_idx)
+                in self.block_map.items()
+            },
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any]) -> "SharedCheckpointManifest":
+        raw_block_map = data.get("block_map", {})
+        block_map: dict[int, tuple[str, int]] = {}
+        for logical_idx, location in raw_block_map.items():
+            if not isinstance(location, (list, tuple)) or len(location) != 2:
+                raise ValueError(
+                    f"Invalid chunk location for logical block {logical_idx}: "
+                    f"{location!r}"
+                )
+            block_map[int(logical_idx)] = (str(location[0]), int(location[1]))
+        return cls(
+            req_id=str(data["req_id"]),
+            generation=int(data["generation"]),
+            covered_tokens=int(data["covered_tokens"]),
+            num_blocks=int(data["num_blocks"]),
+            block_map=block_map,
+        )
+
+
+@dataclass
+class SharedCheckpointState:
+    current_generation: int
+    published_full_blocks: int
+    request_dir: str
+    latest_manifest_filename: str | None
+    block_map: dict[int, tuple[str, int]]
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -410,6 +462,10 @@ class GPUModelRunner(
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+
+        # Cross-engine shared checkpoint state keyed by request_id.
+        self._shared_ckpt_states: dict[str, SharedCheckpointState] = {}
+        self._shared_ckpt_dir_swept = False
 
         self.eplb_state: EplbState | None = None
         """
@@ -865,6 +921,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self._shared_ckpt_states.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -931,6 +988,11 @@ class GPUModelRunner(
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
+            # FT: restore previous output tokens for penalty/bad-words
+            # after failover.  These are tokens generated before the
+            # failure; the new engine needs them for correct sampling.
+            prev_out = new_req_data.previous_output_token_ids or []
+
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
@@ -941,7 +1003,7 @@ class GPUModelRunner(
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
+                output_token_ids=prev_out,
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
@@ -6075,29 +6137,483 @@ class GPUModelRunner(
         tp_size = get_tp_group().world_size
         return pp_rank * tp_size + tp_rank
 
-    def _shared_ckpt_path(self, request_id: str) -> str:
-        """Build the shared checkpoint path for this worker and request.
+    def _shared_rank_tag(self) -> str:
+        return f"rank{self._get_worker_rank()}"
 
-        In multi-worker (TP/PP) setups, each worker holds a different
-        KV shard.  We include the worker rank in the filename so that
-        shards don't overwrite each other.
-        """
-        import os
-        rank = self._get_worker_rank()
+    def _shared_request_dir(self, request_id: str) -> str:
+        return os.path.join(self._SHARED_CKPT_DIR, request_id)
+
+    def _shared_latest_path(self, request_id: str) -> str:
         return os.path.join(
-            self._SHARED_CKPT_DIR, f"{request_id}_rank{rank}.pt"
+            self._shared_request_dir(request_id),
+            f"latest_{self._shared_rank_tag()}",
+        )
+
+    def _shared_manifest_filename(self, generation: int) -> str:
+        return f"manifest_{self._shared_rank_tag()}_{generation}.json"
+
+    def _shared_manifest_path(self, request_id: str, generation: int) -> str:
+        return os.path.join(
+            self._shared_request_dir(request_id),
+            self._shared_manifest_filename(generation),
+        )
+
+    def _shared_chunk_filename(self, generation: int) -> str:
+        return f"chunk_{self._shared_rank_tag()}_{generation}.pt"
+
+    def _shared_chunk_path(self, request_id: str, generation: int) -> str:
+        return os.path.join(
+            self._shared_request_dir(request_id),
+            self._shared_chunk_filename(generation),
         )
 
     def _ensure_shared_ckpt_dir(self) -> str:
-        """Create the shared checkpoint directory if it doesn't exist."""
-        import os
+        """Create and lightly sweep the shared checkpoint directory."""
         os.makedirs(self._SHARED_CKPT_DIR, exist_ok=True)
+        if not self._shared_ckpt_dir_swept:
+            self._sweep_shared_ckpt_dir()
+            self._shared_ckpt_dir_swept = True
         return self._SHARED_CKPT_DIR
+
+    def _sweep_shared_ckpt_dir(self) -> None:
+        """Best-effort cleanup of temp files and broken rank-local state."""
+        rank_tag = self._shared_rank_tag()
+        try:
+            request_dirs = list(os.scandir(self._SHARED_CKPT_DIR))
+        except FileNotFoundError:
+            return
+
+        for entry in request_dirs:
+            if not entry.is_dir():
+                continue
+            request_dir = entry.path
+            try:
+                filenames = os.listdir(request_dir)
+            except FileNotFoundError:
+                continue
+            rank_local_files = [name for name in filenames if rank_tag in name]
+
+            for name in filenames:
+                if ".tmp" not in name:
+                    continue
+                tmp_path = os.path.join(request_dir, name)
+                try:
+                    os.remove(tmp_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.warning(
+                        "Failed to remove orphan temp checkpoint file %s",
+                        tmp_path,
+                    )
+
+            latest_path = os.path.join(request_dir, f"latest_{rank_tag}")
+            if os.path.exists(latest_path):
+                try:
+                    with open(latest_path, encoding="utf-8") as f:
+                        manifest_filename = f.read().strip()
+                    manifest_path = os.path.join(request_dir, manifest_filename)
+                    if not manifest_filename or not os.path.exists(manifest_path):
+                        logger.warning(
+                            "Shared checkpoint dir %s has broken latest pointer %s",
+                            request_dir,
+                            latest_path,
+                        )
+                        self._remove_rank_local_checkpoint_files(request_dir)
+                except OSError:
+                    logger.warning(
+                        "Failed to inspect shared checkpoint latest pointer %s",
+                        latest_path,
+                    )
+            elif rank_local_files:
+                logger.warning(
+                    "Shared checkpoint dir %s has rank-local files but no latest "
+                    "pointer for %s",
+                    request_dir,
+                    rank_tag,
+                )
+                self._remove_rank_local_checkpoint_files(request_dir)
+
+            try:
+                if not os.listdir(request_dir):
+                    os.rmdir(request_dir)
+            except OSError:
+                pass
+
+    def _remove_rank_local_checkpoint_files(self, request_dir: str) -> None:
+        rank_tag = self._shared_rank_tag()
+        try:
+            filenames = os.listdir(request_dir)
+        except FileNotFoundError:
+            return
+        for name in filenames:
+            if rank_tag not in name:
+                continue
+            try:
+                os.remove(os.path.join(request_dir, name))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(
+                    "Failed to remove broken shared checkpoint artifact %s",
+                    os.path.join(request_dir, name),
+                )
+
+    def _atomic_write_bytes(self, final_path: str, data: bytes) -> None:
+        tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _atomic_torch_save(self, final_path: str, data: Any) -> None:
+        tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        try:
+            with open(tmp_path, "wb") as f:
+                torch.save(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _atomic_write_json(self, final_path: str, data: dict[str, Any]) -> None:
+        payload = json.dumps(data, sort_keys=True).encode("utf-8")
+        self._atomic_write_bytes(final_path, payload)
+
+    def _atomic_write_latest(self, final_path: str, manifest_filename: str) -> None:
+        self._atomic_write_bytes(
+            final_path, f"{manifest_filename}\n".encode("utf-8")
+        )
+
+    def _estimate_kv_bytes_for_blocks(self, num_blocks: int) -> int:
+        if num_blocks <= 0 or not self.kv_caches:
+            return 0
+        sample = self.kv_caches[0]
+        per_block_bytes = (
+            2
+            * sample.shape[2]
+            * sample.shape[3]
+            * sample.shape[4]
+            * sample.element_size()
+        )
+        return int(per_block_bytes * num_blocks * len(self.kv_caches))
+
+    def _load_shared_manifest(
+        self,
+        request_id: str,
+        manifest_filename: str,
+    ) -> SharedCheckpointManifest:
+        manifest_path = os.path.join(
+            self._shared_request_dir(request_id), manifest_filename
+        )
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return SharedCheckpointManifest.from_json_dict(data)
+
+    def _load_shared_ckpt_state(
+        self,
+        request_id: str,
+    ) -> SharedCheckpointState:
+        cached = self._shared_ckpt_states.get(request_id)
+        if cached is not None:
+            return cached
+
+        request_dir = self._shared_request_dir(request_id)
+        latest_path = self._shared_latest_path(request_id)
+        if os.path.exists(latest_path):
+            try:
+                with open(latest_path, encoding="utf-8") as f:
+                    latest_manifest_filename = f.read().strip()
+                manifest = self._load_shared_manifest(
+                    request_id, latest_manifest_filename
+                )
+                state = SharedCheckpointState(
+                    current_generation=manifest.generation,
+                    published_full_blocks=manifest.num_blocks,
+                    request_dir=request_dir,
+                    latest_manifest_filename=latest_manifest_filename,
+                    block_map=dict(manifest.block_map),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to load existing shared checkpoint state for %s",
+                    request_id,
+                )
+                state = SharedCheckpointState(
+                    current_generation=0,
+                    published_full_blocks=0,
+                    request_dir=request_dir,
+                    latest_manifest_filename=None,
+                    block_map={},
+                )
+        else:
+            state = SharedCheckpointState(
+                current_generation=0,
+                published_full_blocks=0,
+                request_dir=request_dir,
+                latest_manifest_filename=None,
+                block_map={},
+            )
+
+        self._shared_ckpt_states[request_id] = state
+        return state
+
+    def _publish_shared_checkpoint(
+        self,
+        request_id: str,
+        entry: Any,
+    ) -> tuple[int, int]:
+        """Publish new stable full blocks to the shared checkpoint store."""
+        state = self._load_shared_ckpt_state(request_id)
+        block_size = self.cache_config.block_size
+        stable_full_blocks = min(
+            len(entry.block_ids),
+            max(0, int(entry.num_tokens) // block_size),
+        )
+        prev_covered_tokens = state.published_full_blocks * block_size
+        prev_size_bytes = self._estimate_kv_bytes_for_blocks(
+            state.published_full_blocks
+        )
+
+        if stable_full_blocks < state.published_full_blocks:
+            logger.warning(
+                "Checkpoint %s: stable_full_blocks regressed from %d to %d, "
+                "keeping published generation %d",
+                request_id,
+                state.published_full_blocks,
+                stable_full_blocks,
+                state.current_generation,
+            )
+            return prev_size_bytes, prev_covered_tokens
+
+        if stable_full_blocks == state.published_full_blocks:
+            return prev_size_bytes, prev_covered_tokens
+
+        delta_start = state.published_full_blocks
+        delta_end = stable_full_blocks
+        next_generation = state.current_generation + 1
+        chunk_filename = self._shared_chunk_filename(next_generation)
+        chunk_path = self._shared_chunk_path(request_id, next_generation)
+        manifest_filename = self._shared_manifest_filename(next_generation)
+        manifest_path = self._shared_manifest_path(request_id, next_generation)
+        latest_path = self._shared_latest_path(request_id)
+
+        logical_indices = list(range(delta_start, delta_end))
+        chunk_tensors: dict[int, torch.Tensor] = {}
+        for layer_idx, host_tensor in entry.kv_tensors.items():
+            chunk_tensors[layer_idx] = host_tensor[
+                :, delta_start:delta_end
+            ].contiguous()
+
+        chunk_payload = {
+            "req_id": request_id,
+            "generation": next_generation,
+            "logical_indices": logical_indices,
+            "num_blocks": len(logical_indices),
+            "kv_tensors": chunk_tensors,
+        }
+
+        try:
+            self._atomic_torch_save(chunk_path, chunk_payload)
+        except Exception:
+            logger.exception(
+                "Checkpoint %s: failed to publish shared chunk %s",
+                request_id,
+                chunk_path,
+            )
+            return prev_size_bytes, prev_covered_tokens
+
+        new_block_map = dict(state.block_map)
+        for chunk_slot_idx, logical_idx in enumerate(logical_indices):
+            new_block_map[logical_idx] = (chunk_filename, chunk_slot_idx)
+
+        manifest = SharedCheckpointManifest(
+            req_id=request_id,
+            generation=next_generation,
+            covered_tokens=stable_full_blocks * block_size,
+            num_blocks=stable_full_blocks,
+            block_map=new_block_map,
+        )
+
+        try:
+            self._atomic_write_json(manifest_path, manifest.to_json_dict())
+            self._atomic_write_latest(latest_path, manifest_filename)
+        except Exception:
+            logger.exception(
+                "Checkpoint %s: failed to publish shared manifest %s",
+                request_id,
+                manifest_path,
+            )
+            return prev_size_bytes, prev_covered_tokens
+
+        state.current_generation = next_generation
+        state.published_full_blocks = stable_full_blocks
+        state.latest_manifest_filename = manifest_filename
+        state.block_map = new_block_map
+
+        size_bytes = self._estimate_kv_bytes_for_blocks(stable_full_blocks)
+        logger.debug(
+            "Checkpoint %s: published generation %d (%d full blocks, %d tokens)",
+            request_id,
+            next_generation,
+            stable_full_blocks,
+            manifest.covered_tokens,
+        )
+        return size_bytes, manifest.covered_tokens
+
+    def _restore_shared_checkpoint(
+        self,
+        request_id: str,
+        target_block_ids: list[int],
+    ) -> int:
+        """Restore the latest published shared checkpoint generation."""
+        latest_path = self._shared_latest_path(request_id)
+        if not os.path.exists(latest_path):
+            logger.warning(
+                "Restore %s: shared checkpoint latest pointer not found at %s",
+                request_id,
+                latest_path,
+            )
+            return 0
+
+        request_dir = self._shared_request_dir(request_id)
+        try:
+            with open(latest_path, encoding="utf-8") as f:
+                manifest_filename = f.read().strip()
+            if not manifest_filename:
+                logger.warning(
+                    "Restore %s: empty shared checkpoint latest pointer at %s",
+                    request_id,
+                    latest_path,
+                )
+                return 0
+
+            manifest = self._load_shared_manifest(request_id, manifest_filename)
+            expected_indices = list(range(manifest.num_blocks))
+            if sorted(manifest.block_map) != expected_indices:
+                logger.warning(
+                    "Restore %s: manifest %s has non-contiguous logical indices",
+                    request_id,
+                    manifest_filename,
+                )
+                return 0
+
+            num_checkpoint_blocks = min(manifest.num_blocks, len(target_block_ids))
+            if num_checkpoint_blocks <= 0:
+                return 0
+
+            device = self.kv_caches[0].device
+            num_kv_blocks = self.kv_caches[0].shape[1]
+            restore_plan_by_chunk: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            for logical_idx in range(num_checkpoint_blocks):
+                target_block_id = target_block_ids[logical_idx]
+                if not 0 <= target_block_id < num_kv_blocks:
+                    logger.warning(
+                        "Restore %s: target block %d for logical block %d is out "
+                        "of range (num_kv_blocks=%d)",
+                        request_id,
+                        target_block_id,
+                        logical_idx,
+                        num_kv_blocks,
+                    )
+                    return 0
+                chunk_filename, chunk_slot_idx = manifest.block_map[logical_idx]
+                restore_plan_by_chunk[chunk_filename].append(
+                    (logical_idx, chunk_slot_idx)
+                )
+
+            loaded_chunks: dict[str, dict[str, Any]] = {}
+            for chunk_filename in restore_plan_by_chunk:
+                chunk_path = os.path.join(request_dir, chunk_filename)
+                if not os.path.exists(chunk_path):
+                    logger.warning(
+                        "Restore %s: shared checkpoint chunk missing at %s",
+                        request_id,
+                        chunk_path,
+                    )
+                    return 0
+                loaded_chunks[chunk_filename] = torch.load(
+                    chunk_path, weights_only=False
+                )
+
+            if torch.cuda.is_available():
+                stream = torch.cuda.Stream()
+                with torch.cuda.stream(stream):
+                    for chunk_filename, assignments in restore_plan_by_chunk.items():
+                        chunk_data = loaded_chunks[chunk_filename]
+                        kv_tensors: dict[int, torch.Tensor] = chunk_data["kv_tensors"]
+                        slot_indices = [slot_idx for _, slot_idx in assignments]
+                        target_indices = torch.tensor(
+                            [target_block_ids[logical_idx] for logical_idx, _ in assignments],
+                            dtype=torch.int64,
+                            device=device,
+                        )
+                        for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                            host_tensor = kv_tensors.get(layer_idx)
+                            if host_tensor is None:
+                                continue
+                            src = host_tensor[:, slot_indices].to(
+                                device, non_blocking=True
+                            )
+                            gpu_tensor[:, target_indices, :, :, :] = src
+                stream.synchronize()
+            else:
+                for chunk_filename, assignments in restore_plan_by_chunk.items():
+                    chunk_data = loaded_chunks[chunk_filename]
+                    kv_tensors = chunk_data["kv_tensors"]
+                    slot_indices = [slot_idx for _, slot_idx in assignments]
+                    target_indices = torch.tensor(
+                        [target_block_ids[logical_idx] for logical_idx, _ in assignments],
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                        host_tensor = kv_tensors.get(layer_idx)
+                        if host_tensor is None:
+                            continue
+                        src = host_tensor[:, slot_indices].to(device)
+                        gpu_tensor[:, target_indices, :, :, :] = src
+
+            block_size = self.cache_config.block_size
+            actual_tokens = min(
+                num_checkpoint_blocks * block_size, manifest.covered_tokens
+            )
+            logger.info(
+                "FAULT_EVENT kv_restore_done request=%s wall_time=%.6f "
+                "tokens=%d blocks=%d",
+                request_id,
+                time.time(),
+                actual_tokens,
+                num_checkpoint_blocks,
+            )
+            return actual_tokens
+        except Exception:
+            logger.exception(
+                "Restore %s: failed to load/apply shared checkpoint from %s",
+                request_id,
+                request_dir,
+            )
+            return 0
 
     def checkpoint_kv_blocks(
         self,
         request_block_map: list[tuple[str, list[int], int]],
-    ) -> list[tuple[str, int]]:
+    ) -> list[tuple[str, int, int]]:
         """Checkpoint KV cache blocks from GPU to CPU pinned memory.
 
         Called via collective_rpc from EngineCore for fault-tolerant serving.
@@ -6109,10 +6625,10 @@ class GPUModelRunner(
                 tuples identifying which blocks to checkpoint.
 
         Returns:
-            List of (request_id, bytes_copied) for each successful checkpoint.
+            List of (request_id, published_size_bytes, covered_tokens) for each
+            successful local checkpoint attempt. published_size_bytes and
+            covered_tokens describe the latest cross-engine shared version.
         """
-        import os
-        import torch
 
         if not self.kv_caches:
             return []
@@ -6130,10 +6646,16 @@ class GPUModelRunner(
                 max_memory_bytes=pool_bytes,
             )
 
-        shared_dir = self._ensure_shared_ckpt_dir()
+        self._ensure_shared_ckpt_dir()
 
         results = []
         for request_id, block_ids, num_tokens in request_block_map:
+            # NOTE: KVCheckpointPool assumes the model runner exposes a
+            # logical KV view with shape (2, num_blocks, ...), i.e. blocks
+            # indexed on dim 1. This matches the FLASH_ATTN path used by our
+            # current FT experiments. If a backend exposes a different
+            # logical layout (for example TRITON_ATTN), normalize before this
+            # call or replace the pool helper with a backend-aware copy path.
             entry = self._ft_checkpoint_pool.save_checkpoint(
                 request_id=request_id,
                 gpu_kv_caches=self.kv_caches,
@@ -6142,23 +6664,12 @@ class GPUModelRunner(
                 async_copy=True,
             )
             if entry is not None:
-                results.append((request_id, entry.size_bytes))
-
-                # Also persist to shared directory for cross-engine restore.
-                try:
-                    shared_path = self._shared_ckpt_path(request_id)
-                    torch.save(
-                        {
-                            "kv_tensors": entry.kv_tensors,
-                            "block_ids": entry.block_ids,
-                            "num_tokens": entry.num_tokens,
-                            "size_bytes": entry.size_bytes,
-                        },
-                        shared_path,
-                    )
-                except Exception:
-                    # Shared save is best-effort; local pool is primary.
-                    pass
+                published_size_bytes, covered_tokens = (
+                    self._publish_shared_checkpoint(request_id, entry)
+                )
+                results.append(
+                    (request_id, published_size_bytes, covered_tokens)
+                )
         return results
 
     def restore_kv_blocks(
@@ -6179,9 +6690,6 @@ class GPUModelRunner(
         Returns:
             Number of tokens restored, or 0 if no checkpoint found.
         """
-        import os
-        import torch
-
         if not self.kv_caches:
             return 0
 
@@ -6195,66 +6703,8 @@ class GPUModelRunner(
             if tokens > 0:
                 return tokens
 
-        # Fall back to shared directory (cross-engine restore).
-        shared_path = self._shared_ckpt_path(request_id)
-        if not os.path.exists(shared_path):
-            return 0
-
-        try:
-            data = torch.load(shared_path, weights_only=False)
-            kv_tensors: dict[int, torch.Tensor] = data["kv_tensors"]
-            stored_block_ids: list[int] = data["block_ids"]
-            num_tokens: int = data["num_tokens"]
-
-            num_stored_blocks = len(stored_block_ids)
-            num_checkpoint_blocks = min(num_stored_blocks, len(target_block_ids))
-
-            device = self.kv_caches[0].device
-            target_indices = torch.tensor(
-                target_block_ids[:num_checkpoint_blocks],
-                dtype=torch.int64,
-                device=device,
-            )
-
-            if torch.cuda.is_available():
-                stream = torch.cuda.Stream()
-                with torch.cuda.stream(stream):
-                    for layer_idx, gpu_tensor in enumerate(self.kv_caches):
-                        host_tensor = kv_tensors.get(layer_idx)
-                        if host_tensor is None:
-                            continue
-                        src = host_tensor[:, :num_checkpoint_blocks].to(
-                            device, non_blocking=True
-                        )
-                        gpu_tensor[:, target_indices, :, :] = src
-                stream.synchronize()
-            else:
-                for layer_idx, gpu_tensor in enumerate(self.kv_caches):
-                    host_tensor = kv_tensors.get(layer_idx)
-                    if host_tensor is None:
-                        continue
-                    src = host_tensor[:, :num_checkpoint_blocks].to(device)
-                    gpu_tensor[:, target_indices, :, :] = src
-
-            # Clean up shared file after successful restore.
-            try:
-                os.remove(shared_path)
-            except OSError:
-                pass
-
-            # Return actual tokens restored, not the original num_tokens.
-            # If we truncated blocks (target < stored), the actual
-            # restored tokens = blocks_copied * block_size, capped at
-            # num_tokens.
-            if num_checkpoint_blocks < num_stored_blocks:
-                block_size = self.cache_config.block_size
-                actual_tokens = min(
-                    num_checkpoint_blocks * block_size, num_tokens
-                )
-                return actual_tokens
-            return num_tokens
-        except Exception:
-            return 0
+        self._ensure_shared_ckpt_dir()
+        return self._restore_shared_checkpoint(request_id, target_block_ids)
 
     def get_checkpoint_stats(self) -> dict:
         """Get checkpoint pool statistics."""

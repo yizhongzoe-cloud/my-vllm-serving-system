@@ -1,0 +1,72 @@
+[
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "timestamp": 1774472449.0,
+    "source": "centralized"
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-bf888ad59da90f79-9a024357",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 53,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472449.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-ab7116743d3b3074-b25735a8",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 14,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472449.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-a4bf7542631abcd0-b3fb33e6",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 14,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472449.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-ab5a9e495476ec7d-b93c3610",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472449.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-925866835d8f3283-bc54e267",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472449.0
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 5,
+    "total": 5,
+    "dropped": 0,
+    "timestamp": 1774472449.0,
+    "source": "centralized"
+  }
+]

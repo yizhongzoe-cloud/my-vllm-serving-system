@@ -1,0 +1,850 @@
+[
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00000-abb24864",
+    "gpu": 0,
+    "wall_time": 1774787135.911362,
+    "timestamp": 1774787135.911362
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00001-b9040b05",
+    "gpu": 0,
+    "wall_time": 1774787138.901309,
+    "timestamp": 1774787138.901309
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00002-971774b3",
+    "gpu": 1,
+    "wall_time": 1774787140.214393,
+    "timestamp": 1774787140.214393
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00003-9a84035a",
+    "gpu": 0,
+    "wall_time": 1774787141.128552,
+    "timestamp": 1774787141.128552
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00004-8f3218c2",
+    "gpu": 1,
+    "wall_time": 1774787141.29573,
+    "timestamp": 1774787141.29573
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00005-9cfc85d4",
+    "gpu": 0,
+    "wall_time": 1774787141.465677,
+    "timestamp": 1774787141.465677
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00006-83b44be7",
+    "gpu": 1,
+    "wall_time": 1774787141.525512,
+    "timestamp": 1774787141.525512
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00007-a8b93643",
+    "gpu": 0,
+    "wall_time": 1774787143.538316,
+    "timestamp": 1774787143.538316
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00008-a63e10d6",
+    "gpu": 1,
+    "wall_time": 1774787144.457962,
+    "timestamp": 1774787144.457962
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 0,
+    "wall_time": 1774787145.548965,
+    "source": "process_monitor",
+    "timestamp": 1774787145.548965
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 0,
+    "wall_time": 1774787145.54931,
+    "timestamp": 1774787145.54931
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "timestamp": 1774787145.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "wall_time": 1774787145.549627,
+    "timestamp": 1774787145.549627,
+    "source": "fault_event"
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00007-a8b93643",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 304,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774787145.0,
+    "wall_time": 1774787145.549846
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 1,
+    "total": 1,
+    "dropped": 0,
+    "timestamp": 1774787145.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": 0,
+    "wall_time": 1774787145.550496,
+    "recovered": 1,
+    "total": 1,
+    "dropped": 0,
+    "timestamp": 1774787145.550496,
+    "source": "fault_event"
+  },
+  {
+    "type": "kv_restore_done",
+    "request_id": "chatcmpl-req-00007-a8b93643",
+    "wall_time": 1774787145.572139,
+    "tokens": 304,
+    "blocks": 19,
+    "timestamp": 1774787145.572139
+  },
+  {
+    "type": "first_token_after_recovery",
+    "request_id": "chatcmpl-req-00007-a8b93643",
+    "wall_time": 1774787145.597888,
+    "timestamp": 1774787145.597888
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00009-9c15c6d6",
+    "gpu": 1,
+    "wall_time": 1774787145.688056,
+    "timestamp": 1774787145.688056
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00010-b936a95f",
+    "gpu": 1,
+    "wall_time": 1774787145.708561,
+    "timestamp": 1774787145.708561
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00011-b7fa5543",
+    "gpu": 1,
+    "wall_time": 1774787149.213938,
+    "timestamp": 1774787149.213938
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00012-ad356af4",
+    "gpu": 1,
+    "wall_time": 1774787151.000353,
+    "timestamp": 1774787151.000353
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00013-85a02852",
+    "gpu": 1,
+    "wall_time": 1774787151.078606,
+    "timestamp": 1774787151.078606
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00014-83e02dc2",
+    "gpu": 1,
+    "wall_time": 1774787151.145782,
+    "timestamp": 1774787151.145782
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00015-a7656f10",
+    "gpu": 1,
+    "wall_time": 1774787151.213694,
+    "timestamp": 1774787151.213694
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00016-80241f49",
+    "gpu": 1,
+    "wall_time": 1774787151.333133,
+    "timestamp": 1774787151.333133
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00017-ba81fe65",
+    "gpu": 1,
+    "wall_time": 1774787151.581857,
+    "timestamp": 1774787151.581857
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00018-828296a4",
+    "gpu": 1,
+    "wall_time": 1774787151.76962,
+    "timestamp": 1774787151.76962
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00019-80dda257",
+    "gpu": 1,
+    "wall_time": 1774787151.885016,
+    "timestamp": 1774787151.885016
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00020-9bb265a9",
+    "gpu": 1,
+    "wall_time": 1774787152.198753,
+    "timestamp": 1774787152.198753
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00021-8efdada4",
+    "gpu": 1,
+    "wall_time": 1774787152.250626,
+    "timestamp": 1774787152.250626
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00022-9b5443c4",
+    "gpu": 1,
+    "wall_time": 1774787152.370607,
+    "timestamp": 1774787152.370607
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00023-86d62a23",
+    "gpu": 1,
+    "wall_time": 1774787152.517211,
+    "timestamp": 1774787152.517211
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00024-a45f7899",
+    "gpu": 1,
+    "wall_time": 1774787152.720007,
+    "timestamp": 1774787152.720007
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00025-bb1e7e71",
+    "gpu": 1,
+    "wall_time": 1774787153.232565,
+    "timestamp": 1774787153.232565
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00026-be4646c7",
+    "gpu": 1,
+    "wall_time": 1774787153.308143,
+    "timestamp": 1774787153.308143
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00027-89cf8d22",
+    "gpu": 1,
+    "wall_time": 1774787153.549479,
+    "timestamp": 1774787153.549479
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00028-923be4d6",
+    "gpu": 1,
+    "wall_time": 1774787153.846192,
+    "timestamp": 1774787153.846192
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00029-b0043d94",
+    "gpu": 1,
+    "wall_time": 1774787153.863282,
+    "timestamp": 1774787153.863282
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00030-bbc6ca49",
+    "gpu": 1,
+    "wall_time": 1774787154.173549,
+    "timestamp": 1774787154.173549
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00031-9754e5aa",
+    "gpu": 1,
+    "wall_time": 1774787154.235646,
+    "timestamp": 1774787154.235646
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00032-b4761e44",
+    "gpu": 1,
+    "wall_time": 1774787154.259973,
+    "timestamp": 1774787154.259973
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00033-a1f272f1",
+    "gpu": 1,
+    "wall_time": 1774787155.24966,
+    "timestamp": 1774787155.24966
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00034-91699e9b",
+    "gpu": 1,
+    "wall_time": 1774787156.374349,
+    "timestamp": 1774787156.374349
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00035-811222c4",
+    "gpu": 1,
+    "wall_time": 1774787158.026584,
+    "timestamp": 1774787158.026584
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00036-8f396294",
+    "gpu": 1,
+    "wall_time": 1774787158.389443,
+    "timestamp": 1774787158.389443
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00037-b137873a",
+    "gpu": 1,
+    "wall_time": 1774787158.492411,
+    "timestamp": 1774787158.492411
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00038-a143a25d",
+    "gpu": 1,
+    "wall_time": 1774787159.645448,
+    "timestamp": 1774787159.645448
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00039-bb520ca3",
+    "gpu": 1,
+    "wall_time": 1774787160.225589,
+    "timestamp": 1774787160.225589
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00040-b5d2aa56",
+    "gpu": 1,
+    "wall_time": 1774787160.35541,
+    "timestamp": 1774787160.35541
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00041-a9687da4",
+    "gpu": 1,
+    "wall_time": 1774787161.039574,
+    "timestamp": 1774787161.039574
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00042-972a91de",
+    "gpu": 1,
+    "wall_time": 1774787161.074545,
+    "timestamp": 1774787161.074545
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00043-bb90ccca",
+    "gpu": 1,
+    "wall_time": 1774787163.476915,
+    "timestamp": 1774787163.476915
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00044-9ffe93b9",
+    "gpu": 1,
+    "wall_time": 1774787163.773386,
+    "timestamp": 1774787163.773386
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00045-b659cde8",
+    "gpu": 1,
+    "wall_time": 1774787164.861744,
+    "timestamp": 1774787164.861744
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00046-a664fb27",
+    "gpu": 1,
+    "wall_time": 1774787165.234853,
+    "timestamp": 1774787165.234853
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00047-97ee41f9",
+    "gpu": 1,
+    "wall_time": 1774787165.969068,
+    "timestamp": 1774787165.969068
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00048-8012f574",
+    "gpu": 1,
+    "wall_time": 1774787166.760412,
+    "timestamp": 1774787166.760412
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00049-a9a0afb9",
+    "gpu": 1,
+    "wall_time": 1774787166.964278,
+    "timestamp": 1774787166.964278
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00050-8f0628ef",
+    "gpu": 1,
+    "wall_time": 1774787170.458946,
+    "timestamp": 1774787170.458946
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00051-879344e2",
+    "gpu": 1,
+    "wall_time": 1774787170.955567,
+    "timestamp": 1774787170.955567
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00052-a3c00295",
+    "gpu": 1,
+    "wall_time": 1774787171.888814,
+    "timestamp": 1774787171.888814
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00053-a7c50f72",
+    "gpu": 1,
+    "wall_time": 1774787172.639682,
+    "timestamp": 1774787172.639682
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00054-807e3cf7",
+    "gpu": 1,
+    "wall_time": 1774787172.942813,
+    "timestamp": 1774787172.942813
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00055-b3f9da6e",
+    "gpu": 1,
+    "wall_time": 1774787173.793825,
+    "timestamp": 1774787173.793825
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00056-baa349cc",
+    "gpu": 1,
+    "wall_time": 1774787173.824815,
+    "timestamp": 1774787173.824815
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00057-89d66a00",
+    "gpu": 1,
+    "wall_time": 1774787173.896942,
+    "timestamp": 1774787173.896942
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00058-abaa7716",
+    "gpu": 1,
+    "wall_time": 1774787173.913216,
+    "timestamp": 1774787173.913216
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00059-8ff9d5de",
+    "gpu": 1,
+    "wall_time": 1774787174.044542,
+    "timestamp": 1774787174.044542
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00060-9f322336",
+    "gpu": 1,
+    "wall_time": 1774787174.208146,
+    "timestamp": 1774787174.208146
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00061-977069ae",
+    "gpu": 1,
+    "wall_time": 1774787174.311527,
+    "timestamp": 1774787174.311527
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00062-8bf81866",
+    "gpu": 1,
+    "wall_time": 1774787174.89966,
+    "timestamp": 1774787174.89966
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00063-80431ecc",
+    "gpu": 1,
+    "wall_time": 1774787175.047996,
+    "timestamp": 1774787175.047996
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00064-936222b5",
+    "gpu": 1,
+    "wall_time": 1774787175.159504,
+    "timestamp": 1774787175.159504
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00065-ab7d4850",
+    "gpu": 1,
+    "wall_time": 1774787175.416346,
+    "timestamp": 1774787175.416346
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00066-ae492432",
+    "gpu": 1,
+    "wall_time": 1774787175.570936,
+    "timestamp": 1774787175.570936
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00067-af58040d",
+    "gpu": 1,
+    "wall_time": 1774787177.192152,
+    "timestamp": 1774787177.192152
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00068-987cb347",
+    "gpu": 1,
+    "wall_time": 1774787177.269792,
+    "timestamp": 1774787177.269792
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00069-886673cb",
+    "gpu": 1,
+    "wall_time": 1774787181.608285,
+    "timestamp": 1774787181.608285
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00070-8248d137",
+    "gpu": 1,
+    "wall_time": 1774787183.083766,
+    "timestamp": 1774787183.083766
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00071-92e3c4a9",
+    "gpu": 1,
+    "wall_time": 1774787183.304375,
+    "timestamp": 1774787183.304375
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00072-b552f2ec",
+    "gpu": 1,
+    "wall_time": 1774787183.310493,
+    "timestamp": 1774787183.310493
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00073-850efac2",
+    "gpu": 1,
+    "wall_time": 1774787185.000059,
+    "timestamp": 1774787185.000059
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00074-a3ee8c67",
+    "gpu": 1,
+    "wall_time": 1774787186.227283,
+    "timestamp": 1774787186.227283
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00075-988d528d",
+    "gpu": 1,
+    "wall_time": 1774787187.532887,
+    "timestamp": 1774787187.532887
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00076-b89ad9fa",
+    "gpu": 1,
+    "wall_time": 1774787189.008631,
+    "timestamp": 1774787189.008631
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00077-9522ade0",
+    "gpu": 1,
+    "wall_time": 1774787189.085271,
+    "timestamp": 1774787189.085271
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00078-8bdbc8c5",
+    "gpu": 1,
+    "wall_time": 1774787189.528621,
+    "timestamp": 1774787189.528621
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00079-8379e5f8",
+    "gpu": 1,
+    "wall_time": 1774787189.652672,
+    "timestamp": 1774787189.652672
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00080-ad37dac5",
+    "gpu": 1,
+    "wall_time": 1774787191.640945,
+    "timestamp": 1774787191.640945
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00081-b0644212",
+    "gpu": 1,
+    "wall_time": 1774787191.967188,
+    "timestamp": 1774787191.967188
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00082-bdb7ca4c",
+    "gpu": 1,
+    "wall_time": 1774787192.09893,
+    "timestamp": 1774787192.09893
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00083-ac5a0f63",
+    "gpu": 1,
+    "wall_time": 1774787192.122591,
+    "timestamp": 1774787192.122591
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00084-82b8c647",
+    "gpu": 1,
+    "wall_time": 1774787192.246395,
+    "timestamp": 1774787192.246395
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00085-9d9b8918",
+    "gpu": 1,
+    "wall_time": 1774787192.377513,
+    "timestamp": 1774787192.377513
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00086-95e07da8",
+    "gpu": 1,
+    "wall_time": 1774787192.812862,
+    "timestamp": 1774787192.812862
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00087-858ef3d0",
+    "gpu": 1,
+    "wall_time": 1774787193.149737,
+    "timestamp": 1774787193.149737
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00088-a19c6199",
+    "gpu": 1,
+    "wall_time": 1774787193.879205,
+    "timestamp": 1774787193.879205
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00089-ad714d67",
+    "gpu": 1,
+    "wall_time": 1774787194.092797,
+    "timestamp": 1774787194.092797
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00090-9a650dc2",
+    "gpu": 1,
+    "wall_time": 1774787194.137107,
+    "timestamp": 1774787194.137107
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00091-b8402a94",
+    "gpu": 1,
+    "wall_time": 1774787194.549946,
+    "timestamp": 1774787194.549946
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00092-a042c5ca",
+    "gpu": 1,
+    "wall_time": 1774787195.026953,
+    "timestamp": 1774787195.026953
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00093-96a98aaf",
+    "gpu": 1,
+    "wall_time": 1774787195.300624,
+    "timestamp": 1774787195.300624
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00094-aa170e79",
+    "gpu": 1,
+    "wall_time": 1774787195.794178,
+    "timestamp": 1774787195.794178
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00095-9fb28efa",
+    "gpu": 1,
+    "wall_time": 1774787196.473702,
+    "timestamp": 1774787196.473702
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00096-a6a803ce",
+    "gpu": 1,
+    "wall_time": 1774787197.218116,
+    "timestamp": 1774787197.218116
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00097-bdb0dbe8",
+    "gpu": 1,
+    "wall_time": 1774787197.770344,
+    "timestamp": 1774787197.770344
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00098-92f88ed6",
+    "gpu": 1,
+    "wall_time": 1774787197.797599,
+    "timestamp": 1774787197.797599
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00099-a4768758",
+    "gpu": 1,
+    "wall_time": 1774787197.91046,
+    "timestamp": 1774787197.91046
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00100-ba0a09d5",
+    "gpu": 1,
+    "wall_time": 1774787197.942564,
+    "timestamp": 1774787197.942564
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00101-90f6968f",
+    "gpu": 1,
+    "wall_time": 1774787198.95648,
+    "timestamp": 1774787198.95648
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00102-9056f2ac",
+    "gpu": 1,
+    "wall_time": 1774787199.332054,
+    "timestamp": 1774787199.332054
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00103-99daec93",
+    "gpu": 1,
+    "wall_time": 1774787200.040625,
+    "timestamp": 1774787200.040625
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00104-beda17dd",
+    "gpu": 1,
+    "wall_time": 1774787202.425627,
+    "timestamp": 1774787202.425627
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00105-b80e7553",
+    "gpu": 1,
+    "wall_time": 1774787202.709919,
+    "timestamp": 1774787202.709919
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00106-9b8c40a7",
+    "gpu": 1,
+    "wall_time": 1774787203.239272,
+    "timestamp": 1774787203.239272
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00107-bea30988",
+    "gpu": 1,
+    "wall_time": 1774787204.648831,
+    "timestamp": 1774787204.648831
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00108-a4da863e",
+    "gpu": 1,
+    "wall_time": 1774787204.90927,
+    "timestamp": 1774787204.90927
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00109-867d2faa",
+    "gpu": 1,
+    "wall_time": 1774787204.987792,
+    "timestamp": 1774787204.987792
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00110-9e908a26",
+    "gpu": 1,
+    "wall_time": 1774787205.329564,
+    "timestamp": 1774787205.329564
+  }
+]

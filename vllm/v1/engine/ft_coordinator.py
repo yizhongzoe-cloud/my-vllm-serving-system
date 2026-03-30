@@ -93,7 +93,10 @@ class FTEngineState:
     def __init__(self, engine_index: int):
         self.engine_index = engine_index
         self.request_counts = [0, 0]  # [waiting, running]
-        self.last_message_time: float = time.time()
+        # Engines can spend several seconds loading weights before they emit
+        # their first coordinator message.  Don't start timeout-based failure
+        # detection until we have observed at least one message.
+        self.last_message_time: float | None = None
         self.is_alive: bool = True
 
 
@@ -215,7 +218,7 @@ class FTCoordinatorProc:
                 )
 
                 # ---- Health check: detect engine timeouts ----
-                self._check_engine_health(publish_front)
+                self._check_engine_health(publish_front, publish_back)
 
                 if not events:
                     if last_step_counts is not None:
@@ -359,11 +362,21 @@ class FTCoordinatorProc:
                     message = (None, current_wave, engines_running)
                     publish_front.send(msgspec.msgpack.encode(message))
 
-    def _check_engine_health(self, publish_front: zmq.Socket) -> None:
-        """Check for engine timeouts and publish ENGINE_FAILED events."""
+    def _check_engine_health(
+        self,
+        publish_front: zmq.Socket,
+        publish_back: zmq.Socket | None = None,
+    ) -> None:
+        """Check for engine timeouts and publish failure events.
+
+        Publishes ENGINE_FAILED to front-end clients and REPLICA_FAILED
+        to surviving engines so their solvers can exclude the dead replica.
+        """
         now = time.time()
         for engine in self.engines:
             if not engine.is_alive:
+                continue
+            if engine.last_message_time is None:
                 continue
             if now - engine.last_message_time > self.failure_timeout_sec:
                 engine.is_alive = False
@@ -373,12 +386,37 @@ class FTCoordinatorProc:
                     engine.engine_index,
                     now - engine.last_message_time,
                 )
+                logger.warning(
+                    "FAULT_EVENT monitor_observed engine=%d wall_time=%.6f "
+                    "source=heartbeat_timeout",
+                    engine.engine_index,
+                    time.time(),
+                )
+                # Structured event with wall-clock time for experiment
+                # instrumentation (millisecond precision, independent of
+                # log-prefix format).
+                logger.warning(
+                    "FAULT_EVENT failure_declared replica=%d wall_time=%.6f",
+                    engine.engine_index,
+                    time.time(),
+                )
                 # Publish failure event to front-end clients.
                 failure_msg = (
                     "ENGINE_FAILED",
                     engine.engine_index,
                 )
                 publish_front.send(msgspec.msgpack.encode(failure_msg))
+
+                # Notify surviving engines so their solvers can exclude
+                # the dead replica from recovery subproblems.
+                if publish_back is not None:
+                    replica_id_encoded = msgspec.msgpack.encode(
+                        engine.engine_index
+                    )
+                    publish_back.send_multipart((
+                        EngineCoreRequestType.REPLICA_FAILED.value,
+                        replica_id_encoded,
+                    ))
 
     @staticmethod
     def _send_start_wave(

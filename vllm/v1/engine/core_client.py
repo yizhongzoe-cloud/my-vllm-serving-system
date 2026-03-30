@@ -5,6 +5,7 @@ import contextlib
 import multiprocessing
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -32,9 +33,11 @@ from vllm.utils.network_utils import (
     make_zmq_socket,
 )
 from vllm.v1.engine import (
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -118,10 +121,15 @@ class EngineCoreClient(ABC):
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Fault-tolerant mode uses FT client with failover support.
-            if vllm_config.scheduler_config.policy == "fault_tolerant":
+            if vllm_config.scheduler_config.policy in ("fault_tolerant", "ft_benders"):
                 from vllm.v1.engine.ft_client import FTDPAsyncMPClient
 
                 return FTDPAsyncMPClient(*client_args)
+            # Centralized Benders solver runs in the client.
+            if vllm_config.scheduler_config.policy == "ft_benders_centralized":
+                from vllm.v1.engine.ft_client import CentralizedBendersFTClient
+
+                return CentralizedBendersFTClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
             return DPLBAsyncMPClient(*client_args)
         return AsyncMPClient(*client_args)
@@ -1212,27 +1220,199 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.eng_start_index = (
             len(self.core_engines) * self.client_index
         ) // client_count
+        self._rebuild_engine_maps()
+
+    def _rebuild_engine_maps(self) -> None:
+        self._engine_to_lb_index: dict[EngineIdentity, int] = {
+            engine: i for i, engine in enumerate(self.core_engines)
+        }
+        self._engine_to_rank: dict[EngineIdentity, int] = {
+            engine: self.engine_ranks_managed[i]
+            for i, engine in enumerate(self.core_engines)
+        }
+        self._rank_to_engine: dict[int, EngineIdentity] = {
+            rank: engine for engine, rank in self._engine_to_rank.items()
+        }
+        previous_alive = getattr(self, "_engine_alive", {})
+        self._engine_alive: dict[EngineIdentity, bool] = {
+            engine: previous_alive.get(engine, True)
+            for engine in self.core_engines
+        }
+
+    def _all_engines_dead(self) -> bool:
+        return not any(self._engine_alive.values())
+
+    def _choose_live_engine_index(self) -> int:
+        current_counts = self.lb_engines
+        # TODO use P2C alg for larger DP sizes
+        num_engines = len(current_counts)
+        min_score = sys.maxsize
+        eng_index = None
+        for i in range(num_engines):
+            # Start from client_index to help with balancing when engines
+            # are empty.
+            idx = (self.eng_start_index + i) % num_engines
+            candidate = self.core_engines[idx]
+            if not self._engine_alive.get(candidate, True):
+                continue
+            waiting, running = current_counts[idx]
+            score = waiting * 4 + running
+            if score < min_score:
+                min_score = score
+                eng_index = idx
+
+        if eng_index is None:
+            self.resources.engine_dead = True
+            raise EngineDeadError()
+
+        # Increment local waiting count for better balancing between stats
+        # updates from the coordinator (which happen every 100ms).
+        current_counts[eng_index][0] += self.client_count
+        return eng_index
+
+    def _log_request_route(self, request_id: str, engine: EngineIdentity) -> None:
+        gpu_idx = self._engine_to_rank.get(engine)
+        if gpu_idx is not None:
+            logger.info(
+                "FAULT_EVENT request_route request=%s gpu=%d wall_time=%.6f",
+                request_id,
+                gpu_idx,
+                time.time(),
+            )
+
+    def _handle_engine_failure(self, engine_index: int) -> None:
+        engine = self._rank_to_engine.get(engine_index)
+        if engine is None or not self._engine_alive.get(engine, False):
+            return
+
+        self._engine_alive[engine] = False
+        logger.warning(
+            "DPLB client: engine %d declared FAILED; continuing on surviving "
+            "engines without reroute.",
+            engine_index,
+        )
+
+        displaced_req_ids = [
+            req_id
+            for req_id, req_engine in self.reqs_in_flight.items()
+            if req_engine == engine
+        ]
+        if not displaced_req_ids:
+            return
+
+        for req_id in displaced_req_ids:
+            self.reqs_in_flight.pop(req_id, None)
+            logger.info(
+                "FAULT_EVENT dead_gpu_request_failed request=%s gpu=%d "
+                "wall_time=%.6f",
+                req_id,
+                engine_index,
+                time.time(),
+            )
+
+        self.outputs_queue.put_nowait(
+            EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.ERROR,
+                    )
+                    for req_id in displaced_req_ids
+                ],
+            )
+        )
+
+    def start_engine_core_monitor(self):
+        """Allow partial engine death without killing the entire client."""
+        engine_manager = self.resources.engine_manager
+        if (
+            engine_manager is None
+            or not hasattr(engine_manager, "processes")
+            or not engine_manager.processes
+        ):
+            return
+
+        engine_processes = engine_manager.processes
+        self_ref = weakref.ref(self)
+
+        def monitor_engine_cores():
+            sentinel_to_rank = {
+                proc.sentinel: self.engine_ranks_managed[i]
+                for i, proc in enumerate(engine_processes)
+                if i < len(self.engine_ranks_managed)
+            }
+            live_sentinels = set(sentinel_to_rank.keys())
+
+            while live_sentinels:
+                died = multiprocessing.connection.wait(list(live_sentinels))
+                _self = self_ref()
+                if not _self:
+                    return
+
+                for sentinel in died:
+                    live_sentinels.discard(sentinel)
+                    eng_rank = sentinel_to_rank.get(sentinel)
+                    if eng_rank is None:
+                        continue
+
+                    engine = _self._rank_to_engine.get(eng_rank)
+                    if engine is not None and not _self._engine_alive.get(
+                        engine, True
+                    ):
+                        continue
+
+                    logger.warning(
+                        "DPLB monitor: engine %d process exited.",
+                        eng_rank,
+                    )
+                    output_task = _self.resources.output_queue_task
+                    loop = output_task._loop if output_task else None
+                    if loop is None or loop.is_closed():
+                        if engine is not None:
+                            _self._engine_alive[engine] = False
+                        if _self._all_engines_dead():
+                            _self.resources.engine_dead = True
+                            _self.shutdown()
+                            return
+                        continue
+
+                    def handle_failure(rank: int = eng_rank) -> None:
+                        _self._handle_engine_failure(rank)
+                        if _self._all_engines_dead():
+                            _self.resources.engine_dead = True
+                            _self.shutdown()
+
+                    loop.call_soon_threadsafe(handle_failure)
+
+                if _self._all_engines_dead():
+                    _self.resources.engine_dead = True
+                    _self.shutdown()
+                    return
+
+        Thread(
+            target=monitor_engine_cores,
+            daemon=True,
+            name="DPLBClientEngineMonitor",
+        ).start()
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None:
-            current_counts = self.lb_engines
-            # TODO use P2C alg for larger DP sizes
-            num_engines = len(current_counts)
-            min_score = sys.maxsize
-            eng_index = 0
-            for i in range(num_engines):
-                # Start from client_index to help with balancing when engines
-                # are empty.
-                idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
-                score = waiting * 4 + running
-                if score < min_score:
-                    min_score = score
-                    eng_index = idx
-            # Increment local waiting count for better balancing between stats
-            # updates from the coordinator (which happen every 100ms).
-            current_counts[eng_index][0] += self.client_count
+        if (eng_rank := request.data_parallel_rank) is None:
+            eng_index = self._choose_live_engine_index()
+        else:
+            chosen_engine = self._rank_to_engine.get(eng_rank)
+            if chosen_engine is None or not self._engine_alive.get(
+                chosen_engine, False
+            ):
+                logger.warning(
+                    "Pinned data_parallel_rank=%s is unavailable; falling back "
+                    "to a surviving engine.",
+                    eng_rank,
+                )
+                eng_index = self._choose_live_engine_index()
+            else:
+                eng_index = self._engine_to_lb_index[chosen_engine]
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
@@ -1241,14 +1421,90 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
+        alive_engines = [
+            engine for engine in self.core_engines
+            if self._engine_alive.get(engine, True)
+        ]
+        if not alive_engines:
+            raise EngineDeadError()
         return (
             await asyncio.gather(
                 *[
                     self._call_utility_async(method, *args, engine=engine)
-                    for engine in self.core_engines
+                    for engine in alive_engines
                 ]
             )
         )[0]
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        await super().add_request_async(request)
+        engine = self.reqs_in_flight.get(request.request_id)
+        if engine is not None:
+            self._log_request_route(request.request_id, engine)
+
+    def _ensure_output_queue_task(self):
+        resources = self.resources
+        if resources.output_queue_task is not None:
+            return
+
+        decoder = self.decoder
+        utility_results = self.utility_results
+        outputs_queue = self.outputs_queue
+        output_handler: (
+            Callable[["DPLBAsyncMPClient", EngineCoreOutputs], Awaitable[None]]
+            | None
+        ) = getattr(self.__class__, "process_engine_outputs", None)
+        _self_ref = weakref.ref(self)
+        output_socket = resources.output_socket
+        assert output_socket is not None
+
+        async def process_outputs_socket():
+            try:
+                while True:
+                    frames = await output_socket.recv_multipart(copy=False)
+
+                    if len(frames) >= 1 and (
+                        bytes(frames[0].buffer)
+                        == EngineCoreProc.ENGINE_CORE_DEAD
+                    ):
+                        _self = _self_ref()
+                        if _self is None:
+                            return
+
+                        if len(frames) >= 2:
+                            engine_index = msgspec.msgpack.decode(
+                                bytes(frames[1].buffer)
+                            )
+                            _self._handle_engine_failure(engine_index)
+                        if _self._all_engines_dead():
+                            resources.engine_dead = True
+                            raise EngineDeadError()
+                        continue
+
+                    outputs: EngineCoreOutputs = decoder.decode(frames)
+                    if outputs.utility_output:
+                        _process_utility_output(outputs.utility_output, utility_results)
+                        continue
+
+                    if output_handler is not None:
+                        _self = _self_ref()
+                        if not _self:
+                            return
+                        await output_handler(_self, outputs)
+
+                    if outputs.outputs or outputs.scheduler_stats:
+                        outputs_queue.put_nowait(outputs)
+            except EngineDeadError:
+                outputs_queue.put_nowait(EngineDeadError())
+            except Exception as e:
+                outputs_queue.put_nowait(e)
+            except asyncio.CancelledError:
+                outputs_queue.put_nowait(EngineDeadError())
+
+        resources.output_queue_task = asyncio.create_task(
+            process_outputs_socket(),
+            name="DPLBEngineCoreOutputQueueTask",
+        )
 
     @staticmethod
     async def process_engine_outputs(
@@ -1344,6 +1600,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_engine = i.to_bytes(2, "little")
             self.core_engines.append(new_engine)
             new_engine_identities.add(new_engine)
+        self._rebuild_engine_maps()
 
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
@@ -1406,6 +1663,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()
+        self._rebuild_engine_maps()
 
         await asyncio.gather(*reconfig_futures)
 

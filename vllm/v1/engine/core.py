@@ -49,6 +49,8 @@ from vllm.v1.engine import (
     FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    ReplicaSnapshot,
+    RequestSnapshot,
     UtilityOutput,
     UtilityResult,
 )
@@ -358,10 +360,7 @@ class EngineCore:
         if not hasattr(self, "_ft_pending_restores") or not self._ft_pending_restores:
             return
 
-        from vllm.v1.core.sched.ft_scheduler_impl import (
-            FaultTolerantSchedulerImpl,
-        )
-        if not isinstance(self.scheduler, FaultTolerantSchedulerImpl):
+        if not hasattr(self.scheduler, "ft_scheduler"):
             self._ft_pending_restores.clear()
             return
 
@@ -376,17 +375,12 @@ class EngineCore:
 
         for req_id, num_ckpt_tokens in self._ft_pending_restores:
             try:
-                blocks = kv_cache_mgr.req_to_blocks.get(req_id)
-                if blocks is None:
+                target_block_ids = self._get_ft_target_block_ids(
+                    req_id, kv_cache_mgr
+                )
+                if not target_block_ids:
                     still_pending.append((req_id, num_ckpt_tokens))
                     continue
-
-                all_ids = blocks.get_block_ids()
-                if not all_ids:
-                    still_pending.append((req_id, num_ckpt_tokens))
-                    continue
-
-                target_block_ids = list(all_ids[0])
 
                 results = self.collective_rpc(
                     "restore_kv_blocks",
@@ -448,6 +442,28 @@ class EngineCore:
                 )
 
         self._ft_pending_restores = still_pending
+
+    def _get_ft_target_block_ids(
+        self,
+        request_id: str,
+        kv_cache_mgr: "KVCacheManager",
+    ) -> list[int]:
+        """Resolve the allocated KV block IDs for an FT restore target."""
+        try:
+            all_ids = kv_cache_mgr.get_block_ids(request_id)
+            if all_ids:
+                return list(all_ids[0])  # First KV cache group.
+        except (AttributeError, KeyError, TypeError):
+            pass
+
+        # Fall back to older/specialized managers that expose raw blocks.
+        try:
+            blocks = kv_cache_mgr.req_to_blocks.get(request_id)
+            if blocks:
+                return [blk.block_id for blk in blocks]
+        except (AttributeError, KeyError, TypeError):
+            pass
+        return []
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -538,50 +554,66 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        # FT checkpoint hook: if the scheduler is FT-aware, trigger
-        # GPU→CPU KV checkpoint via collective_rpc on the workers.
-        ckpt_updates = self._maybe_ft_checkpoint()
-
-        # Merge any buffered checkpoint updates from previous steps.
-        if not hasattr(self, "_ft_buffered_ckpt_updates"):
-            self._ft_buffered_ckpt_updates: dict[str, int] = {}
-        if ckpt_updates:
-            self._ft_buffered_ckpt_updates.update(ckpt_updates)
-
-        # Inject checkpoint updates into ALL output entries so every
-        # client receives the update (DP may have multiple clients).
-        # If no outputs this step, buffer updates for the next step
-        # that does produce outputs.
-        if self._ft_buffered_ckpt_updates and engine_core_outputs:
-            for outputs in engine_core_outputs.values():
-                outputs.checkpoint_updates = dict(
-                    self._ft_buffered_ckpt_updates
-                )
-            self._ft_buffered_ckpt_updates.clear()
+        self._ft_post_process(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
-    def _maybe_ft_checkpoint(self) -> dict[str, int] | None:
-        """Trigger GPU→CPU KV checkpoint if using FT scheduler.
+    def _capture_ft_checkpoint_plan(
+        self,
+    ) -> list[tuple[str, list[int]]] | None:
+        """Capture per-batch checkpoint work before async scheduling advances.
 
-        Returns:
-            Dict mapping request_id -> num_checkpointed_tokens for
-            successfully checkpointed requests, or None.
+        In async scheduling, schedule() may run multiple times before the
+        output for an earlier batch is processed.  We therefore snapshot the
+        requests chosen for checkpointing together with the KV block IDs that
+        were valid for that scheduled batch, and defer only the token-count
+        lookup until post-step.
         """
-        from vllm.v1.core.sched.ft_scheduler_impl import (
-            FaultTolerantSchedulerImpl,
-        )
-
-        if not isinstance(self.scheduler, FaultTolerantSchedulerImpl):
+        if not hasattr(self.scheduler, "ft_scheduler"):
             return None
 
         checkpoint_requests = self.scheduler.get_checkpoint_requests()
         if not checkpoint_requests:
             return None
 
-        # checkpoint_requests is list of (request_id, block_ids, num_tokens)
-        # — already includes real num_computed_tokens from the scheduler.
-        request_block_map = checkpoint_requests
+        return [
+            (req_id, list(block_ids))
+            for req_id, block_ids, _num_tokens in checkpoint_requests
+        ]
+
+    def _maybe_ft_checkpoint(
+        self,
+        checkpoint_plan: list[tuple[str, list[int]]] | None = None,
+    ) -> dict[str, int] | None:
+        """Trigger GPU→CPU KV checkpoint if using FT scheduler.
+
+        Returns:
+            Dict mapping request_id -> num_checkpointed_tokens for
+            successfully checkpointed requests, or None.
+        """
+        if not hasattr(self.scheduler, "ft_scheduler"):
+            return None
+
+        ft = self.scheduler.ft_scheduler
+        request_block_map: list[tuple[str, list[int], int]] = []
+        if checkpoint_plan is None:
+            checkpoint_requests = self.scheduler.get_checkpoint_requests()
+            if not checkpoint_requests:
+                return None
+            request_block_map = checkpoint_requests
+        else:
+            for req_id, block_ids in checkpoint_plan:
+                request = ft.request_pool.get_request(req_id)
+                if request is None or not block_ids:
+                    continue
+                request_block_map.append((
+                    req_id,
+                    block_ids,
+                    request.num_computed_tokens,
+                ))
+            if not request_block_map:
+                return None
+
         ckpt_updates: dict[str, int] = {}
 
         try:
@@ -593,16 +625,26 @@ class EngineCore:
             # Write checkpoint results back to FT controller/request state.
             # results is a list (one per worker); take the first.
             if results and results[0]:
-                ft = self.scheduler.ft_scheduler
                 # Collect (num_tokens, size_bytes) for metadata sync.
                 metadata_updates: dict[str, tuple[int, int]] = {}
-                for req_id, size_bytes in results[0]:
+                for result in results[0]:
+                    if len(result) == 3:
+                        req_id, size_bytes, covered_tokens = result
+                    else:
+                        req_id, size_bytes = result
+                        request = ft.request_pool.get_request(req_id)
+                        covered_tokens = (
+                            request.num_computed_tokens
+                            if request is not None else 0
+                        )
                     request = ft.request_pool.get_request(req_id)
                     if request is not None:
                         ft.checkpoint_controller.record_checkpoint(request)
-                        ckpt_updates[req_id] = request.num_computed_tokens
+                        request.num_checkpointed_tokens = covered_tokens
+                        request.last_checkpoint_size_bytes = size_bytes
+                        ckpt_updates[req_id] = covered_tokens
                         metadata_updates[req_id] = (
-                            request.num_computed_tokens,
+                            covered_tokens,
                             size_bytes,
                         )
                         logger.debug(
@@ -610,20 +652,116 @@ class EngineCore:
                             "(%d bytes, %d tokens)",
                             req_id,
                             size_bytes,
-                            request.num_computed_tokens,
+                            covered_tokens,
                         )
                 # Sync metadata (with actual size_bytes from worker) to
                 # FT scheduler so RecoveryManager can estimate recovery
                 # costs accurately.
                 if metadata_updates:
                     ft.update_checkpoint_metadata(metadata_updates)
-        except Exception:
-            logger.debug(
-                "FT checkpoint failed for %d requests (non-fatal)",
+        except Exception as e:
+            logger.warning(
+                "FT checkpoint failed for %d requests: %s",
                 len(request_block_map),
+                e,
             )
+            for rid, bids, ntok in request_block_map:
+                logger.warning(
+                    "  failed request %s: %d blocks, %d tokens",
+                    rid,
+                    len(bids),
+                    ntok,
+                )
 
         return ckpt_updates if ckpt_updates else None
+
+    def _get_solver_recovery_targets(self) -> dict[str, int] | None:
+        """Extract solver-planned recovery targets from Benders scheduler.
+
+        Returns:
+            None if not using Benders scheduler (don't touch buffer).
+            {} if Benders but no plans (clear buffer).
+            dict if plans exist (replace buffer).
+        """
+        if not hasattr(self.scheduler, "get_solver_recovery_target"):
+            return None  # Not a Benders scheduler.
+
+        plans = getattr(self.scheduler, "_recovery_plans", None)
+        if not plans:
+            return {}  # Benders but no plans (cleared after fallback).
+
+        replica_id = getattr(self.scheduler, "_replica_id", None)
+        if replica_id is None:
+            return {}
+
+        # Find best matching scenario containing the local replica.
+        omega = frozenset({replica_id})
+        plan = plans.get(omega)
+        if plan:
+            return dict(plan)
+
+        # For multi-failure scenarios, try any scenario containing local.
+        for scenario, sp in plans.items():
+            if replica_id in scenario and sp:
+                return dict(sp)
+
+        return {}
+
+    def _build_active_snapshots(self) -> list[RequestSnapshot] | None:
+        """Build RequestSnapshots for the centralized solver.
+
+        Only active when policy is ft_benders_centralized and the
+        scheduler has an ft_scheduler with a request pool.
+        """
+        if not hasattr(self.scheduler, "ft_scheduler"):
+            return None
+
+        ft = self.scheduler.ft_scheduler
+        snapshots: list[RequestSnapshot] = []
+        for req in ft.request_pool.get_admitted_requests():
+            snapshots.append(RequestSnapshot(
+                request_id=req.request_id,
+                prompt_len=req.prompt_len,
+                generation_len=req.generation_len,
+                num_computed_tokens=req.num_computed_tokens,
+                num_output_tokens=req.num_output_tokens,
+                num_checkpointed_tokens=req.num_checkpointed_tokens,
+                checkpoint_size_bytes=req.last_checkpoint_size_bytes,
+                checkpoint_level=req.checkpoint_level,
+                assigned_replica_id=req.assigned_replica_id,
+                ttft_slo_ms=req.ttft_slo_ms,
+                tpot_slo_ms=req.tpot_slo_ms,
+                failure_gap_slo_ms=req.failure_gap_slo_ms,
+            ))
+        return snapshots
+
+    def _build_replica_snapshot(self) -> ReplicaSnapshot | None:
+        """Build ReplicaSnapshot for the centralized solver."""
+        if not hasattr(self.scheduler, "ft_scheduler"):
+            return None
+
+        waiting, running = self.scheduler.get_request_counts()
+
+        # Access KV cache stats. The base scheduler (accessed via _base
+        # for FT schedulers) has the kv_cache_manager.
+        kv_usage = 0.0
+        free_blocks = 0
+        base_sched = getattr(self.scheduler, "_base", self.scheduler)
+        kv_mgr = getattr(base_sched, "kv_cache_manager", None)
+        if kv_mgr is not None:
+            kv_usage = kv_mgr.usage
+            free_blocks = kv_mgr.block_pool.get_num_free_blocks()
+
+        replica_id = getattr(self, "engine_index",
+                             self.vllm_config.parallel_config.data_parallel_rank or 0)
+        return ReplicaSnapshot(
+            replica_id=replica_id,
+            is_healthy=True,
+            num_waiting_reqs=waiting,
+            num_running_reqs=running,
+            gpu_kv_cache_usage=kv_usage,
+            available_kv_blocks=free_blocks,
+        )
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -661,8 +799,15 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
+        deferred_checkpoint_plan: list[tuple[str, list[int]]] | None = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+
+            # FT restore: schedule() has allocated KV blocks. Restore
+            # checkpoint KV into those blocks before execute_model().
+            self._process_ft_pending_restores(scheduler_output)
+            checkpoint_plan = self._capture_ft_checkpoint_plan()
+
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
@@ -686,10 +831,16 @@ class EngineCore:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
                     deferred_scheduler_output = scheduler_output
+                    deferred_checkpoint_plan = checkpoint_plan
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
+                batch_queue.appendleft((
+                    future,
+                    scheduler_output,
+                    exec_future,
+                    checkpoint_plan,
+                ))
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size
@@ -706,7 +857,7 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        future, scheduler_output, exec_model_fut, checkpoint_plan = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
@@ -747,9 +898,78 @@ class EngineCore:
                 deferred_scheduler_output
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
-            batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+            batch_queue.appendleft((
+                future,
+                deferred_scheduler_output,
+                exec_future,
+                deferred_checkpoint_plan,
+            ))
+
+        self._ft_post_process(
+            engine_core_outputs, checkpoint_plan=checkpoint_plan
+        )
 
         return engine_core_outputs, model_executed
+
+    def _ft_post_process(
+        self,
+        engine_core_outputs: dict | None,
+        checkpoint_plan: list[tuple[str, list[int]]] | None = None,
+    ) -> None:
+        """FT post-processing shared by step() and step_with_batch_queue().
+
+        Handles checkpoint updates, solver recovery targets/ckpt classes,
+        and centralized solver snapshots.
+        """
+        # FT checkpoint hook: trigger GPU→CPU KV checkpoint.
+        ckpt_updates = self._maybe_ft_checkpoint(checkpoint_plan)
+
+        # Merge any buffered checkpoint updates from previous steps.
+        if not hasattr(self, "_ft_buffered_ckpt_updates"):
+            self._ft_buffered_ckpt_updates: dict[str, int] = {}
+        if ckpt_updates:
+            self._ft_buffered_ckpt_updates.update(ckpt_updates)
+
+        # Inject checkpoint updates into ALL output entries so every
+        # client receives the update (DP may have multiple clients).
+        if self._ft_buffered_ckpt_updates and engine_core_outputs:
+            for outputs in engine_core_outputs.values():
+                outputs.checkpoint_updates = dict(
+                    self._ft_buffered_ckpt_updates
+                )
+            self._ft_buffered_ckpt_updates.clear()
+
+        # FT Benders: buffer solver recovery targets.
+        if not hasattr(self, "_ft_buffered_recovery_targets"):
+            self._ft_buffered_recovery_targets: dict[str, int] | None = None
+
+        recovery_targets = self._get_solver_recovery_targets()
+        if recovery_targets is not None:
+            self._ft_buffered_recovery_targets = dict(recovery_targets)
+
+        # Flush buffers to outputs.
+        if self._ft_buffered_recovery_targets is not None and engine_core_outputs:
+            for outputs in engine_core_outputs.values():
+                outputs.recovery_targets = dict(
+                    self._ft_buffered_recovery_targets
+                )
+            self._ft_buffered_recovery_targets = None
+
+        # FT Benders centralized: emit request + replica snapshots for
+        # the client-side global solver. Throttled to once per 100ms.
+        if (self.vllm_config.scheduler_config.policy
+                == "ft_benders_centralized" and engine_core_outputs):
+            if not hasattr(self, "_ft_last_snapshot_time"):
+                self._ft_last_snapshot_time: float = 0.0
+            now = time.monotonic()
+            if now - self._ft_last_snapshot_time >= 0.1:
+                req_snaps = self._build_active_snapshots()
+                rep_snap = self._build_replica_snapshot()
+                if req_snaps is not None:
+                    for outputs in engine_core_outputs.values():
+                        outputs.active_request_snapshots = req_snaps
+                        outputs.replica_snapshot = rep_snap
+                self._ft_last_snapshot_time = now
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -1269,11 +1489,28 @@ class EngineCoreProc(EngineCore):
                 step_counter=getattr(self, "step_counter", 0),
                 current_wave=getattr(self, "current_wave", 0),
             )
-            self.output_queue.put_nowait(
-                (-1, EngineCoreOutputs(scheduler_stats=stats))
-            )
+            outputs = EngineCoreOutputs(scheduler_stats=stats)
+            self._attach_centralized_snapshot_metadata(outputs)
+            self.output_queue.put_nowait((-1, outputs))
         except Exception:
             pass  # Best-effort heartbeat.
+
+    def _attach_centralized_snapshot_metadata(
+        self,
+        outputs: EngineCoreOutputs,
+    ) -> None:
+        """Attach centralized-solver snapshot metadata to a single output.
+
+        Stats-only heartbeats are often the only messages emitted by an idle
+        replica. Without snapshots on those heartbeats, the centralized client
+        can fail to observe healthy but idle engines and ends up solving over
+        an incomplete replica set.
+        """
+        if self.vllm_config.scheduler_config.policy != "ft_benders_centralized":
+            return
+
+        outputs.active_request_snapshots = self._build_active_snapshots()
+        outputs.replica_snapshot = self._build_replica_snapshot()
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -1320,11 +1557,37 @@ class EngineCoreProc(EngineCore):
             self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=output))
             )
+        elif request_type == EngineCoreRequestType.REPLICA_FAILED:
+            self._handle_replica_failed(request)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
+            )
+
+    def _handle_replica_failed(self, failed_replica_id: int) -> None:
+        """Handle REPLICA_FAILED from coordinator for FT schedulers."""
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is None or not hasattr(scheduler, "ft_scheduler"):
+            return
+
+        ft = scheduler.ft_scheduler
+        fd = ft.failure_detector
+
+        from vllm.v1.core.failure_detector import ReplicaStatus
+
+        status = fd.get_status(failed_replica_id)
+        if status is None:
+            fd.register_replica(failed_replica_id)
+        if status != ReplicaStatus.FAILED:
+            fd.mark_remote_failed(failed_replica_id)
+            ft.replica_manager.notify_remote_replica_failed()
+            logger.info(
+                "Engine %d: marked remote replica %d as FAILED "
+                "(notified by coordinator)",
+                self.engine_index,
+                failed_replica_id,
             )
 
     @staticmethod
@@ -1629,8 +1892,14 @@ class DPEngineCoreProc(EngineCoreProc):
                 if not self.engines_running:
                     logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
+        elif request_type == EngineCoreRequestType.REPLICA_FAILED:
+            self._handle_replica_failed(request)
         else:
             super()._handle_client_request(request_type, request)
+
+    def _handle_replica_failed(self, failed_replica_id: int) -> None:
+        """Handle REPLICA_FAILED from coordinator."""
+        super()._handle_replica_failed(failed_replica_id)
 
     def _maybe_publish_request_counts(self):
         if not self.publish_dp_lb_stats:
@@ -1643,7 +1912,9 @@ class DPEngineCoreProc(EngineCoreProc):
             stats = SchedulerStats(
                 *counts, step_counter=self.step_counter, current_wave=self.current_wave
             )
-            self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
+            outputs = EngineCoreOutputs(scheduler_stats=stats)
+            self._attach_centralized_snapshot_metadata(outputs)
+            self.output_queue.put_nowait((-1, outputs))
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""

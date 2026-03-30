@@ -121,10 +121,15 @@ class Request:
         self._cached_slack: float = float('inf')
 
         # Fault-tolerance fields
-        self.checkpoint_level: int = 0  # 0=none, 1=low freq, 2=high freq
+        # checkpoint_level remains as coarse runtime telemetry for fixed
+        # baselines and debugging. Solver-side recoverability is derived from
+        # the real published checkpoint state instead.
+        self.checkpoint_level: int = 0
         self.assigned_replica_id: int | None = None
         self.num_checkpointed_tokens: int = 0
         self.last_checkpoint_time: float | None = None
+        self.last_checkpoint_size_bytes: int = 0
+        self.previous_output_token_ids: list[int] | None = None
 
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
@@ -240,6 +245,14 @@ class Request:
         req.num_checkpointed_tokens = getattr(
             request, "num_checkpointed_tokens", 0
         )
+        # FT: restore previous output tokens into the scheduler-side
+        # sequence state (_all_token_ids / _output_token_ids) so that
+        # num_tokens, KV block allocation, and max_tokens accounting
+        # all reflect the tokens already generated before failover.
+        prev_out = getattr(request, "previous_output_token_ids", None)
+        if prev_out:
+            req.previous_output_token_ids = prev_out
+            req.append_output_token_ids(prev_out)
         return req
 
     def append_output_token_ids(
@@ -336,13 +349,12 @@ class Request:
         """G_j: expected output length.
 
         Uses the user-provided expected_output_len if available.
-        Otherwise estimates as half of max_tokens (a heuristic that
-        avoids the extreme overestimate of using the full max_tokens
-        upper bound, which would distort capacity accounting).
+        Otherwise falls back to max_tokens, consistent with the API
+        protocol description.
         """
         if self.expected_output_len is not None:
             return self.expected_output_len
-        return max(1, self.max_tokens // 2)
+        return max(1, self.max_tokens)
 
     @property
     def generation_progress(self) -> float:

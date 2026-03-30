@@ -1,0 +1,39 @@
+[
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "timestamp": 1774479819.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-b9fee41eb12059ad-bde26c9f",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 25,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774479819.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-b8879f6f0a8c5ee0-8d463067",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 5,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774479819.0
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 2,
+    "total": 2,
+    "dropped": 0,
+    "timestamp": 1774479819.0,
+    "source": "ft_client"
+  }
+]

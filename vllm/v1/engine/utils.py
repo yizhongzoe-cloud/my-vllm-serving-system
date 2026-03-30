@@ -837,7 +837,7 @@ def launch_core_engines(
 
     if run_coordinator:
         # Use FT coordinator when fault-tolerant scheduling is enabled.
-        use_ft = vllm_config.scheduler_config.policy == "fault_tolerant"
+        use_ft = vllm_config.scheduler_config.policy in ("fault_tolerant", "ft_benders", "ft_benders_centralized")
         if use_ft:
             from vllm.v1.engine.ft_coordinator import FTCoordinator
 

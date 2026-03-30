@@ -1,0 +1,122 @@
+[
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "timestamp": 1774485785.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00002-8ddb1ead",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 438,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00004-a12bc9ac",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 385,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00007-800e4981",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 435,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00009-8e15718f",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 310,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00011-9f7f14a2",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 291,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00013-b5cf3679",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 210,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00015-a3eb16b4",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 261,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00017-a9d34ab0",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 15,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-req-00019-9404ac1a",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485785.0
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 9,
+    "total": 9,
+    "dropped": 0,
+    "timestamp": 1774485785.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 1,
+    "timestamp": 1774485786.0,
+    "source": "ft_client"
+  }
+]

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority", "slo_aware", "fault_tolerant"]
+SchedulerPolicy = Literal["fcfs", "priority", "slo_aware", "fault_tolerant", "ft_benders", "ft_benders_centralized"]
 
 
 @config
@@ -109,9 +109,16 @@ class SchedulerConfig:
     - "slo_aware" means requests are scheduled based on SLO slack time
     (deadline - current_time). Requests closer to violating their SLO are
     prioritized. Requests with SLO are always prioritized over those without.\n
-    - "fault_tolerant" enables fault-tolerant scheduling with adaptive
-    KV-cache checkpointing. Jointly optimizes admission, routing, checkpoint
-    level, and failover re-routing to maximize goodput under GPU failures."""
+    - "fault_tolerant" enables fault-tolerant scheduling with online
+    adaptive KV-cache checkpointing. Uses greedy heuristic for
+    admission/routing.\n
+    - "ft_benders" enables fault-tolerant scheduling with Benders-style
+    decomposition solver. Per-engine admission control and recovery-aware
+    routing via MIP, with recovery feasibility screening across all
+    replicas. Checkpointing remains an online runtime policy rather than
+    a solver decision. Does not do cross-replica routing (handled
+    client-side). Falls back to greedy when solver cannot converge.
+    Requires ortools."""
 
     # Fault-tolerant scheduling configuration
     max_gpu_failures: int = 1
@@ -120,7 +127,7 @@ class SchedulerConfig:
 
     enable_checkpointing: bool = False
     """Enable adaptive KV-cache checkpointing to host memory for fault
-    tolerance. Only effective when policy is 'fault_tolerant'."""
+    tolerance. Only effective when policy is 'fault_tolerant' or 'ft_benders'."""
 
     checkpoint_pool_bytes: int = 8 * 1024 * 1024 * 1024
     """Host memory budget (bytes) for the KV checkpoint pool. Default 8 GB."""
@@ -133,6 +140,67 @@ class SchedulerConfig:
 
     failure_timeout_sec: float = 5.0
     """Time without heartbeat before declaring a replica as failed."""
+
+    # Benders solver configuration (ft_benders policy)
+    benders_max_iterations: int = 20
+    """Maximum Benders decomposition iterations per decision epoch."""
+
+    benders_master_time_limit: float = 1.0
+    """Time limit (seconds) for each master MIP solve."""
+
+    benders_recovery_time_limit: float = 0.5
+    """Time limit (seconds) for each recovery subproblem ILP solve."""
+
+    ft_memory_capacity_bytes: int = 0
+    """GPU memory capacity (bytes) for the solver's memory constraints.
+    0 means skip memory constraints in the solver."""
+
+    fixed_checkpoint_level: int = -1
+    """Deprecated legacy fixed checkpoint level (0/1/2).
+    Kept only for backward compatibility; experiment baselines should use
+    fixed_checkpoint_blocks instead."""
+
+    fixed_checkpoint_blocks: int = 0
+    """Force a fixed block cadence for checkpoint publication.
+    0 means use the online economic checkpoint policy.
+    Positive values publish once this many stable full blocks accumulate
+    beyond the last published prefix."""
+
+    ft_prefill_throughput: float = 0.0
+    """Prefill throughput C^{pre} (tokens/sec) for the solver cost model.
+    0 means auto-estimate or skip."""
+
+    ft_decode_throughput: float = 0.0
+    """Decode throughput C^{dec} (tokens/sec) for the solver cost model.
+    0 means auto-estimate or skip."""
+
+    ft_load_bandwidth: float = 0.0
+    """Host→GPU KV cache load bandwidth B^{ld} (bytes/sec) for recovery cost.
+    0 means auto-estimate or skip."""
+
+    ft_checkpoint_bandwidth: float = 0.0
+    """GPU→Host KV checkpoint bandwidth (bytes/sec) for online checkpoint
+    decisions. 0 means fall back to ft_load_bandwidth."""
+
+    ft_checkpoint_lambda: float = 1.0
+    """Weight λ on steady-state checkpoint copy cost in the online policy:
+    publish when Δreplay_saved > Δload + λ * Δcheckpoint_overhead."""
+
+    ft_kv_bytes_per_token: int = 8192
+    """Estimated KV bytes per token used by the online checkpoint policy and
+    solver-side cost model. Defaults to a coarse fp16 estimate."""
+
+    ft_planning_horizon: float = 1.0
+    """Planning horizon H (seconds) for the solver's capacity accounting."""
+
+    default_ttft_slo_ms: float = 0.0
+    """Default TTFT SLO (ms) applied to all requests. 0 means no SLO."""
+
+    default_tpot_slo_ms: float = 0.0
+    """Default TPOT SLO (ms) applied to all requests. 0 means no SLO."""
+
+    default_failure_gap_slo_ms: float = 0.0
+    """Default failover gap SLO (ms) applied to all requests. 0 means no SLO."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -182,6 +250,20 @@ class SchedulerConfig:
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
             if self.policy == "fault_tolerant":
+                from vllm.v1.core.sched.ft_scheduler_impl import (
+                    FaultTolerantSchedulerImpl,
+                )
+
+                return FaultTolerantSchedulerImpl
+            if self.policy == "ft_benders":
+                from vllm.v1.core.sched.benders_ft_scheduler_impl import (
+                    BendersFTSchedulerImpl,
+                )
+
+                return BendersFTSchedulerImpl
+            if self.policy == "ft_benders_centralized":
+                # Engine-side uses greedy FT scheduler (no solver).
+                # The centralized Benders solver runs in the client.
                 from vllm.v1.core.sched.ft_scheduler_impl import (
                     FaultTolerantSchedulerImpl,
                 )

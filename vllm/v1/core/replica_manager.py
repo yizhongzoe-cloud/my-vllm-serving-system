@@ -53,13 +53,22 @@ class ReplicaManager:
     FailureDetector and RequestPool.
     """
 
-    def __init__(self, planning_horizon: float = 10.0) -> None:
+    def __init__(
+        self,
+        planning_horizon: float = 10.0,
+        dp_size: int = 1,
+    ) -> None:
         """
         Args:
             planning_horizon: H in the paper. Time horizon (seconds) for
                 capacity accounting.
+            dp_size: Total number of replicas across all EngineCore
+                instances.  Each EngineCore only registers its own
+                replica locally, but capacity-under-failure checks
+                need the global count.
         """
         self.planning_horizon = planning_horizon
+        self.dp_size = dp_size
         self._replicas: dict[int, ReplicaInfo] = {}
 
     def add_replica(
@@ -84,6 +93,12 @@ class ReplicaManager:
             max_num_batched_tokens=max_num_batched_tokens,
         )
         self._replicas[replica_id] = info
+        # Keep the effective replica count at least as large as the number of
+        # locally registered replicas. This preserves the A-route semantics
+        # (where dp_size is passed in explicitly) while keeping unit tests and
+        # single-process setups that register multiple replicas locally
+        # working without requiring an explicit dp_size override.
+        self.dp_size = max(self.dp_size, len(self._replicas))
         logger.info(
             "Registered replica %d on GPU %d "
             "(prefill=%.0f tok/s, decode=%.0f tok/s)",
@@ -116,6 +131,21 @@ class ReplicaManager:
         if info is not None:
             info.status = ReplicaStatus.FAILED
             logger.warning("Replica %d marked as FAILED", replica_id)
+
+    def notify_remote_replica_failed(self) -> None:
+        """Decrement dp_size when a remote replica fails.
+
+        Called by EngineCore when it receives REPLICA_FAILED from the
+        coordinator.  This keeps capacity-under-failure checks aligned
+        with the actual number of surviving replicas.
+        """
+        if self.dp_size > 1:
+            self.dp_size -= 1
+            logger.warning(
+                "ReplicaManager: dp_size decremented to %d after "
+                "remote replica failure",
+                self.dp_size,
+            )
 
     def mark_healthy(self, replica_id: int) -> None:
         """Mark a replica as healthy."""
@@ -235,8 +265,12 @@ class ReplicaManager:
         Returns:
             True if feasible under worst-case failure.
         """
+        # Use dp_size (global replica count) instead of locally-registered
+        # replicas.  In the A-route architecture each EngineCore only
+        # registers itself, so len(get_healthy_replicas()) == 1 even when
+        # dp_size > 1, which would incorrectly reject all requests.
         all_replicas = self.get_healthy_replicas()
-        num_replicas = len(all_replicas)
+        num_replicas = self.dp_size
 
         if max_failures >= num_replicas:
             return False  # All replicas could fail.

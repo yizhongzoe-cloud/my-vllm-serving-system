@@ -1,0 +1,170 @@
+# Experiment configuration for FT Multi-GPU LLM Serving
+# See docs/design/experiment_plan_for_collaborator_short_2_revised.md
+
+# ---- Hardware & Model ----
+model: "meta-llama/Llama-3.2-1B-Instruct"
+max_model_len: 2048
+gpu_memory_utilization: 0.45
+dtype: "float16"
+enforce_eager: true
+dp_size: 2  # data-parallel replicas (= number of GPUs)
+
+# ---- Solver / FT parameters ----
+ft_prefill_throughput: 4000.0    # tokens/sec (profile on your hardware)
+ft_decode_throughput: 2000.0     # tokens/sec
+ft_load_bandwidth: 10.0e9       # 10 GB/s host→GPU
+ft_planning_horizon: 1.0        # seconds
+failure_detection_time_ms: 100.0
+failure_timeout_sec: 5.0
+checkpoint_pool_bytes: 8589934592  # 8 GB
+
+# ---- SLO bounds ----
+slo:
+  ttft_ms: 2000.0       # 2 seconds
+  tpot_ms: 100.0        # 100 ms per output token
+  failure_gap_ms: 3000.0  # 3 seconds failover gap
+
+# ---- Workloads ----
+workloads:
+  W1_Short_Interactive:
+    prompt_len_min: 50
+    prompt_len_max: 200
+    output_len_min: 20
+    output_len_max: 100
+    arrival: "poisson"
+    description: "Short prompt, short output, stable arrivals"
+
+  W2_Long_Generation:
+    prompt_len_min: 200
+    prompt_len_max: 500
+    output_len_min: 200
+    output_len_max: 500
+    arrival: "poisson"
+    description: "Medium/long prompt, long output, stable arrivals"
+
+  W3_Bursty_Mixed:
+    prompt_len_min: 50
+    prompt_len_max: 500
+    output_len_min: 20
+    output_len_max: 500
+    arrival: "bursty"
+    burst_high_multiplier: 3.0   # burst rate = base_rps * multiplier
+    burst_duration_sec: 5.0
+    burst_interval_sec: 15.0
+    description: "Mixed lengths, bursty arrivals"
+
+# ---- Load levels (requests per second) ----
+# Adjust after running prescan (suite.py --prescan)
+load_levels:
+  Low: 1.0
+  Medium: 3.0
+  High: 5.0
+
+# ---- Fault injection timing (seconds from experiment start) ----
+fault_timing:
+  none: null        # no fault
+  F1_Early: 15.0    # early: few requests in flight
+  F2_Mid: 30.0      # mid: steady state
+  F3_Late: 50.0     # late: many requests accumulated
+
+# ---- Run parameters ----
+run_duration_sec: 70.0    # total experiment duration
+warmup_sec: 5.0           # ignore first N seconds for metrics
+server_startup_timeout: 300.0
+request_timeout_sec: 60.0
+# seeds: [42, 123, 456]
+seeds: [42]
+
+# ---- Baseline configurations ----
+# Maps to CLI flags for vLLM server launch
+baselines:
+  No-FT:
+    scheduling_policy: "fcfs"
+    enable_checkpointing: false
+    max_gpu_failures: 0
+    fixed_checkpoint_blocks: 0
+
+  Fixed-Low-CKPT:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+
+  Fixed-High-CKPT:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 1
+
+  Robust-Routing-Only:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+
+  Checkpoint-Only:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0  # adaptive ckpt, greedy routing
+
+  Our-System:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0  # full Benders + adaptive ckpt
+
+# ---- Experiment definitions ----
+experiments:
+  E1_Smoke:
+    description: "Smoke validation for E1 pipeline"
+    baselines: ["No-FT", "Our-System"]
+    workloads: ["W1_Short_Interactive"]
+    load_levels: ["Medium"]
+    faults: ["none", "F2_Mid"]
+
+  E1_Main:
+  # 5*3*3*4 = 180 runs per seed
+    description: "Main end-to-end results"
+    baselines: ["No-FT", "Fixed-Low-CKPT", "Fixed-High-CKPT",
+                 "Robust-Routing-Only", "Our-System"]
+    workloads: ["W1_Short_Interactive", "W2_Long_Generation", "W3_Bursty_Mixed"]
+    load_levels: ["Low", "Medium", "High"]
+    faults: ["none", "F1_Early", "F2_Mid", "F3_Late"]
+
+  E2_Recovery:
+  # 4*2*1*1 = 8 runs per seed
+    description: "Recovery breakdown (failure runs only)"
+    baselines: ["No-FT", "Fixed-Low-CKPT", "Fixed-High-CKPT",
+                 "Our-System"]
+    workloads: ["W1_Short_Interactive", "W2_Long_Generation"]
+    load_levels: ["Medium"]
+    faults: ["F2_Mid"]
+
+  E3_Ablation:
+  # 5*2*2*2=40
+    description: "Joint optimization ablation"
+    baselines: ["Our-System", "Robust-Routing-Only", "Checkpoint-Only",
+                 "Fixed-Low-CKPT", "Fixed-High-CKPT"]
+    workloads: ["W1_Short_Interactive", "W2_Long_Generation"]
+    load_levels: ["Medium", "High"]
+    faults: ["none", "F2_Mid"]
+
+  E4_Checkpoint_Tradeoff:
+  # 4*1*2*2=16
+    description: "Checkpoint overhead vs recovery benefit"
+    baselines: ["No-FT", "Fixed-Low-CKPT", "Fixed-High-CKPT", "Our-System"]
+    workloads: ["W2_Long_Generation"]
+    load_levels: ["Medium", "High"]
+    faults: ["none", "F2_Mid"]
+
+  E5_Controller:
+  # 3*3=9
+    description: "Controller overhead / scalability"
+    baselines: ["Our-System"]
+    workloads: ["W1_Short_Interactive", "W2_Long_Generation", "W3_Bursty_Mixed"]
+    load_levels: ["Low", "Medium", "High"]
+    faults: ["none"]
+
+# ---- Output ----
+results_dir: "results"

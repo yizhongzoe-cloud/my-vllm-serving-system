@@ -137,6 +137,30 @@ class FailureDetector:
         )
         self._notify_failure(replica_id)
 
+    def mark_remote_failed(self, replica_id: int) -> None:
+        """Mark a remote replica as failed WITHOUT triggering callbacks.
+
+        Used when the coordinator notifies this engine that a remote replica
+        died. We want to update the health status (so the solver excludes it)
+        but NOT trigger local RecoveryManager — recovery for remote requests
+        is handled by the failed replica's own engine or the coordinator.
+        """
+        with self._lock:
+            health = self._replicas.get(replica_id)
+            if health is None:
+                return
+            if health.status == ReplicaStatus.FAILED:
+                return
+            health.status = ReplicaStatus.FAILED
+            health.failure_time = time.time()
+            health.total_failures += 1
+
+        logger.info(
+            "Replica %d marked as FAILED (remote notification, "
+            "no local recovery triggered)",
+            replica_id,
+        )
+
     def mark_recovering(self, replica_id: int) -> None:
         """Mark a replica as currently undergoing failover recovery."""
         with self._lock:

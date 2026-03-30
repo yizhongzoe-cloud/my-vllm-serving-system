@@ -539,6 +539,15 @@ class EngineArgs:
     failure_detection_time_ms: float = SchedulerConfig.failure_detection_time_ms
     heartbeat_interval_sec: float = SchedulerConfig.heartbeat_interval_sec
     failure_timeout_sec: float = SchedulerConfig.failure_timeout_sec
+    fixed_checkpoint_level: int = SchedulerConfig.fixed_checkpoint_level
+    fixed_checkpoint_blocks: int = SchedulerConfig.fixed_checkpoint_blocks
+    ft_prefill_throughput: float = SchedulerConfig.ft_prefill_throughput
+    ft_decode_throughput: float = SchedulerConfig.ft_decode_throughput
+    ft_load_bandwidth: float = SchedulerConfig.ft_load_bandwidth
+    ft_planning_horizon: float = SchedulerConfig.ft_planning_horizon
+    default_ttft_slo_ms: float = SchedulerConfig.default_ttft_slo_ms
+    default_tpot_slo_ms: float = SchedulerConfig.default_tpot_slo_ms
+    default_failure_gap_slo_ms: float = SchedulerConfig.default_failure_gap_slo_ms
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
@@ -1146,6 +1155,42 @@ class EngineArgs:
             "--failure-timeout-sec",
             **scheduler_kwargs["failure_timeout_sec"],
         )
+        scheduler_group.add_argument(
+            "--fixed-checkpoint-level",
+            **scheduler_kwargs["fixed_checkpoint_level"],
+        )
+        scheduler_group.add_argument(
+            "--fixed-checkpoint-blocks",
+            **scheduler_kwargs["fixed_checkpoint_blocks"],
+        )
+        scheduler_group.add_argument(
+            "--ft-prefill-throughput",
+            **scheduler_kwargs["ft_prefill_throughput"],
+        )
+        scheduler_group.add_argument(
+            "--ft-decode-throughput",
+            **scheduler_kwargs["ft_decode_throughput"],
+        )
+        scheduler_group.add_argument(
+            "--ft-load-bandwidth",
+            **scheduler_kwargs["ft_load_bandwidth"],
+        )
+        scheduler_group.add_argument(
+            "--ft-planning-horizon",
+            **scheduler_kwargs["ft_planning_horizon"],
+        )
+        scheduler_group.add_argument(
+            "--default-ttft-slo-ms",
+            **scheduler_kwargs["default_ttft_slo_ms"],
+        )
+        scheduler_group.add_argument(
+            "--default-tpot-slo-ms",
+            **scheduler_kwargs["default_tpot_slo_ms"],
+        )
+        scheduler_group.add_argument(
+            "--default-failure-gap-slo-ms",
+            **scheduler_kwargs["default_failure_gap_slo_ms"],
+        )
 
         scheduler_group.add_argument(
             "--enable-chunked-prefill",
@@ -1693,6 +1738,15 @@ class EngineArgs:
             failure_detection_time_ms=self.failure_detection_time_ms,
             heartbeat_interval_sec=self.heartbeat_interval_sec,
             failure_timeout_sec=self.failure_timeout_sec,
+            fixed_checkpoint_level=self.fixed_checkpoint_level,
+            fixed_checkpoint_blocks=self.fixed_checkpoint_blocks,
+            ft_prefill_throughput=self.ft_prefill_throughput,
+            ft_decode_throughput=self.ft_decode_throughput,
+            ft_load_bandwidth=self.ft_load_bandwidth,
+            ft_planning_horizon=self.ft_planning_horizon,
+            default_ttft_slo_ms=self.default_ttft_slo_ms,
+            default_tpot_slo_ms=self.default_tpot_slo_ms,
+            default_failure_gap_slo_ms=self.default_failure_gap_slo_ms,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

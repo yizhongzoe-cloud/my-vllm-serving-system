@@ -22,6 +22,7 @@ failure-tolerance for GPU crashes is not possible (no surviving replica).
 """
 
 from collections.abc import Iterable
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import init_logger
@@ -45,6 +46,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _normalize_base_scheduler_config(vllm_config: "VllmConfig") -> "VllmConfig":
+    """Map FT wrapper policies to a base Scheduler policy the engine understands."""
+    sched_cfg = vllm_config.scheduler_config
+    if sched_cfg.policy == "fault_tolerant":
+        return vllm_config
+    base_sched_kwargs = asdict(sched_cfg)
+    base_sched_kwargs["policy"] = "fault_tolerant"
+    base_sched_kwargs["max_model_len"] = vllm_config.model_config.max_model_len
+    base_sched_kwargs["is_encoder_decoder"] = (
+        vllm_config.model_config.is_encoder_decoder
+    )
+    base_sched_cfg = sched_cfg.default_factory(**base_sched_kwargs)
+    return vllm_config.replace(scheduler_config=base_sched_cfg)
+
+
 class FaultTolerantSchedulerImpl(SchedulerInterface):
     """SchedulerInterface implementation that wraps the base Scheduler
     with fault-tolerant admission, checkpointing, and recovery logic.
@@ -65,8 +81,9 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         # Build the base scheduler (handles all standard vLLM logic).
+        base_vllm_config = _normalize_base_scheduler_config(vllm_config)
         self._base = Scheduler(
-            vllm_config=vllm_config,
+            vllm_config=base_vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=structured_output_manager,
             block_size=block_size,
@@ -74,19 +91,11 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
             include_finished_set=include_finished_set,
             log_stats=log_stats,
         )
+        self.connector = self._base.connector
 
         # Build the FT scheduler with config from SchedulerConfig.
         sched_cfg = vllm_config.scheduler_config
         parallel_cfg = vllm_config.parallel_config
-        ft_config = FTSchedulerConfig(
-            max_gpu_failures=sched_cfg.max_gpu_failures,
-            checkpoint_pool_bytes=sched_cfg.checkpoint_pool_bytes,
-            detection_time_sec=sched_cfg.failure_detection_time_ms / 1000.0,
-            heartbeat_interval_sec=sched_cfg.heartbeat_interval_sec,
-            failure_timeout_sec=sched_cfg.failure_timeout_sec,
-            enable_checkpointing=sched_cfg.enable_checkpointing,
-        )
-        self._ft = FaultTolerantScheduler(config=ft_config)
 
         # Determine replica identity.
         # In DP mode: each EngineCore is a separate replica.
@@ -94,11 +103,37 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
         dp_size = parallel_cfg.data_parallel_size
         dp_rank = parallel_cfg.data_parallel_rank or 0
 
+        ft_config = FTSchedulerConfig(
+            max_gpu_failures=sched_cfg.max_gpu_failures,
+            checkpoint_pool_bytes=sched_cfg.checkpoint_pool_bytes,
+            detection_time_sec=sched_cfg.failure_detection_time_ms / 1000.0,
+            heartbeat_interval_sec=sched_cfg.heartbeat_interval_sec,
+            failure_timeout_sec=sched_cfg.failure_timeout_sec,
+            enable_checkpointing=sched_cfg.enable_checkpointing,
+            fixed_checkpoint_level=sched_cfg.fixed_checkpoint_level,
+            fixed_checkpoint_blocks=sched_cfg.fixed_checkpoint_blocks,
+            block_size=block_size,
+            replay_throughput_tokens_per_sec=(
+                sched_cfg.ft_prefill_throughput or 0.0
+            ),
+            load_bandwidth_bytes_per_sec=(
+                sched_cfg.ft_load_bandwidth or 0.0
+            ),
+            checkpoint_bandwidth_bytes_per_sec=(
+                sched_cfg.ft_checkpoint_bandwidth
+                or sched_cfg.ft_load_bandwidth
+                or 0.0
+            ),
+            checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
+            kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
+        )
+        self._ft = FaultTolerantScheduler(config=ft_config, dp_size=dp_size)
+
         # Get throughput estimates from config (user-configured or defaults).
         # These can also be profiled at runtime later.
-        prefill_tput = getattr(sched_cfg, "ft_prefill_throughput", 0.0) or 0.0
-        decode_tput = getattr(sched_cfg, "ft_decode_throughput", 0.0) or 0.0
-        load_bw = getattr(sched_cfg, "ft_load_bandwidth", 0.0) or 0.0
+        prefill_tput = sched_cfg.ft_prefill_throughput or 0.0
+        decode_tput = sched_cfg.ft_decode_throughput or 0.0
+        load_bw = sched_cfg.ft_load_bandwidth or 0.0
 
         # Register this engine as a replica.
         self._replica_id = dp_rank

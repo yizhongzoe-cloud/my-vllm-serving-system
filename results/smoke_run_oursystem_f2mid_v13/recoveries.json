@@ -1,0 +1,83 @@
+[
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "timestamp": 1774472768.0,
+    "source": "centralized"
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-ac9d22899aeadb12-9cd6c968",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 83,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472768.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-a1ccdbdfa5c28b57-a6336d0e",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 52,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472768.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-ac7bca4a6cfa0d14-bec73368",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 14,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472768.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-8f4ba31248ca26f1-9af1f960",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 6,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472768.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-abe65ff36df82331-ac7ab9ac",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472768.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-a67af358457284a6-8a16dfc2",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 0,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774472768.0
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 6,
+    "total": 6,
+    "dropped": 0,
+    "timestamp": 1774472768.0,
+    "source": "centralized"
+  }
+]

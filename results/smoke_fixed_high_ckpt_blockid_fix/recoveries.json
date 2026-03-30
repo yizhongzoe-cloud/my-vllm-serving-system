@@ -1,0 +1,116 @@
+[
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "timestamp": 1774485126.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-895124585857faeb-8f993630",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 384,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-92c7f64acb40b56d-abdedde6",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 361,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-a3f62ac614c5d721-b69c1b62",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 319,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-be5d914970a3c358-b4f249a7",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 251,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-a57734c35bf1ae4f-beb0a4a9",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 134,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-8c8d939408bd2c5d-87a1ff7c",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 130,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-a837217fd98eca41-a324ba87",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 72,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-916f279e236ff751-a5d7dc27",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 16,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "reroute",
+    "request_id": "chatcmpl-86663574486529cb-879e414a",
+    "initial_gpu": 0,
+    "resumed_gpu": 1,
+    "tokens_restored": 0,
+    "replay_tokens": 5,
+    "est_gap_ms": 0.0,
+    "slo_met": true,
+    "timestamp": 1774485126.0
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 9,
+    "total": 9,
+    "dropped": 0,
+    "timestamp": 1774485126.0,
+    "source": "ft_client"
+  }
+]

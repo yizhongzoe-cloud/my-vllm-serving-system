@@ -45,6 +45,9 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # FT: output tokens generated before failover, for penalty restoration.
+    previous_output_token_ids: list[int] | None = None
+
     @classmethod
     def from_request(
         cls,
@@ -63,6 +66,9 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
+            previous_output_token_ids=getattr(
+                request, "previous_output_token_ids", None
+            ),
         )
 
     def __repr__(self) -> str:
