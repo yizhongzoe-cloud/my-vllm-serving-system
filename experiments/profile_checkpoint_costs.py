@@ -429,7 +429,10 @@ def main():
         try:
             kv_bench = KVCheckpointBenchmark()  # Uses Llama-3.2-1B geometry (num_kv_heads=8, head_size=64)
             block_counts = [1, 2, 4, 8, 16, 32, 64]
-            load_data, checkpoint_data = kv_bench.benchmark_save_restore(block_counts)
+            save_data, restore_data = kv_bench.benchmark_save_restore(block_counts)
+            # save = checkpoint (GPU→Host), restore = load (Host→GPU)
+            checkpoint_data = save_data
+            load_data = restore_data
         except Exception as e:
             print(f"  KV benchmark failed: {e}")
             print("  Using placeholder data")

@@ -29,6 +29,7 @@ from vllm.v1.core.checkpoint_controller import (
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
+    from vllm.v1.core.checkpoint_cost_model import CheckpointCostModel
     from vllm.v1.engine import EngineCoreRequest, RequestSnapshot
 
 
@@ -88,6 +89,7 @@ class CostTableBuilder:
         kv_bytes_per_token: int = 0,
         block_size: int = 1,
         checkpoint_lambda: float = 1.0,
+        cost_model: "CheckpointCostModel | None" = None,
     ) -> None:
         self.planning_horizon = planning_horizon
         self.prefill_throughput = prefill_throughput
@@ -105,6 +107,7 @@ class CostTableBuilder:
         )
         self.block_size = max(1, block_size)
         self.checkpoint_lambda = checkpoint_lambda
+        self._cost_model = cost_model
 
     def compute_request_costs(
         self,
@@ -229,18 +232,31 @@ class CostTableBuilder:
             if published_tokens > 0 and checkpoint_size_bytes > 0
             else published_tokens * kv_bytes_per_token
         )
-        restore_time_sec = (
-            restore_bytes / self.load_bandwidth
-            if restore_bytes > 0 and self.load_bandwidth > 0
-            else 0.0
-        )
-
         replay_tokens = max(0, recovery_tokens - published_tokens)
-        replay_time_sec = (
-            replay_tokens / self.replay_throughput
-            if replay_tokens > 0 and self.replay_throughput > 0
-            else 0.0
-        )
+
+        if self._cost_model is not None:
+            # Profile-driven: piecewise linear interpolation (ms → sec)
+            restore_time_sec = (
+                self._cost_model.t_load(restore_bytes) / 1000.0
+                if restore_bytes > 0 else 0.0
+            )
+            replay_time_sec = (
+                (self._cost_model.t_prefill(recovery_tokens)
+                 - self._cost_model.t_prefill(published_tokens)) / 1000.0
+                if replay_tokens > 0 else 0.0
+            )
+        else:
+            # Linear fallback
+            restore_time_sec = (
+                restore_bytes / self.load_bandwidth
+                if restore_bytes > 0 and self.load_bandwidth > 0
+                else 0.0
+            )
+            replay_time_sec = (
+                replay_tokens / self.replay_throughput
+                if replay_tokens > 0 and self.replay_throughput > 0
+                else 0.0
+            )
 
         resume_time_sec = (
             1.0 / self.decode_throughput
@@ -254,22 +270,38 @@ class CostTableBuilder:
             + resume_time_sec
         )
 
-        publish_estimate = estimate_online_checkpoint_publication(
-            num_computed_tokens=num_computed_tokens if is_active else 0,
-            num_checkpointed_tokens=num_checkpointed_tokens if is_active else 0,
-            checkpoint_size_bytes=checkpoint_size_bytes if is_active else 0,
-            block_size=self.block_size,
-            replay_throughput_tokens_per_sec=self.replay_throughput,
-            load_bandwidth_bytes_per_sec=self.load_bandwidth,
-            checkpoint_bandwidth_bytes_per_sec=self.checkpoint_bandwidth,
-            checkpoint_lambda=self.checkpoint_lambda,
-            default_kv_bytes_per_token=self.kv_bytes_per_token,
-        )
-        checkpoint_overhead_sec = (
-            publish_estimate.checkpoint_cost_sec
-            if publish_estimate.should_publish
-            else 0.0
-        )
+        if self._cost_model is not None and is_active:
+            # Profile-driven checkpoint overhead.
+            # Total cost = c0 (fixed overhead) + t_ckpt(ΔS) (size-dependent).
+            # checkpoint_ms_by_bytes in the profile has c0 already subtracted,
+            # so we must add it back for the actual overhead estimate.
+            stable_full_tokens = (num_computed_tokens // self.block_size) * self.block_size
+            L = published_tokens
+            u = max(0, stable_full_tokens - L)
+            S = checkpoint_size_bytes
+            delta_S = int(u * kv_bytes_per_token)
+            if u > 0 and self._cost_model.should_publish(L, u, S, delta_S, self.checkpoint_lambda):
+                checkpoint_overhead_sec = (self._cost_model._c0 + self._cost_model.t_ckpt(delta_S)) / 1000.0
+            else:
+                checkpoint_overhead_sec = 0.0
+        else:
+            # Linear fallback
+            publish_estimate = estimate_online_checkpoint_publication(
+                num_computed_tokens=num_computed_tokens if is_active else 0,
+                num_checkpointed_tokens=num_checkpointed_tokens if is_active else 0,
+                checkpoint_size_bytes=checkpoint_size_bytes if is_active else 0,
+                block_size=self.block_size,
+                replay_throughput_tokens_per_sec=self.replay_throughput,
+                load_bandwidth_bytes_per_sec=self.load_bandwidth,
+                checkpoint_bandwidth_bytes_per_sec=self.checkpoint_bandwidth,
+                checkpoint_lambda=self.checkpoint_lambda,
+                default_kv_bytes_per_token=self.kv_bytes_per_token,
+            )
+            checkpoint_overhead_sec = (
+                publish_estimate.checkpoint_cost_sec
+                if publish_estimate.should_publish
+                else 0.0
+            )
 
         ttft_slo = ttft_slo_ms / 1000.0 if ttft_slo_ms is not None else None
         tpot_slo = tpot_slo_ms / 1000.0 if tpot_slo_ms is not None else None

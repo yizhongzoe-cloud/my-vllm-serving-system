@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.checkpoint_cost_model import CheckpointCostModel
 from vllm.v1.core.checkpoint_controller import CheckpointController
+from vllm.v1.core.sched.benders.cost_tables import CostTableBuilder
 
 
 def _create_test_profile(is_real: bool) -> str:
@@ -102,10 +103,14 @@ class TestCheckpointCostModel:
             t_48 = model.t_prefill(48)
             assert 1.5 < t_48 < 2.5  # Should be between 32 and 64
 
-            # Clamping
-            t_8 = model.t_prefill(8)
-            assert t_8 == 1.0  # Clamp to first point
+            # Anchor: t_prefill(0) = 0 (added automatically)
+            assert model.t_prefill(0) == 0.0
 
+            # Interpolation between anchor (0, 0.0) and first data point (16, 1.0)
+            t_8 = model.t_prefill(8)
+            assert t_8 == 0.5  # Midpoint interpolation
+
+            # Clamping at upper boundary
             t_1024 = model.t_prefill(1024)
             assert t_1024 == 14.0  # Clamp to last point
         finally:
@@ -245,5 +250,164 @@ class TestCheckpointControllerWithProfile:
 
             # When _should_checkpoint_by_economic_policy is called,
             # it should use the profile model (checked in integration tests)
+        finally:
+            Path(profile_path).unlink()
+
+
+class TestCostTableBuilderWithProfile:
+    """Test CostTableBuilder integration with profile-driven cost model."""
+
+    def _make_builder(self, cost_model=None):
+        return CostTableBuilder(
+            planning_horizon=1.0,
+            prefill_throughput=1000.0,
+            decode_throughput=500.0,
+            load_bandwidth=1e9,
+            checkpoint_bandwidth=1e9,
+            replay_throughput=1000.0,
+            detection_time_sec=0.1,
+            block_size=16,
+            kv_bytes_per_token=8192,
+            checkpoint_lambda=1.0,
+            cost_model=cost_model,
+        )
+
+    def test_profile_driven_replay_cost(self):
+        """Test that profile-driven replay cost uses interpolation instead of linear."""
+        profile_path = _create_test_profile(is_real=True)
+        try:
+            model = CheckpointCostModel(profile_path)
+
+            builder_profile = self._make_builder(cost_model=model)
+            builder_linear = self._make_builder(cost_model=None)
+
+            # Active request with 128 computed tokens, 64 checkpointed
+            costs_profile = builder_profile._compute_costs_raw(
+                request_id="r1",
+                prompt_len=128,
+                generation_len=200,
+                num_computed_tokens=128,
+                num_output_tokens=0,
+                num_checkpointed_tokens=64,
+                checkpoint_size_bytes=64 * 8192,
+                is_active=True,
+                assigned_replica_id=0,
+                ttft_slo_ms=None,
+                tpot_slo_ms=None,
+                failure_gap_slo_ms=None,
+            )
+
+            costs_linear = builder_linear._compute_costs_raw(
+                request_id="r1",
+                prompt_len=128,
+                generation_len=200,
+                num_computed_tokens=128,
+                num_output_tokens=0,
+                num_checkpointed_tokens=64,
+                checkpoint_size_bytes=64 * 8192,
+                is_active=True,
+                assigned_replica_id=0,
+                ttft_slo_ms=None,
+                tpot_slo_ms=None,
+                failure_gap_slo_ms=None,
+            )
+
+            # Both should have non-negative replay time
+            assert costs_profile.replay_time_sec >= 0
+            assert costs_linear.replay_time_sec >= 0
+
+            # Profile replay cost should be based on T_prefill(128) - T_prefill(64)
+            # = 4.0 - 2.5 = 1.5 ms = 0.0015 sec
+            expected_replay_ms = model.t_prefill(128) - model.t_prefill(64)
+            assert abs(costs_profile.replay_time_sec - expected_replay_ms / 1000.0) < 1e-6
+
+            # Linear replay cost = 64 / 1000.0 = 0.064 sec
+            assert abs(costs_linear.replay_time_sec - 64 / 1000.0) < 1e-6
+
+            # They should differ (profile is non-linear)
+            assert costs_profile.replay_time_sec != costs_linear.replay_time_sec
+        finally:
+            Path(profile_path).unlink()
+
+    def test_profile_driven_load_cost(self):
+        """Test that profile-driven load cost uses interpolation."""
+        profile_path = _create_test_profile(is_real=True)
+        try:
+            model = CheckpointCostModel(profile_path)
+            builder = self._make_builder(cost_model=model)
+
+            # Active request with known checkpoint size
+            costs = builder._compute_costs_raw(
+                request_id="r1",
+                prompt_len=128,
+                generation_len=200,
+                num_computed_tokens=128,
+                num_output_tokens=0,
+                num_checkpointed_tokens=64,
+                checkpoint_size_bytes=4096,
+                is_active=True,
+                assigned_replica_id=0,
+                ttft_slo_ms=None,
+                tpot_slo_ms=None,
+                failure_gap_slo_ms=None,
+            )
+
+            # Profile: T_load(4096) = 0.35 ms = 0.00035 sec
+            expected = model.t_load(4096) / 1000.0
+            assert abs(costs.restore_time_sec - expected) < 1e-6
+        finally:
+            Path(profile_path).unlink()
+
+    def test_no_profile_fallback_unchanged(self):
+        """Test that without profile, costs are computed exactly as before."""
+        builder = self._make_builder(cost_model=None)
+
+        costs = builder._compute_costs_raw(
+            request_id="r1",
+            prompt_len=100,
+            generation_len=200,
+            num_computed_tokens=0,
+            num_output_tokens=0,
+            num_checkpointed_tokens=0,
+            checkpoint_size_bytes=0,
+            is_active=False,
+            assigned_replica_id=None,
+            ttft_slo_ms=None,
+            tpot_slo_ms=None,
+            failure_gap_slo_ms=None,
+        )
+
+        # Pending request: replay = prompt_len / replay_throughput = 100 / 1000 = 0.1 sec
+        assert abs(costs.replay_time_sec - 0.1) < 1e-6
+        # No checkpoint → restore_time = 0
+        assert costs.restore_time_sec == 0.0
+
+    def test_pending_request_with_profile(self):
+        """Test that pending requests use T_prefill(prompt_len) for replay."""
+        profile_path = _create_test_profile(is_real=True)
+        try:
+            model = CheckpointCostModel(profile_path)
+            builder = self._make_builder(cost_model=model)
+
+            costs = builder._compute_costs_raw(
+                request_id="r1",
+                prompt_len=128,
+                generation_len=200,
+                num_computed_tokens=0,
+                num_output_tokens=0,
+                num_checkpointed_tokens=0,
+                checkpoint_size_bytes=0,
+                is_active=False,
+                assigned_replica_id=None,
+                ttft_slo_ms=None,
+                tpot_slo_ms=None,
+                failure_gap_slo_ms=None,
+            )
+
+            # Pending: published_tokens=0, recovery_tokens=128
+            # replay = T_prefill(128) - T_prefill(0) = 4.0 - 0.0 = 4.0 ms
+            # (T_prefill(0) = 0.0 thanks to the (0, 0.0) anchor)
+            expected = model.t_prefill(128) / 1000.0  # 4.0 ms → 0.004 sec
+            assert abs(costs.replay_time_sec - expected) < 1e-6
         finally:
             Path(profile_path).unlink()

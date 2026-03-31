@@ -1,5 +1,5 @@
 {
-  "git_commit": "e4aa8aaaa",
+  "git_commit": "20adc8013",
   "model": "meta-llama/Llama-3.2-1B-Instruct",
   "gpu_type": "NVIDIA RTX A6000",
   "gpu_count": 2,
@@ -11,7 +11,7 @@
   "fault_time_sec": 30.0,
   "seed": 42,
   "run_duration_sec": 70.0,
-  "actual_runtime_sec": 71.98335528373718,
+  "actual_runtime_sec": 71.91789841651917,
   "server_flags": [
     "vllm.entrypoints.openai.api_server",
     "--model",
@@ -54,18 +54,18 @@
   ],
   "policy": "fcfs",
   "failure_gap_slo_ms": 3000.0,
-  "fault_injection_time": 1774851489.785346,
+  "fault_injection_time": 1774916588.144944,
   "failed_gpu_id": 0,
   "active_requests_at_fault": 4,
   "in_flight_at_fault": [
-    "req-00076",
-    "req-00073",
-    "req-00075",
-    "req-00079",
-    "req-00069",
     "req-00078",
+    "req-00075",
+    "req-00073",
+    "req-00074",
     "req-00077",
+    "req-00069",
     "req-00072",
-    "req-00074"
+    "req-00076",
+    "req-00079"
   ]
 }

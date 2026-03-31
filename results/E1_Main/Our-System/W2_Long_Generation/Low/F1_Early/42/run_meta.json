@@ -1,8 +1,8 @@
 {
-  "git_commit": "74bfed429",
+  "git_commit": "20adc8013",
   "model": "meta-llama/Llama-3.2-1B-Instruct",
-  "gpu_type": "",
-  "gpu_count": 0,
+  "gpu_type": "NVIDIA RTX A6000",
+  "gpu_count": 2,
   "baseline": "Our-System",
   "workload": "W2_Long_Generation",
   "load_level": "Low",
@@ -11,10 +11,8 @@
   "fault_time_sec": 15.0,
   "seed": 42,
   "run_duration_sec": 70.0,
-  "actual_runtime_sec": 78.60832381248474,
+  "actual_runtime_sec": 73.68813109397888,
   "server_flags": [
-    "/home/yzhong76/envs/sd_env/bin/python",
-    "-m",
     "vllm.entrypoints.openai.api_server",
     "--model",
     "meta-llama/Llama-3.2-1B-Instruct",
@@ -28,14 +26,12 @@
     "float16",
     "--data-parallel-size",
     "2",
+    "--enforce-eager",
     "--scheduling-policy",
     "ft_benders_centralized",
-    "--enforce-eager",
     "--enable-checkpointing",
     "--max-gpu-failures",
     "1",
-    "--fixed-checkpoint-level",
-    "-1",
     "--failure-timeout-sec",
     "5.0",
     "--failure-detection-time-ms",
@@ -59,7 +55,15 @@
   ],
   "policy": "ft_benders_centralized",
   "failure_gap_slo_ms": 3000.0,
-  "fault_injection_time": 1774797945.8344817,
+  "fault_injection_time": 1774882764.851978,
   "failed_gpu_id": 0,
-  "active_requests_at_fault": 4
+  "active_requests_at_fault": 4,
+  "in_flight_at_fault": [
+    "req-00008",
+    "req-00003",
+    "req-00002",
+    "req-00007",
+    "req-00005",
+    "req-00004"
+  ]
 }

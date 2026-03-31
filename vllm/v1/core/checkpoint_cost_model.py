@@ -48,10 +48,19 @@ class CheckpointCostModel:
 
         self._c0 = profile["publication_overhead_ms"]
 
-        # Parse and sort data points for linear interpolation
-        self._prefill = sorted((int(k), v) for k, v in profile["prefill_ms_by_tokens"].items())
-        self._load = sorted((int(k), v) for k, v in profile["load_ms_by_bytes"].items())
-        self._ckpt = sorted((int(k), v) for k, v in profile["checkpoint_ms_by_bytes"].items())
+        # Parse and sort data points for linear interpolation.
+        # Add (0, 0.0) anchor: 0 tokens/bytes should cost 0 time.
+        # Without this, t_prefill(0) would clamp to the first measurement point,
+        # causing replay cost to be underestimated for requests with no checkpoint.
+        self._prefill = sorted(
+            {0: 0.0, **{int(k): v for k, v in profile["prefill_ms_by_tokens"].items()}}.items()
+        )
+        self._load = sorted(
+            {0: 0.0, **{int(k): v for k, v in profile["load_ms_by_bytes"].items()}}.items()
+        )
+        self._ckpt = sorted(
+            {0: 0.0, **{int(k): v for k, v in profile["checkpoint_ms_by_bytes"].items()}}.items()
+        )
 
     @staticmethod
     def _interp(x: int, table: list[tuple[int, float]]) -> float:

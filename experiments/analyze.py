@@ -555,16 +555,19 @@ def plot_failover_gap(runs: list[dict], output_dir: str) -> None:
                 gaps = _recompute_failover_gaps(r)
                 if gaps:
                     seed_p95s.append(float(np.percentile(gaps, 95)))
-                else:
-                    seed_p95s.append(0.0)
+                # No gaps → skip (NaN), don't record 0.0
                 succ, total = _get_direct_hit_success_counts(r)
                 succ_count += succ
                 total_direct_hit += total
 
             x_pos.append(i)
             labels.append(bl)
-            vals.append(np.mean(seed_p95s))
-            errs.append(np.std(seed_p95s))
+            if seed_p95s:
+                vals.append(np.mean(seed_p95s))
+                errs.append(np.std(seed_p95s))
+            else:
+                vals.append(0.0)
+                errs.append(0.0)
             colors.append(_get_style(bl)["color"])
             succ_labels.append(f"succ {succ_count}/{total_direct_hit}")
 
@@ -757,7 +760,11 @@ def plot_recovery_breakdown(runs: list[dict], output_dir: str) -> None:
 
 
 def plot_ablation(runs: list[dict], output_dir: str) -> None:
-    """Figure: Ablation — Our-System vs routing-only vs checkpoint-only."""
+    """Figure: Ablation — Our-System vs routing-only vs checkpoint-only.
+
+    Splits by workload (rows) × load level (columns) to avoid mixing
+    short and long request results into the same bar.
+    """
     if not HAS_MPL:
         return
 
@@ -766,36 +773,54 @@ def plot_ablation(runs: list[dict], output_dir: str) -> None:
         "Fixed-Low-CKPT", "Fixed-High-CKPT",
     ]
 
+    # Discover workloads present in ablation runs.
+    workloads = sorted({
+        r.get("meta", {}).get("workload", "")
+        for r in runs
+        if r.get("meta", {}).get("baseline") in ablation_baselines
+    } - {""})
+    if not workloads:
+        workloads = ["W1_Short_Interactive", "W2_Long_Generation"]
+
     for fault_filter in ["none", "F2_Mid"]:
         load_levels = ["Medium", "High"]
-        fig, axes = plt.subplots(1, len(load_levels), figsize=(5*len(load_levels), 4))
+        n_rows = len(workloads)
+        n_cols = len(load_levels)
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(5 * n_cols, 4 * n_rows),
+                                 squeeze=False)
 
-        for li, load in enumerate(load_levels):
-            ax = axes[li]
-            ax.set_title(f"Load={load}, fault={fault_filter}", fontsize=10)
-            x = np.arange(len(ablation_baselines))
+        for wi, wl in enumerate(workloads):
+            for li, load in enumerate(load_levels):
+                ax = axes[wi][li]
+                ax.set_title(f"{wl} / Load={load} / fault={fault_filter}",
+                             fontsize=9)
+                x = np.arange(len(ablation_baselines))
 
-            goodputs = []
-            errs = []
-            for bl in ablation_baselines:
-                group = [r for r in runs
-                         if r.get("meta", {}).get("baseline") == bl
-                         and r.get("meta", {}).get("load_level") == load
-                         and r.get("meta", {}).get("fault") == fault_filter]
-                if group:
-                    v = [r["metrics"]["goodput"] for r in group]
-                    goodputs.append(np.mean(v))
-                    errs.append(np.std(v))
-                else:
-                    goodputs.append(0)
-                    errs.append(0)
+                goodputs = []
+                errs = []
+                for bl in ablation_baselines:
+                    group = [r for r in runs
+                             if r.get("meta", {}).get("baseline") == bl
+                             and r.get("meta", {}).get("workload") == wl
+                             and r.get("meta", {}).get("load_level") == load
+                             and r.get("meta", {}).get("fault") == fault_filter]
+                    if group:
+                        v = [r["metrics"]["goodput"] for r in group]
+                        goodputs.append(np.mean(v))
+                        errs.append(np.std(v))
+                    else:
+                        goodputs.append(0)
+                        errs.append(0)
 
-            colors = [_get_style(bl)["color"] for bl in ablation_baselines]
-            ax.bar(x, goodputs, yerr=errs, color=colors, capsize=3, alpha=0.8)
-            ax.set_xticks(x)
-            ax.set_xticklabels([bl.replace("-", "\n") for bl in ablation_baselines],
-                               fontsize=7, rotation=30, ha="right")
-            ax.set_ylabel("Goodput (tok/s)")
+                colors = [_get_style(bl)["color"] for bl in ablation_baselines]
+                ax.bar(x, goodputs, yerr=errs, color=colors, capsize=3,
+                       alpha=0.8)
+                ax.set_xticks(x)
+                ax.set_xticklabels(
+                    [bl.replace("-", "\n") for bl in ablation_baselines],
+                    fontsize=7, rotation=30, ha="right")
+                ax.set_ylabel("Goodput (tok/s)")
 
         fig.tight_layout()
         fname = f"ablation_{fault_filter}.pdf"

@@ -345,7 +345,105 @@ This allows experiments to specify profile paths in YAML for Checkpoint-Only and
 
 ---
 
-## Phase 2: [To be added...]
+## Phase 2: Solver 对齐 Profile-Driven 成本模型
+
+### Overview
+
+Phase 1 把 CheckpointCostModel 接入了 runtime 的 CheckpointController，但 Benders solver（`CostTableBuilder`）还在用线性吞吐/带宽模型算成本。这导致 runtime 和 solver 对同一个状态的"要不要 checkpoint"判断不一致。
+
+Phase 2 让 solver 的成本表也读同一个 profile JSON，替换掉线性近似。不改 checkpoint 触发逻辑（Phase 1 已完成），只改 solver 侧的成本估计。
+
+### Implementation Details
+
+#### 1. CostTableBuilder 加 cost_model 参数
+
+**File**: `vllm/v1/core/sched/benders/cost_tables.py`
+
+构造函数新增 `cost_model: CheckpointCostModel | None = None`，存为 `self._cost_model`。有 profile 时用插值，没有时走原有线性 fallback。
+
+#### 2. 替换三处成本计算
+
+在 `_compute_costs_raw()` 中，对 replay / load / checkpoint overhead 三处成本加 profile 分支：
+
+**Replay cost**:
+```python
+if self._cost_model is not None and replay_tokens > 0:
+    replay_time_sec = (
+        self._cost_model.t_prefill(recovery_tokens)
+        - self._cost_model.t_prefill(published_tokens)
+    ) / 1000.0  # ms → sec
+```
+
+**Load cost**:
+```python
+if self._cost_model is not None and restore_bytes > 0:
+    restore_time_sec = self._cost_model.t_load(restore_bytes) / 1000.0
+```
+
+**Checkpoint overhead**:
+```python
+if self._cost_model is not None and is_active:
+    # Total cost = c0 (fixed) + t_ckpt(ΔS) (size-dependent)
+    # checkpoint_ms_by_bytes in profile has c0 subtracted, must add back
+    checkpoint_overhead_sec = (self._cost_model._c0 + self._cost_model.t_ckpt(delta_S)) / 1000.0
+```
+
+**关键细节**:
+- CheckpointCostModel 返回毫秒，CostTableBuilder 内部用秒，需要 `/1000.0` 转换
+- checkpoint overhead 必须加回 c0（profile 的 `checkpoint_ms_by_bytes` 存的是已减去 c0 的 size-dependent 部分）
+- 三张插值表都有 `(0, 0.0)` 锚点，避免 `t_prefill(0)` clamp 到第一个测量点导致新请求 replay cost 被低估
+
+#### 3. 按 Baseline 条件注入
+
+**File**: `vllm/v1/core/sched/benders_ft_scheduler_impl.py`
+
+只对 adaptive baselines（`fixed_checkpoint_blocks == 0`）启用 profile-driven 成本：
+
+```python
+solver_cost_model = (
+    self._ft.checkpoint_controller._cost_model
+    if sched_cfg.fixed_checkpoint_blocks == 0
+    else None
+)
+```
+
+这保证 `Robust-Routing-Only`（`fixed_checkpoint_blocks=10`）的 solver 继续用线性成本，不会被 profile 改变行为。
+
+#### 4. 实验配置接入
+
+**File**: `experiments/config.yaml`
+
+在 adaptive baselines 中加入 profile path：
+```yaml
+Checkpoint-Only:
+    ft_checkpoint_cost_profile: "experiments/checkpoint_cost_profile.json"
+
+Our-System:
+    ft_checkpoint_cost_profile: "experiments/checkpoint_cost_profile.json"
+```
+
+Fixed baselines（Fixed-High/Low, Robust-Routing-Only）和 No-FT 不加。
+
+### Baseline Impact
+
+| Baseline | Solver 成本模型 | 原因 |
+|----------|----------------|------|
+| Fixed-High/Low | 不受影响 | 不走 Benders solver |
+| No-FT | 不受影响 | 不走 Benders solver |
+| Robust-Routing-Only | 线性 fallback | `fixed_checkpoint_blocks=10` → cost_model=None |
+| Checkpoint-Only | Profile-driven | `fixed_checkpoint_blocks=0` → 用 CheckpointCostModel |
+| Our-System | Profile-driven | `fixed_checkpoint_blocks=0` → 用 CheckpointCostModel |
+
+### Test Coverage
+
+**File**: `tests/ft/test_checkpoint_cost_model.py` — 新增 4 个 solver 测试：
+
+- ✅ Profile-driven replay cost 用插值而非线性
+- ✅ Profile-driven load cost 用插值
+- ✅ 无 profile 时 fallback 行为不变
+- ✅ Pending request 用 T_prefill(prompt_len) 作为 replay cost
+
+**Regression**: 全部 151 个 FT 测试通过。
 
 ---
 

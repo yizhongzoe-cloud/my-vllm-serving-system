@@ -186,6 +186,14 @@ class BendersFTSchedulerImpl(SchedulerInterface):
 
         mem_cap = sched_cfg.ft_memory_capacity_bytes or 0
 
+        # Only use profile-driven costs for adaptive checkpoint policies.
+        # Robust-Routing-Only (fixed_checkpoint_blocks > 0) keeps linear fallback.
+        solver_cost_model = (
+            self._ft.checkpoint_controller._cost_model
+            if sched_cfg.fixed_checkpoint_blocks == 0
+            else None
+        )
+
         self._cost_builder = CostTableBuilder(
             planning_horizon=planning_horizon,
             prefill_throughput=prefill_tput,
@@ -203,6 +211,7 @@ class BendersFTSchedulerImpl(SchedulerInterface):
             kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
             block_size=block_size,
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
+            cost_model=solver_cost_model,
         )
 
         max_iter = sched_cfg.benders_max_iterations or 20

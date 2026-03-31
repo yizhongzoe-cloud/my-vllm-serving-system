@@ -1218,10 +1218,6 @@ async def _send_single_request(
                 max_gap = gap
         result.max_gap_ms = max_gap
 
-    # Mark success: no error and received tokens.
-    if result.error is None and result.output_tokens > 0:
-        result.success = True
-
     # Mark admission: server accepted the request (HTTP 200 with valid response).
     # Only mark as admitted if we received a valid response from server (got usage or tokens).
     # HTTP errors, timeouts, and connection errors mean the server did not admit.
@@ -1231,12 +1227,20 @@ async def _send_single_request(
         # Other errors (timeout, transport errors) also mean not admitted.
         result.admitted = False
 
-    # Handle finish_reason for admitted cases.
-    if finish_reason in {"abort", "error"}:
+    # Mark success based on finish_reason, not just "got tokens".
+    # A truncated stream (GPU failure mid-generation) may have tokens but
+    # no finish_reason — that is NOT a success.
+    if finish_reason in {"stop", "length"}:
+        result.success = True
+    elif finish_reason in {"abort", "error"}:
         result.success = False
         result.error = finish_reason
-    elif result.error is None:
-        result.success = True
+    else:
+        # No finish_reason or unexpected value = incomplete stream.
+        # Even with partial tokens, the request did not complete normally.
+        result.success = False
+        if result.error is None and result.output_tokens > 0:
+            result.error = "incomplete_stream"
 
     # SLO violations.
     if result.ttft_ms is not None and spec.ttft_slo_ms > 0:

@@ -6,12 +6,12 @@ set -euo pipefail
 #   RUN_IDS=(1 2 3 4 5)
 #   RUN_IDS=(1 4)
 #   RUN_IDS=()
-RUN_IDS=(1)
+RUN_IDS=(2 3)
 
 # 1 = run suite.py, 0 = skip experiment execution
 RUN_EXPERIMENTS=1
 # 1 = run analyze.py, 0 = skip figure/table generation
-RUN_ANALYSIS=0
+RUN_ANALYSIS=1
 
 PYTHON_BIN="${PYTHON_BIN:-/home/yzhong76/envs/sd_env/bin/python}"
 PORT="${PORT:-8300}"
