@@ -1093,6 +1093,33 @@ def _inject_fault_at(
     )
 
 
+def _classify_result(result: RequestResult, finish_reason: str | None) -> None:
+    """Classify request outcome based on finish_reason, error, and output_tokens.
+
+    Sets result.admitted, result.success, and result.error.
+    """
+    # Mark admission: HTTP 200 with no transport error = admitted.
+    if result.error is None or result.error.startswith("HTTP"):
+        result.admitted = result.error is None
+    else:
+        result.admitted = False
+
+    # Mark success based on finish_reason.
+    if finish_reason in {"stop", "length"}:
+        result.success = True
+    elif finish_reason in {"abort", "error"}:
+        result.success = False
+        result.error = finish_reason
+    else:
+        # No finish_reason = not a clean completion.
+        result.success = False
+        if result.error is None:
+            if result.output_tokens > 0:
+                result.error = "incomplete_stream"
+            else:
+                result.error = "empty_stream"
+
+
 # ===================================================================
 # Request sending (async)
 # ===================================================================
@@ -1218,29 +1245,7 @@ async def _send_single_request(
                 max_gap = gap
         result.max_gap_ms = max_gap
 
-    # Mark admission: server accepted the request (HTTP 200 with valid response).
-    # Only mark as admitted if we received a valid response from server (got usage or tokens).
-    # HTTP errors, timeouts, and connection errors mean the server did not admit.
-    if result.error is None or result.error.startswith("HTTP"):
-        result.admitted = result.error is None
-    else:
-        # Other errors (timeout, transport errors) also mean not admitted.
-        result.admitted = False
-
-    # Mark success based on finish_reason, not just "got tokens".
-    # A truncated stream (GPU failure mid-generation) may have tokens but
-    # no finish_reason — that is NOT a success.
-    if finish_reason in {"stop", "length"}:
-        result.success = True
-    elif finish_reason in {"abort", "error"}:
-        result.success = False
-        result.error = finish_reason
-    else:
-        # No finish_reason or unexpected value = incomplete stream.
-        # Even with partial tokens, the request did not complete normally.
-        result.success = False
-        if result.error is None and result.output_tokens > 0:
-            result.error = "incomplete_stream"
+    _classify_result(result, finish_reason)
 
     # SLO violations.
     if result.ttft_ms is not None and spec.ttft_slo_ms > 0:

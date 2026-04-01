@@ -14,6 +14,7 @@ ft_prefill_throughput: 4000.0    # tokens/sec (profile on your hardware)
 ft_decode_throughput: 2000.0     # tokens/sec
 ft_load_bandwidth: 10.0e9       # 10 GB/s host→GPU
 ft_planning_horizon: 1.0        # seconds
+ft_checkpoint_cost_profile: "experiments/checkpoint_cost_profile.json"
 failure_detection_time_ms: 100.0
 failure_timeout_sec: 5.0
 checkpoint_pool_bytes: 8589934592  # 8 GB
@@ -107,14 +108,12 @@ baselines:
     enable_checkpointing: true
     max_gpu_failures: 1
     fixed_checkpoint_blocks: 0  # adaptive ckpt, greedy routing
-    ft_checkpoint_cost_profile: "experiments/checkpoint_cost_profile.json"
 
   Our-System:
     scheduling_policy: "ft_benders_centralized"
     enable_checkpointing: true
     max_gpu_failures: 1
     fixed_checkpoint_blocks: 0  # full Benders + adaptive ckpt
-    ft_checkpoint_cost_profile: "experiments/checkpoint_cost_profile.json"
 
 # ---- Experiment definitions ----
 experiments:

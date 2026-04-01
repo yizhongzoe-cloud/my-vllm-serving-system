@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from experiments.run import LogParser, RequestResult, _enrich_results
+from experiments.run import LogParser, RequestResult, _classify_result, _enrich_results
 
 
 def test_log_parser_parses_ft_client_failover_events(tmp_path):
@@ -371,3 +371,73 @@ def test_enrich_results_matches_client_request_id_without_stream_id():
     assert result.resumed_gpu == 1
     assert result.replay_tokens == 0
     assert result.checkpoint_class == 2
+
+
+# ---- _classify_result tests ----
+
+
+def _make_result(**kwargs):
+    """Create a minimal RequestResult for classification tests."""
+    defaults = dict(
+        request_id="test", arrival_time=0.0, prompt_len=10, expected_output_len=20
+    )
+    defaults.update(kwargs)
+    return RequestResult(**defaults)
+
+
+def test_classify_normal_stop():
+    r = _make_result(output_tokens=50)
+    _classify_result(r, finish_reason="stop")
+    assert r.success is True
+    assert r.admitted is True
+    assert r.error is None
+
+
+def test_classify_normal_length():
+    r = _make_result(output_tokens=20)
+    _classify_result(r, finish_reason="length")
+    assert r.success is True
+    assert r.admitted is True
+
+
+def test_classify_abort():
+    r = _make_result(output_tokens=0)
+    _classify_result(r, finish_reason="abort")
+    assert r.success is False
+    assert r.error == "abort"
+    assert r.admitted is True
+
+
+def test_classify_empty_stream():
+    """No finish_reason, no tokens, no error = solver reject / empty stream."""
+    r = _make_result(output_tokens=0)
+    _classify_result(r, finish_reason=None)
+    assert r.success is False
+    assert r.error == "empty_stream"
+    assert r.admitted is True
+
+
+def test_classify_incomplete_stream():
+    """Got tokens but no finish_reason = truncated by GPU failure."""
+    r = _make_result(output_tokens=30)
+    _classify_result(r, finish_reason=None)
+    assert r.success is False
+    assert r.error == "incomplete_stream"
+    assert r.admitted is True
+
+
+def test_classify_timeout():
+    """Timeout error should not be overwritten."""
+    r = _make_result(output_tokens=0, error="timeout")
+    _classify_result(r, finish_reason=None)
+    assert r.success is False
+    assert r.error == "timeout"
+    assert r.admitted is False
+
+
+def test_classify_http_error():
+    r = _make_result(output_tokens=0, error="HTTP 503")
+    _classify_result(r, finish_reason=None)
+    assert r.success is False
+    assert r.error == "HTTP 503"
+    assert r.admitted is False

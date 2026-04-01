@@ -1000,7 +1000,15 @@ behavior more faithfully.
 
 ---
 
-## 13. One-Sentence Summary
+## 13. Solver Scalability: Asynchronous Solving
+TODO:
+The Benders solver currently runs synchronously inside `schedule()`, blocking the decode step. At the current 2-GPU scale the median latency is ~15 ms, which is acceptable. At larger scale (more GPUs, higher request rates), the solver on the critical path becomes a bottleneck.
+
+**Solution: asynchronous solving.** Move the solver to a background thread. The current decode step uses the previous epoch's admission decisions; once the solver finishes, the next step picks up the new result. System state changes slowly at decode-step granularity, so a one-or-two-step lag has negligible impact on decision quality. A thin validation layer discards stale decisions that reference already-completed or already-aborted requests.
+
+---
+
+## 14. One-Sentence Summary
 
 This work studies **fault-tolerant single-node multi-GPU LLM serving** where
 identical GPU replicas periodically checkpoint KV-cache state to shared host

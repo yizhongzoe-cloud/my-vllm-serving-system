@@ -1,5 +1,5 @@
 {
-  "git_commit": "20adc8013",
+  "git_commit": "e78e66978",
   "model": "meta-llama/Llama-3.2-1B-Instruct",
   "gpu_type": "NVIDIA RTX A6000",
   "gpu_count": 2,
@@ -11,7 +11,7 @@
   "fault_time_sec": null,
   "seed": 42,
   "run_duration_sec": 70.0,
-  "actual_runtime_sec": 70.55891227722168,
+  "actual_runtime_sec": 70.42210793495178,
   "server_flags": [
     "vllm.entrypoints.openai.api_server",
     "--model",
@@ -46,6 +46,8 @@
     "10.0e9",
     "--ft-planning-horizon",
     "1.0",
+    "--ft-checkpoint-cost-profile",
+    "experiments/checkpoint_cost_profile.json",
     "--default-ttft-slo-ms",
     "2000.0",
     "--default-tpot-slo-ms",

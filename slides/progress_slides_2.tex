@@ -1,0 +1,298 @@
+\documentclass[aspectratio=169,12pt]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{array}
+
+\definecolor{myblue}{RGB}{37,99,235}
+\definecolor{mygreen}{RGB}{22,163,74}
+\definecolor{myred}{RGB}{220,38,38}
+\definecolor{mygray}{RGB}{100,100,100}
+
+\title{Fault-Tolerant Multi-GPU LLM Serving\\with Adaptive KV-Cache Checkpointing}
+\subtitle{Progress Update}
+\author{}
+\date{}
+
+\begin{document}
+
+% ============================================================
+\begin{frame}
+\titlepage
+\end{frame}
+
+% ============================================================
+\begin{frame}{Scope}
+\centering
+\vspace{2em}
+{\Large All results are from a \textbf{proof-of-concept setup}:}
+\vspace{1em}
+
+\begin{itemize}
+    \setlength\itemsep{0.8em}
+    \item 1B model, 2 GPUs, synthetic workloads
+    \item Goal: validate the end-to-end pipeline
+\end{itemize}
+
+\vspace{1.5em}
+{\large Production-scale evaluation (8B model, 4+ GPUs, real datasets) is the next step.}
+\end{frame}
+
+% ============================================================
+\begin{frame}{Problem}
+\begin{itemize}
+    \setlength\itemsep{0.8em}
+    \item Single-node multi-GPU LLM serving: replicas can fail (GPU reset, OOM, driver crash\ldots)
+    \item Failure $\rightarrow$ capacity loss $\rightarrow$ interrupted streams, SLO violations, goodput drop
+    \item Naive checkpoint: too frequent = high overhead; too rare = long recovery
+    \item \textbf{Core question:} how to jointly optimize \textcolor{myblue}{routing}, \textcolor{myblue}{admission}, and \textcolor{myblue}{adaptive checkpointing} to maximize goodput while meeting SLOs under failures?
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{Our System}
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\textbf{\textcircled{1} Benders-based Robust Scheduler}
+\begin{itemize}
+    \item Periodic decision epochs on system snapshot
+    \item Master: admission + routing
+    \item Subproblem: verify recovery per failure scenario
+    \item Pooled-flow screening + logic-based cuts
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{\textcircled{2} Adaptive Checkpoint Policy}
+\begin{itemize}
+    \item Per-request, triggered on new stable KV blocks
+    \item Publish when: $\Delta\text{replay} > \Delta\text{load} + \lambda \cdot \Delta\text{ckpt}$
+    \item Early: skip (cheap to replay)
+    \item Late: checkpoint (expensive to lose)
+\end{itemize}
+\end{column}
+\begin{column}{0.45\textwidth}
+\textbf{Ablation Matrix}
+
+\vspace{0.3em}
+\begin{tabular}{l|c|c}
+ & \scriptsize Fixed Ckpt & \scriptsize Adaptive Ckpt \\
+\hline
+\scriptsize Greedy & \scriptsize Fixed-Low/High & \scriptsize Ckpt-Only \\
+\scriptsize Benders & \scriptsize Robust-Only & \scriptsize \textbf{Our-System} \\
+\end{tabular}
+
+\vspace{0.5em}
++ \textbf{No-FT} as overhead-free reference
+
+\vspace{0.8em}
+{\scriptsize
+\begin{tabular}{lll}
+\toprule
+\textbf{Baseline} & \textbf{Routing} & \textbf{Ckpt} \\
+\midrule
+No-FT & Greedy & None \\
+Fixed-Low & Greedy & Every 10 blk \\
+Fixed-High & Greedy & Every 1 blk \\
+Robust-Only & Benders & Fixed low \\
+Ckpt-Only & Greedy & Adaptive \\
+\textbf{Our-System} & \textbf{Benders} & \textbf{Adaptive} \\
+\bottomrule
+\end{tabular}
+}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================================================
+\begin{frame}{Experiment Setup}
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\textbf{Hardware \& Model}
+\begin{itemize}
+    \item Llama-3.2-1B-Instruct
+    \item 2 GPUs (DP replicas), 8GB ckpt pool
+\end{itemize}
+
+\vspace{0.3em}
+\textbf{Workloads}
+
+{\small
+\begin{tabular}{llll}
+\toprule
+ & Prompt & Output & Arrival \\
+\midrule
+W1 Short & 50--200 & 20--100 & Poisson \\
+W2 Long & 200--500 & 200--500 & Poisson \\
+W3 Bursty & 50--500 & 20--500 & Bursty \\
+\bottomrule
+\end{tabular}
+}
+
+\vspace{0.3em}
+{\scriptsize
+\textbf{Poisson}: steady rate, random intervals\\
+\textbf{Bursty}: 15s normal $\rightarrow$ 5s at 3$\times$ $\rightarrow$ repeat
+}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{Load \& Faults}
+\begin{itemize}
+    \item Load: Low (1), Med (3), High (5 rps)
+    \item Faults: none / F1 (15s) / F2 (30s) / F3 (50s)
+    \item Duration: 70s, SLO: TTFT 2s, TPOT 100ms, Gap 3s
+\end{itemize}
+
+\vspace{0.3em}
+\textbf{5 Experiments}
+
+{\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Exp.} & \textbf{Goal} \\
+\midrule
+E1 Main & End-to-end comparison \\
+E2 Recovery & Recovery time breakdown \\
+E3 Ablation & Component contribution \\
+E4 Tradeoff & Ckpt overhead vs benefit \\
+E5 Controller & Solver overhead \\
+\bottomrule
+\end{tabular}
+}
+\end{column}
+\end{columns}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E1: Goodput --- No Fault}
+\centering
+\includegraphics[width=0.92\textwidth]{img/goodput_by_load_none.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item All methods $\approx$ No-FT $\Rightarrow$ \textcolor{mygreen}{near-zero normal-case overhead}
+    \item Exception: \textcolor{myred}{Fixed-High-CKPT} drops to $\sim$1216 on W2/High (No-FT $\sim$1715), $\sim$29\% loss
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E1: Goodput --- With Fault (F2\_Mid)}
+\centering
+\includegraphics[width=0.92\textwidth]{img/goodput_by_load_F2_Mid.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item No-FT \textcolor{myred}{silently drops fault-hit requests} (completion 97--99\%, 0\% failover)
+    \item Our-System matches Fixed-Low on W2/Med ($\sim$1040) with 100\% completion
+    \item Fixed-High-CKPT worst: overhead + slow recovery + low completion
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E1: SLO Violations (F2\_Mid)}
+\centering
+\includegraphics[width=0.75\textwidth]{img/slo_violation_F2_Mid.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item With fault: \textcolor{myred}{Fixed-High-CKPT} avg $\sim$7\% (worst 20\%+); \textcolor{mygreen}{Our-System $\approx$ 0\%}
+    \item Without fault: all methods 0\% violation (omitted --- no differentiation)
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E1: Failover Gap (p95)}
+\centering
+\includegraphics[width=0.92\textwidth]{img/failover_gap_p95.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item No-FT: 0\% recovery on W2/W3 (succ 0/34, 0/27)
+    \item Fixed-High: highest gap ($\sim$700ms) + lowest success (77/117 = 66\%)
+    \item \textcolor{mygreen}{Our-System: moderate gap + highest success rate} (W3: 90/97 = 93\%)
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E2: Recovery Time Breakdown}
+\centering
+\includegraphics[width=0.85\textwidth]{img/recovery_breakdown.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item W1 (short): detection dominates ($\sim$200ms), all methods similar
+    \item W2 (long): Fixed-High $\sim$830ms; Fixed-Low $\sim$350ms; \textcolor{mygreen}{Our-System $\sim$330ms}
+    \item Adaptive ckpt finds the \textbf{sweet spot}: not too much to load, not too much to replay
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E3: Ablation --- With Fault (F2\_Mid)}
+\centering
+\includegraphics[width=0.85\textwidth]{img/ablation_F2_Mid.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item W1 (short): all similar --- short tasks easy to recover
+    \item W2/Med: Our-System ($\sim$1042) $\approx$ Ckpt-Only ($\sim$1048) $\gg$ Robust-Only ($\sim$666)
+    \item \textbf{Adaptive checkpoint is the primary contributor}; routing matters more at larger scale
+    \item {\small No-fault ablation omitted --- same story as E1 no-fault (Fixed-High $-$40\%, others equal)}
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E4: Checkpoint Overhead vs Recovery Benefit}
+\centering
+\includegraphics[width=0.85\textwidth]{img/checkpoint_tradeoff.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item Left (normal): Fixed-High loses $\sim$29\%; others $\approx$ No-FT
+    \item Right (fault): No-FT 0/10; Fixed-High 22/39 (56\%), gap $\sim$883ms
+    \item \textcolor{mygreen}{Our-System: 27/27 (100\%), gap $\sim$491ms --- best on both axes}
+    \item \textbf{More checkpointing $\neq$ better}
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{E5: Controller Overhead}
+\centering
+\includegraphics[width=0.6\textwidth]{img/controller_overhead.png}
+
+\vspace{0.4em}
+\begin{itemize}
+    \item Median solver latency: \textbf{$\sim$15ms/epoch}, flat across 1--12 requests
+    \item Outliers 160--180ms: cold start (first 1--2 calls), fixable via warmup
+    \item Acceptable for online serving (decode step is ms-scale)
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\begin{frame}{Summary}
+\textbf{Key Findings}
+\begin{enumerate}
+    \item \textbf{Near-zero normal-case overhead}: goodput matches No-FT
+    \item \textbf{Best under failures}: highest recovery rate + lowest SLO violations
+    \item \textbf{More checkpointing $\neq$ better}: Fixed-High hurts both goodput and recovery
+    \item \textbf{Adaptive checkpoint is the primary contributor}; routing matters more at scale
+    \item \textbf{Solver overhead is small}: $\sim$15ms per epoch
+\end{enumerate}
+
+\vspace{0.5em}
+\textbf{Next Steps}
+\begin{itemize}
+    \item Real datasets (ShareGPT / CNN-DailyMail / Alpaca)
+    \item Lightweight output-length predictor for better admission decisions
+    \item Scale to 8B model on 4 GPUs (dp=4, more realistic failure scenario)
+    \item Profile solver parameters from actual hardware measurements
+    \item Per-request SLO differentiation
+    \item 3 seeds, 300s runs for statistical significance
+\end{itemize}
+\end{frame}
+
+\end{document}
