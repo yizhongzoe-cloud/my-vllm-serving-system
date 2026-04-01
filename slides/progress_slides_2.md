@@ -6,7 +6,9 @@
 
 ## Slide 1: Scope
 
-All results here are from a **proof-of-concept setup** (1B model, 2 GPUs, synthetic workloads) to validate the end-to-end pipeline. Production-scale evaluation (8B model, 4+ GPUs, real datasets) is the next step.
+All results here are from a **proof-of-concept setup** (1B model, 2 GPUs, synthetic workloads) to validate the end-to-end pipeline. 
+
+Production-scale evaluation (8B model, 4+ GPUs, real datasets) is the next step.
 
 ---
 
@@ -179,9 +181,9 @@ Plus **No-FT** (no fault tolerance at all) as the overhead-free reference.
 
 ### Key Points
 - Median solver latency: **~15ms per epoch**, flat across request counts (1-12)
+- For reference: avg request inter-arrival is 200ms @ 5rps — solver is ~10x faster than arrival rate
 - Outliers at 160-180ms: cold start (first 1-2 calls), eliminable via warmup
-- 99th percentile ~40ms
-- Acceptable for online serving (decode step is ms-scale)
+- Solver only runs when new requests arrive, not every decode step -- amortized overhead is low
 
 ---
 
