@@ -12,6 +12,7 @@ ft_decode_throughput: 150.0
 ft_load_bandwidth: 10.0e9
 ft_planning_horizon: 0.5
 ft_checkpoint_cost_profile: "experiments_v2/checkpoint_cost_profile_1b.json"
+ft_decode_capacity_profile: "experiments_v2/decode_capacity_profile_1b.json"
 failure_detection_time_ms: 100.0
 failure_timeout_sec: 5.0
 checkpoint_pool_bytes: 8589934592

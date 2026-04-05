@@ -152,6 +152,34 @@ class BendersSolveLoop:
             min(1.0, local_load / H_dec_val) if H_dec_val > 0 else 0.0
         )
 
+        # Decode-first capacity: compute per-replica decode load and
+        # residual prefill capacity.
+        use_df = self._cost_builder.use_decode_first_model
+        decode_cap = 0
+        residual_prefill: dict[int, int] = {}
+        if use_df:
+            decode_cap = self._cost_builder.get_decode_capacity()
+            # Count active decode requests per replica
+            L_current: dict[int, int] = {r: 0 for r in recovery_replica_ids}
+            for req_id, costs in cost_table.items():
+                if costs.is_active and costs.active_replica_id is not None:
+                    r = costs.active_replica_id
+                    if r in L_current:
+                        L_current[r] += int(costs.w_dec)
+            # Conservative: add pending requests evenly distributed
+            pending_count = sum(
+                1 for c in cost_table.values() if not c.is_active
+            )
+            per_replica_pending = (
+                pending_count // max(len(replica_ids), 1)
+            )
+            residual_prefill = {
+                r: self._cost_builder.get_residual_prefill_capacity(
+                    L_current.get(r, 0) + per_replica_pending
+                )
+                for r in recovery_replica_ids
+            }
+
         # Step 2: Enumerate failure scenarios up to max_gpu_failures.
         # Ω_k = {ω ⊆ recovery_replica_ids : 1 ≤ |ω| ≤ k}.
         # Only keep scenarios containing at least one local replica —
@@ -174,6 +202,9 @@ class BendersSolveLoop:
                 H_dec=H_dec_val,
                 M_cap=self._cost_builder.memory_capacity_bytes,
                 time_limit_sec=self._master_time_limit,
+                decode_capacity=decode_cap,
+                residual_prefill_capacity=residual_prefill,
+                use_decode_first=use_df,
             ).solve()
             if solution is None:
                 return None
@@ -202,6 +233,9 @@ class BendersSolveLoop:
             H_dec=H_dec_val,
             M_cap=self._cost_builder.memory_capacity_bytes,
             time_limit_sec=self._master_time_limit,
+            decode_capacity=decode_cap,
+            residual_prefill_capacity=residual_prefill,
+            use_decode_first=use_df,
         )
 
         # Recovery checker sees ALL replicas so it can verify that
@@ -222,6 +256,12 @@ class BendersSolveLoop:
             local_load_fraction=local_load_fraction,
             replica_load_overrides=replica_load_overrides,
             replica_mem_overrides=replica_mem_overrides,
+            # Decode-first capacity model
+            decode_capacity=decode_cap,
+            decode_cap_model=(
+                self._cost_builder._decode_cap_model if use_df else None
+            ),
+            use_decode_first=use_df,
         )
 
         # Step 4–7: Iterate.

@@ -942,9 +942,10 @@ def _build_server_cmd(config: dict, baseline_name: str, port: int) -> list[str]:
         ("ft_load_bandwidth", "--ft-load-bandwidth"),
         ("ft_planning_horizon", "--ft-planning-horizon"),
         ("ft_checkpoint_cost_profile", "--ft-checkpoint-cost-profile"),
+        ("ft_decode_capacity_profile", "--ft-decode-capacity-profile"),
     ]:
         val = config.get(cfg_key)
-        if val is not None:
+        if val is not None and str(val).strip():
             cmd.extend([flag, str(val)])
 
     # SLO defaults.

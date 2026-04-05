@@ -306,6 +306,40 @@ class FaultTolerantScheduler:
         )
         return True
 
+    def register_admitted_request(self, request: Request) -> None:
+        """Register a request that was already admitted by the centralized
+        solver. Skips all local capacity/SLO checks — trusts the solver."""
+        replica_id = self.replica_manager.route_request(request)
+        if replica_id is None:
+            # Fallback: pick any healthy replica.
+            for r in self.replica_manager.get_healthy_replicas():
+                replica_id = r
+                break
+        if replica_id is None:
+            logger.warning(
+                "register_admitted_request: no replica for %s, "
+                "falling back to admit_request",
+                request.request_id,
+            )
+            self.admit_request(request)
+            return
+
+        self.request_pool.add_request(request)
+        self.request_pool.admit_request(request.request_id, replica_id)
+        self.replica_manager.assign_request(request, replica_id)
+
+        level = self.checkpoint_controller.get_checkpoint_level(request)
+        request.checkpoint_level = level
+
+        logger.debug(
+            "Registered (centralized) request %s → replica %d "
+            "(ckpt_level=%d, G_j=%d)",
+            request.request_id,
+            replica_id,
+            level,
+            request.generation_len,
+        )
+
     # ---- Per-step checkpoint decisions ----
 
     def run_checkpoint_step(

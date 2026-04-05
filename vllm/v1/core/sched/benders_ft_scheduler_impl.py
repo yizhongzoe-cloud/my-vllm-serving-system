@@ -212,6 +212,9 @@ class BendersFTSchedulerImpl(SchedulerInterface):
             block_size=block_size,
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
             cost_model=solver_cost_model,
+            decode_capacity_profile_path=(
+                sched_cfg.ft_decode_capacity_profile or None
+            ),
         )
 
         max_iter = sched_cfg.benders_max_iterations or 20

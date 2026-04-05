@@ -14,6 +14,7 @@ ft_decode_throughput: 150.0      # actual ~143 tok/s per-request
 ft_load_bandwidth: 10.0e9
 ft_planning_horizon: 0.5        # tighter horizon, less conservative
 ft_checkpoint_cost_profile: "experiments_v2/checkpoint_cost_profile_1b.json"
+ft_decode_capacity_profile: ""  # empty = fallback to legacy model; set path after profiling
 failure_detection_time_ms: 100.0
 failure_timeout_sec: 5.0
 checkpoint_pool_bytes: 8589934592

@@ -47,6 +47,10 @@ class MasterProblem:
         H_dec: float,
         M_cap: int = 0,
         time_limit_sec: float = 1.0,
+        # Decode-first capacity model parameters
+        decode_capacity: int = 0,
+        residual_prefill_capacity: dict[int, int] | None = None,
+        use_decode_first: bool = False,
     ) -> None:
         self._costs = request_costs
         self._replica_ids = list(replica_ids)
@@ -55,6 +59,10 @@ class MasterProblem:
         self._M_cap = M_cap
         self._time_limit_sec = time_limit_sec
         self._cuts: list[list[tuple[str, int]]] = []
+        # Decode-first
+        self._use_decode_first = use_decode_first
+        self._decode_capacity = decode_capacity
+        self._residual_prefill_capacity = residual_prefill_capacity or {}
 
     def add_cut(self, involved: list[tuple[str, int]]) -> None:
         self._cuts.append(list(involved))
@@ -119,22 +127,57 @@ class MasterProblem:
                     if (req_id, r) in x:
                         model.add(x[(req_id, r)] == 0)
 
-        for r in self._replica_ids:
-            prefill_terms = []
-            for req_id, costs in self._costs.items():
-                if (req_id, r) in x:
-                    prefill_terms.append(_to_int(costs.p_j) * x[(req_id, r)])
-            if prefill_terms:
-                model.add(sum(prefill_terms) <= self._H_pre)
+        if self._use_decode_first:
+            logger.debug(
+                "Decode-first: Cap_dec=%d, replica_ids=%s, "
+                "residual_prefill_keys=%s, residual_prefill=%s",
+                self._decode_capacity,
+                self._replica_ids,
+                list(self._residual_prefill_capacity.keys()),
+                self._residual_prefill_capacity,
+            )
+            # Decode-first capacity model:
+            #   Σ w_j * x[j,r] ≤ Cap_r^dec       (decode slot constraint)
+            #   Σ prefill_tokens_j * x[j,r] ≤ RemPreCap_r  (residual prefill)
+            for r in self._replica_ids:
+                decode_terms = []
+                for req_id, costs in self._costs.items():
+                    if (req_id, r) in x:
+                        decode_terms.append(
+                            _to_int(costs.w_dec) * x[(req_id, r)])
+                if decode_terms:
+                    model.add(
+                        sum(decode_terms) <= _to_int(self._decode_capacity))
 
-        for r in self._replica_ids:
-            decode_terms = []
-            for req_id, costs in self._costs.items():
-                if (req_id, r) in x:
-                    coeff = _to_int(costs.d_j + costs.checkpoint_overhead_sec)
-                    decode_terms.append(coeff * x[(req_id, r)])
-            if decode_terms:
-                model.add(sum(decode_terms) <= self._H_dec)
+            for r in self._replica_ids:
+                rem_cap = self._residual_prefill_capacity.get(r, 0)
+                prefill_terms = []
+                for req_id, costs in self._costs.items():
+                    if (req_id, r) in x and costs.prefill_tokens > 0:
+                        prefill_terms.append(
+                            costs.prefill_tokens * x[(req_id, r)])
+                if prefill_terms:
+                    model.add(sum(prefill_terms) <= rem_cap)
+        else:
+            # Legacy: serial-time capacity model (fallback)
+            for r in self._replica_ids:
+                prefill_terms = []
+                for req_id, costs in self._costs.items():
+                    if (req_id, r) in x:
+                        prefill_terms.append(
+                            _to_int(costs.p_j) * x[(req_id, r)])
+                if prefill_terms:
+                    model.add(sum(prefill_terms) <= self._H_pre)
+
+            for r in self._replica_ids:
+                decode_terms = []
+                for req_id, costs in self._costs.items():
+                    if (req_id, r) in x:
+                        coeff = _to_int(
+                            costs.d_j + costs.checkpoint_overhead_sec)
+                        decode_terms.append(coeff * x[(req_id, r)])
+                if decode_terms:
+                    model.add(sum(decode_terms) <= self._H_dec)
 
         if self._M_cap > 0:
             for r in self._replica_ids:
@@ -157,28 +200,6 @@ class MasterProblem:
         obj_terms = []
         for req_id, costs in self._costs.items():
             obj_terms.append(costs.G_j * y[req_id])
-
-        if len(self._replica_ids) > 1:
-            load_vars: dict[int, cp_model.LinearExpr] = {}
-            for r in self._replica_ids:
-                terms = [
-                    x[(req_id, r)]
-                    for req_id in self._costs
-                    if (req_id, r) in x
-                ]
-                load_vars[r] = sum(terms) if terms else 0
-
-            max_load = model.new_int_var(
-                0, len(self._costs), "max_replica_load"
-            )
-            for r in self._replica_ids:
-                model.add(max_load >= load_vars[r])
-            avg_gj = (
-                sum(c.G_j for c in self._costs.values()) / len(self._costs)
-                if self._costs else 1
-            )
-            penalty_weight = max(1, int(avg_gj // 2))
-            obj_terms.append(-penalty_weight * max_load)
 
         model.maximize(sum(obj_terms))
 

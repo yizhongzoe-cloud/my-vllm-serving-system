@@ -546,6 +546,7 @@ class EngineArgs:
     ft_load_bandwidth: float = SchedulerConfig.ft_load_bandwidth
     ft_planning_horizon: float = SchedulerConfig.ft_planning_horizon
     ft_checkpoint_cost_profile: str = SchedulerConfig.ft_checkpoint_cost_profile
+    ft_decode_capacity_profile: str = SchedulerConfig.ft_decode_capacity_profile
     default_ttft_slo_ms: float = SchedulerConfig.default_ttft_slo_ms
     default_tpot_slo_ms: float = SchedulerConfig.default_tpot_slo_ms
     default_failure_gap_slo_ms: float = SchedulerConfig.default_failure_gap_slo_ms
@@ -1185,6 +1186,10 @@ class EngineArgs:
             **scheduler_kwargs["ft_checkpoint_cost_profile"],
         )
         scheduler_group.add_argument(
+            "--ft-decode-capacity-profile",
+            **scheduler_kwargs["ft_decode_capacity_profile"],
+        )
+        scheduler_group.add_argument(
             "--default-ttft-slo-ms",
             **scheduler_kwargs["default_ttft_slo_ms"],
         )
@@ -1750,6 +1755,7 @@ class EngineArgs:
             ft_load_bandwidth=self.ft_load_bandwidth,
             ft_planning_horizon=self.ft_planning_horizon,
             ft_checkpoint_cost_profile=self.ft_checkpoint_cost_profile,
+            ft_decode_capacity_profile=self.ft_decode_capacity_profile,
             default_ttft_slo_ms=self.default_ttft_slo_ms,
             default_tpot_slo_ms=self.default_tpot_slo_ms,
             default_failure_gap_slo_ms=self.default_failure_gap_slo_ms,

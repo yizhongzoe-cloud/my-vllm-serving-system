@@ -64,6 +64,11 @@ class RequestCosts:
     # Actual bytes in the latest published checkpoint, if known.
     checkpoint_size_bytes: int = 0
 
+    # Decode-first capacity model fields.
+    w_dec: float = 1.0          # decode burden (V1: always 1)
+    prefill_tokens: int = 0     # prompt tokens needing prefill (0 if active)
+    replay_tokens: int = 0      # tokens to replay on recovery (uncovered by ckpt)
+
     # SLO bounds (seconds). None means no constraint.
     ttft_slo_sec: float | None = None  # D_j^{ttft}
     tpot_slo_sec: float | None = None  # D_j^{tpot}
@@ -90,6 +95,7 @@ class CostTableBuilder:
         block_size: int = 1,
         checkpoint_lambda: float = 1.0,
         cost_model: "CheckpointCostModel | None" = None,
+        decode_capacity_profile_path: str | None = None,
     ) -> None:
         self.planning_horizon = planning_horizon
         self.prefill_throughput = prefill_throughput
@@ -108,6 +114,12 @@ class CostTableBuilder:
         self.block_size = max(1, block_size)
         self.checkpoint_lambda = checkpoint_lambda
         self._cost_model = cost_model
+
+        # Decode-first capacity model
+        from vllm.v1.core.sched.benders.decode_capacity_model import (
+            DecodeCapacityModel,
+        )
+        self._decode_cap_model = DecodeCapacityModel(decode_capacity_profile_path)
 
     def compute_request_costs(
         self,
@@ -327,6 +339,11 @@ class CostTableBuilder:
             num_computed_tokens=num_computed_tokens,
             num_checkpointed_tokens=published_tokens,
             checkpoint_size_bytes=restore_bytes,
+            # Decode-first capacity fields
+            w_dec=1.0,  # V1: uniform decode burden
+            prefill_tokens=remaining_prefill if not is_active else 0,
+            replay_tokens=replay_tokens,
+            # SLO
             ttft_slo_sec=ttft_slo,
             tpot_slo_sec=tpot_slo,
             gap_slo_sec=gap_slo,
@@ -372,6 +389,21 @@ class CostTableBuilder:
     @property
     def H_dec(self) -> float:
         return self.planning_horizon
+
+    # -- Decode-first capacity model accessors --
+
+    @property
+    def use_decode_first_model(self) -> bool:
+        """Whether the decode-first capacity model is active (vs fallback)."""
+        return not self._decode_cap_model.is_fallback
+
+    def get_decode_capacity(self, avg_ctx_bucket: int = 0) -> int:
+        """Cap_r^dec: max concurrent decode requests per replica."""
+        return self._decode_cap_model.decode_capacity(avg_ctx_bucket)
+
+    def get_residual_prefill_capacity(self, decode_load: int) -> int:
+        """RemPreCap_r(L): prefill tokens achievable under decode load L."""
+        return self._decode_cap_model.residual_prefill_capacity(decode_load)
 
     def _estimate_kv_bytes_per_token(
         self,

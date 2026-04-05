@@ -197,6 +197,10 @@ class SchedulerConfig:
     """Path to checkpoint_cost_profile.json for profile-driven checkpoint decisions.
     Empty string means use linear economic policy with ft_prefill_throughput/ft_load_bandwidth."""
 
+    ft_decode_capacity_profile: str = ""
+    """Path to decode_capacity_profile.json for decode-first capacity admission.
+    Empty string means use legacy serial-time capacity model."""
+
     default_ttft_slo_ms: float = 0.0
     """Default TTFT SLO (ms) applied to all requests. 0 means no SLO."""
 

@@ -81,7 +81,7 @@ Solver 计算恢复时间时使用的吞吐参数和实际值差了 10 倍：
 | 参数 | Config 原值 | 实际值 | 偏差 |
 |---|---|---|---|
 | ft_prefill_throughput | 4,000 tok/s | ~45,000 tok/s | **低 11 倍** |
-| ft_decode_throughput | 2,000 tok/s | ~143 tok/s | 高 14 倍|
+| ft_decode_throughput | 2,000 tok/s | ~143 tok/s | 高 14 倍 |
 
 Solver 估算 replay 143 tokens 要 35.8ms（实际 3.2ms）→ 认为恢复不可行 → 拒绝 33% 请求。
 
@@ -92,11 +92,76 @@ ft_decode_throughput:  2000 → 150
 ft_planning_horizon:   1.0  → 0.5
 ```
 
-**教训**：solver 参数必须从实测数据校准，不能用默认值。8B/70B 切换时需重新校准。
+**教训**：solver 参数必须从实测数据校准，不能用默认值。
 
 ---
 
-## Slide 6: Tiny 其他确认
+## Slide 6: Tiny 结果图
+
+### Goodput（无故障 / 有故障）
+
+![goodput_none](figures/E_Tiny/png/goodput_by_load_none.png)
+
+![goodput_f2mid](figures/E_Tiny/png/goodput_by_load_F2_Mid.png)
+
+---
+
+## Slide 7: Tiny 结果图（续）
+
+### SLO Violation
+
+![slo_none](figures/E_Tiny/png/slo_violation_none.png)
+
+![slo_f2mid](figures/E_Tiny/png/slo_violation_F2_Mid.png)
+
+---
+
+## Slide 8: Tiny 结果图（续）
+
+### Failover Gap (P95) & Recovery Breakdown
+
+![failover_gap](figures/E_Tiny/png/failover_gap_p95.png)
+
+![recovery_breakdown](figures/E_Tiny/png/recovery_breakdown.png)
+
+---
+
+## Slide 9: Tiny 结果图（续）
+
+### Checkpoint Tradeoff & Controller Overhead
+
+![checkpoint_tradeoff](figures/E_Tiny/png/checkpoint_tradeoff.png)
+
+![controller_overhead](figures/E_Tiny/png/controller_overhead.png)
+
+---
+
+## Slide 10: Tiny 结果图（续）
+
+### Ablation（无故障 / 有故障）
+
+![ablation_none](figures/E_Tiny/png/ablation_none.png)
+
+![ablation_f2mid](figures/E_Tiny/png/ablation_F2_Mid.png)
+
+---
+
+## Slide 11: Tiny 结果图（续）
+
+### 新增图表类型
+
+Recovery Gap CDF:
+![recovery_gap_cdf](figures/E_Tiny/png/recovery_gap_cdf.png)
+
+Goodput Timeline:
+![goodput_timeline](figures/E_Tiny/png/goodput_timeline.png)
+
+Gap SLO Sensitivity:
+![gap_slo_sensitivity](figures/E_Tiny/png/gap_slo_sensitivity.png)
+
+---
+
+## Slide 12: Tiny 其他确认
 
 ### No-FT + 故障不会崩溃
 - 109/115 完成（94.8%），只丢故障 GPU 上的请求
@@ -112,18 +177,18 @@ ft_planning_horizon:   1.0  → 0.5
 
 ---
 
-## Slide 7: 今晚跑的实验（E1a_Tonight）
+## Slide 13: 今晚跑的实验（E1a_Tonight）
 
 ### 设置
 - 6 baselines × W4_Mixed × 3 loads (Light/Moderate/Heavy) × 3 faults (none/F1/F2) × 1 seed
 - **54 runs，预计 ~7 小时**
-- 已用调参后的 solver 参数
+- 已用调参后的 solver 参数 (prefill=40000, decode=150, horizon=0.5)
 
 ### 产出
 - Goodput vs Load 折线图（无故障 / 有故障）
 - SLO Violation 柱状图
 - Failover Gap 对比
-- 调参后 Benders 系列是否正常工作
+- 验证调参后 Benders 系列是否正常
 
 ### 预期
 - 调参后 Benders-Only / Our-System 完成率应接近其他 baseline
@@ -132,16 +197,16 @@ ft_planning_horizon:   1.0  → 0.5
 
 ---
 
-## Slide 8: 完整实验计划
+## Slide 14: 完整实验计划
 
-| 实验 | 目的 | Runs/seed | 产出 |
+| 实验 | 目的 | Runs/seed | 产出图表 |
 |---|---|---|---|
-| E1a_Main | 端到端全扫 | 288 | Fig 1-4: Goodput, SLO, Gap |
-| E2_Recovery | 恢复时间分解 | 8 | Fig 5-6: 堆叠柱状图, CDF |
-| E3_Ablation | 消融 | 40 | Fig 7-8: 各组件贡献 |
-| E4_Checkpoint | 开销 vs 收益 | 16 | Fig 9-10: Tradeoff 散点图 |
-| E5_Controller | Solver 开销 | 12 | Fig 11: Solver latency |
-| E6_SLO | SLO 敏感度 | 12 | Fig 13-14: 敏感度曲线 |
+| E1a_Main | 端到端全扫 | 288 | Goodput曲线, SLO violation, Gap |
+| E2_Recovery | 恢复时间分解 | 8 | 堆叠柱状图, CDF |
+| E3_Ablation | 消融 | 40 | 各组件贡献 |
+| E4_Checkpoint | 开销 vs 收益 | 16 | Tradeoff 散点图 |
+| E5_Controller | Solver 开销 | 12 | Solver latency |
+| E6_SLO | SLO 敏感度 | 12 | 敏感度曲线 |
 
 ### 三个模型
 | 模型 | dp | GPU | 角色 |
@@ -152,7 +217,7 @@ ft_planning_horizon:   1.0  → 0.5
 
 ---
 
-## Slide 9: Next Steps
+## Slide 15: Next Steps
 
 ### 短期（本周）
 1. 今晚 E1a_Tonight (54 runs) 跑完 → 分析调参效果
@@ -162,7 +227,7 @@ ft_planning_horizon:   1.0  → 0.5
 ### 中期
 4. 切到 **8B 模型**（论文主力）
    - 重新 profile checkpoint costs
-   - 重新校准 solver 参数（ft_prefill/decode_throughput）
+   - 重新校准 solver 参数
    - dp=4 → 故障丢 25% 容量，更现实的恢复场景
 5. 补充 3 seeds → 报告 mean ± std
 

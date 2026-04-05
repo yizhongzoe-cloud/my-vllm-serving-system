@@ -92,6 +92,7 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
             log_stats=log_stats,
         )
         self.connector = self._base.connector
+        self._original_policy = vllm_config.scheduler_config.policy
 
         # Build the FT scheduler with config from SchedulerConfig.
         sched_cfg = vllm_config.scheduler_config
@@ -217,8 +218,17 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
         )
         self._pending_ft_admission.clear()
 
+        # In centralized Benders mode, the client-side solver has already
+        # made the admission decision. Trust it and skip local checks.
+        is_centralized = self._original_policy == "ft_benders_centralized"
+
         for request in pending:
-            admitted = self._ft.admit_request(request)
+            if is_centralized:
+                # Solver already approved — just register with FT scheduler.
+                self._ft.register_admitted_request(request)
+                admitted = True
+            else:
+                admitted = self._ft.admit_request(request)
             if not admitted:
                 logger.warning(
                     "FT admission rejected request %s (G_j=%d); "
