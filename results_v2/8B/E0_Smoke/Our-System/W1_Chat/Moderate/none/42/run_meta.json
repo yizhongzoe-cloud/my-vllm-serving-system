@@ -1,5 +1,5 @@
 {
-  "git_commit": "d566fed35",
+  "git_commit": "e40fb2775",
   "model": "meta-llama/Llama-3.1-8B-Instruct",
   "gpu_type": "NVIDIA RTX A6000",
   "gpu_count": 2,
@@ -11,7 +11,7 @@
   "fault_time_sec": null,
   "seed": 42,
   "run_duration_sec": 300.0,
-  "actual_runtime_sec": 313.04996728897095,
+  "actual_runtime_sec": 313.13145995140076,
   "server_flags": [
     "vllm.entrypoints.openai.api_server",
     "--model",

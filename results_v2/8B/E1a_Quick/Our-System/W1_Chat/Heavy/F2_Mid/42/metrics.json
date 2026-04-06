@@ -1,0 +1,20 @@
+{
+  "total_requests": 345,
+  "completed": 341,
+  "failed": 4,
+  "admission_rate": 0.9884057971014493,
+  "completion_rate": 0.9884057971014493,
+  "goodput": 109.51316551055781,
+  "ttft_p50_ms": 748.6114501953125,
+  "ttft_p95_ms": 3449.646472930908,
+  "ttft_p99_ms": 4467.4890518188495,
+  "tpot_p50_ms": 99.12737678079044,
+  "tpot_p95_ms": 183.5737639823846,
+  "tpot_p99_ms": 267.00624523424597,
+  "slo_violation_rate": 0.6070381231671554,
+  "failover_gap_p50_ms": 3149.073839187622,
+  "failover_gap_p95_ms": 5699.010729789734,
+  "failover_gap_p99_ms": 5699.021315574646,
+  "time_to_stable_sec": 67.43414115905762,
+  "recovery_success_rate": 1.0
+}

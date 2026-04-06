@@ -4,7 +4,7 @@
 # ---- Hardware & Model ----
 model: "meta-llama/Llama-3.1-8B-Instruct"
 model_tag: "8B"
-max_model_len: 4096
+max_model_len: 8192
 gpu_memory_utilization: 0.90
 dtype: "float16"
 enforce_eager: true
