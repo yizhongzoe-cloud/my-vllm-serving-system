@@ -125,7 +125,15 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
         # Determine replica identity.
         # In DP mode: each EngineCore is a separate replica.
         # The DP rank is the replica_id.
-        dp_size = parallel_cfg.data_parallel_size
+        #
+        # NOTE: In vLLM's DP implementation, each EngineCore subprocess
+        # sees data_parallel_size=1 (local view). But FT needs the global
+        # replica count for capacity-under-failures checks. We use
+        # max_gpu_failures + 1 as the minimum (you can't tolerate k failures
+        # with fewer than k+1 replicas), and take the max with the local
+        # value to handle both single-process and multi-process cases.
+        local_dp_size = parallel_cfg.data_parallel_size
+        dp_size = max(local_dp_size, sched_cfg.max_gpu_failures + 1)
         dp_rank = parallel_cfg.data_parallel_rank or 0
 
         ft_config = FTSchedulerConfig(

@@ -114,6 +114,23 @@ experiments:
     faults:
     - none
     - F2_Mid
+  E1a_Quick:
+    description: End-to-end quick (4 baselines x 2 workloads x 3 loads x 2 faults)
+    baselines:
+    - No-FT
+    - Periodic-Low
+    - Periodic-High
+    - Our-System
+    workloads:
+    - W1_Chat
+    - W4_Mixed
+    load_levels:
+    - Light
+    - Moderate
+    - Heavy
+    faults:
+    - none
+    - F2_Mid
   E1a_Main:
     description: End-to-end (8B full sweep)
     baselines:

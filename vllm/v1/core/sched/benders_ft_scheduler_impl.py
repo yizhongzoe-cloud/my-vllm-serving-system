@@ -114,7 +114,9 @@ class BendersFTSchedulerImpl(SchedulerInterface):
         parallel_cfg = vllm_config.parallel_config
 
         # Replica identity.
-        dp_size = parallel_cfg.data_parallel_size
+        # See ft_scheduler_impl.py for why we use max() here.
+        local_dp_size = parallel_cfg.data_parallel_size
+        dp_size = max(local_dp_size, sched_cfg.max_gpu_failures + 1)
         dp_rank = parallel_cfg.data_parallel_rank or 0
 
         ft_config = FTSchedulerConfig(

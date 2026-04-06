@@ -135,6 +135,14 @@ experiments:
     load_levels: ["Moderate"]
     faults: ["none", "F2_Mid"]
 
+  E1a_Quick:
+  # 48 — 精简版，先看趋势。完整版用 E1a_Main
+    description: "End-to-end quick (4 baselines × 2 workloads × 3 loads × 2 faults)"
+    baselines: ["No-FT", "Periodic-Low", "Periodic-High", "Our-System"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
   E1a_Main:
   # 288
     description: "End-to-end (8B full sweep)"

@@ -162,23 +162,17 @@ class FaultTolerantScheduler:
     # ---- Admission control (y_j decision) ----
 
     def admit_request(self, request: Request) -> bool:
-        """Decide whether to admit a new request.
+        """Admit a new request: find a replica and register it.
 
-        Implements the admission decision y_j from the paper.
-        Objective: maximize ∑ G_j * y_j (greedy heuristic: prefer
-        requests with larger expected output for higher goodput).
-
-        Checks:
-        1. There is a healthy replica with capacity.
-        2. Under worst-case k failures, the request can still be served.
-        3. TTFT/TPOT SLOs can be met, including under failover scenarios.
-        4. Failover-gap SLO can be met.
+        Only rejects if no healthy replica is available. Capacity and SLO
+        checks are handled by the client-side solver (centralized mode) or
+        by vLLM's base scheduler limits (max_num_seqs, KV memory).
 
         Args:
             request: The incoming request.
 
         Returns:
-            True if admitted, False if rejected.
+            True if admitted, False if no replica available.
         """
         # Find a replica to route to.
         replica_id = self.replica_manager.route_request(request)
@@ -189,111 +183,15 @@ class FaultTolerantScheduler:
             )
             return False
 
-        # Check robust feasibility under failures.
-        current_requests = self.request_pool.get_admitted_requests() \
-            + self.request_pool.get_displaced_requests()
-        all_requests = current_requests + [request]
-
-        if not self.replica_manager.check_capacity_under_failures(
-            all_requests, self.config.max_gpu_failures,
-            decode_capacity_model=self._decode_cap_model,
-        ):
-            logger.debug(
-                "Rejected request %s: insufficient capacity under "
-                "%d-failure scenario",
-                request.request_id,
-                self.config.max_gpu_failures,
-            )
-            return False
-
-        # Check TTFT/TPOT SLO feasibility on the target replica,
-        # accounting for queuing delay from co-located requests.
-        target = self.replica_manager.get_replica(replica_id)
-        if (
-            request.ttft_slo_ms is not None
-            and target is not None
-            and target.prefill_throughput > 0
-        ):
-            # Account for queuing: existing prefill tokens on this replica
-            # must be processed before this request's prefill starts.
-            queued_prefill = target.active_prefill_tokens
-            estimated_ttft_ms = (
-                (queued_prefill + request.prompt_len)
-                / target.prefill_throughput
-            ) * 1000
-            if estimated_ttft_ms > request.ttft_slo_ms:
-                logger.debug(
-                    "Rejected request %s: TTFT SLO infeasible "
-                    "(est=%.1fms > slo=%.1fms, queued=%d tokens)",
-                    request.request_id,
-                    estimated_ttft_ms,
-                    request.ttft_slo_ms,
-                    queued_prefill,
-                )
-                return False
-
-        # Check TPOT SLO feasibility on the target replica.
-        if (
-            request.tpot_slo_ms is not None
-            and target is not None
-            and target.decode_throughput > 0
-        ):
-            estimated_tpot_ms = (1.0 / target.decode_throughput) * 1000
-            if estimated_tpot_ms > request.tpot_slo_ms:
-                logger.debug(
-                    "Rejected request %s: TPOT SLO infeasible "
-                    "(est=%.1fms > slo=%.1fms)",
-                    request.request_id,
-                    estimated_tpot_ms,
-                    request.tpot_slo_ms,
-                )
-                return False
-
-        # Check TTFT/TPOT SLOs under all failure scenarios (§8.5).
-        # Ensures SLOs hold even on the worst surviving replica.
-        if not self.replica_manager.check_slo_under_failures(
-            request, self.config.max_gpu_failures
-        ):
-            logger.debug(
-                "Rejected request %s: TTFT/TPOT SLO infeasible under "
-                "%d-failure scenario",
-                request.request_id,
-                self.config.max_gpu_failures,
-            )
-            return False
-
-        # Check failover-gap SLO feasibility.
-        # At admission, no checkpoint exists yet, so the worst case is
-        # replaying the full prompt (P_j tokens). This gives a
-        # conservative upper bound on recovery cost.
-        if (
-            request.failure_gap_slo_ms is not None
-            and target is not None
-            and (target.replay_throughput > 0 or target.decode_throughput > 0)
-        ):
-            estimated_gap = self.checkpoint_controller.estimate_recovery_cost(
-                request=request,
-                checkpoint_size_bytes=0,  # No checkpoint yet at admission.
-                load_bandwidth_bytes_per_sec=target.load_bandwidth,
-                replay_tokens_per_sec=target.replay_throughput,
-                detection_time_sec=self.config.detection_time_sec,
-                decode_throughput=target.decode_throughput,
-                # At admission, num_computed_tokens=0 so
-                # get_uncovered_tokens() returns 0.  The worst case is
-                # replaying the full prompt (no checkpoint exists yet).
-                replay_tokens_override=request.prompt_len,
-            )
-            if estimated_gap * 1000 > request.failure_gap_slo_ms:
-                logger.debug(
-                    "Rejected request %s: failover-gap SLO infeasible "
-                    "(est=%.1fms > slo=%.1fms)",
-                    request.request_id,
-                    estimated_gap * 1000,
-                    request.failure_gap_slo_ms,
-                )
-                return False
-
-        # All checks passed — admit and assign.
+        # Admit and assign.
+        # NOTE: We no longer do capacity-under-failures, SLO, or gap checks
+        # at admission time. Reasons:
+        # 1. These estimates use inaccurate constant-throughput models.
+        # 2. vLLM's base scheduler has hard limits (max_num_seqs, KV memory).
+        # 3. Rejecting (ABORT) is worse than admitting and letting SLO be
+        #    violated — goodput counts only SLO-satisfied requests anyway.
+        # 4. In centralized mode, the client-side solver already does these
+        #    checks with better models (decode-first capacity + profiles).
         self.request_pool.add_request(request)
         self.request_pool.admit_request(request.request_id, replica_id)
         self.replica_manager.assign_request(request, replica_id)
