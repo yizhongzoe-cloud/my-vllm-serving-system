@@ -46,6 +46,30 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _auto_kv_bytes_per_token(vllm_config: "VllmConfig") -> int:
+    """Compute KV bytes per token from model config.
+
+    Formula: 2(KV) × num_kv_heads × head_dim × 2(fp16) × num_layers
+    Falls back to the user-configured value if model config is unavailable.
+    """
+    configured = vllm_config.scheduler_config.ft_kv_bytes_per_token
+    try:
+        hf_config = vllm_config.model_config.hf_config
+        num_kv_heads = getattr(hf_config, "num_key_value_heads",
+                               hf_config.num_attention_heads)
+        head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+        num_layers = hf_config.num_hidden_layers
+        # 2 for K+V, 2 for fp16 bytes
+        auto_val = 2 * num_kv_heads * head_dim * 2 * num_layers
+        if auto_val != configured:
+            logger.info(
+                "Auto-computed ft_kv_bytes_per_token=%d from model config "
+                "(configured default=%d)", auto_val, configured)
+        return auto_val
+    except Exception:
+        return configured
+
+
 def _normalize_base_scheduler_config(vllm_config: "VllmConfig") -> "VllmConfig":
     """Map FT wrapper policies to a base Scheduler policy the engine understands."""
     sched_cfg = vllm_config.scheduler_config
@@ -126,10 +150,18 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
                 or 0.0
             ),
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
-            kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
+            kv_bytes_per_token=_auto_kv_bytes_per_token(vllm_config),
             checkpoint_cost_profile=sched_cfg.ft_checkpoint_cost_profile,
         )
         self._ft = FaultTolerantScheduler(config=ft_config, dp_size=dp_size)
+
+        # Load decode-first capacity model for greedy admission.
+        from vllm.v1.core.sched.benders.decode_capacity_model import (
+            DecodeCapacityModel,
+        )
+        self._ft._decode_cap_model = DecodeCapacityModel(
+            sched_cfg.ft_decode_capacity_profile or None
+        )
 
         # Get throughput estimates from config (user-configured or defaults).
         # These can also be profiled at runtime later.
@@ -148,21 +180,6 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
             max_num_seqs=sched_cfg.max_num_seqs,
             max_num_batched_tokens=sched_cfg.max_num_batched_tokens,
         )
-
-        # In single-replica mode (DP=1), fault tolerance for GPU failures
-        # is impossible (no surviving replica), so clamp max_gpu_failures
-        # to 0.  SLO admission checks still apply.
-        num_replicas = dp_size
-        if ft_config.max_gpu_failures >= num_replicas:
-            clamped = max(0, num_replicas - 1)
-            logger.warning(
-                "max_gpu_failures=%d >= num_replicas=%d; "
-                "clamping to %d (FT needs at least k+1 replicas)",
-                ft_config.max_gpu_failures,
-                num_replicas,
-                clamped,
-            )
-            self._ft.config.max_gpu_failures = clamped
 
         # In single-replica mode, skip failure monitoring entirely to
         # avoid false-alarming the only replica (no heartbeat source).

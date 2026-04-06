@@ -17,6 +17,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -397,13 +398,75 @@ def estimate_c0_from_checkpoint_data(
 # Main
 # ============================================================================
 
+def _start_server(model: str, port: int, max_model_len: int = 4096) -> subprocess.Popen:
+    """Start vLLM server for prefill profiling."""
+    cmd = [
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        "--model", model,
+        "--port", str(port),
+        "--max-model-len", str(max_model_len),
+        "--gpu-memory-utilization", "0.45",
+        "--dtype", "float16",
+        "--data-parallel-size", "1",
+        "--enforce-eager",
+        "--scheduling-policy", "fcfs",
+    ]
+    log_file = open("/tmp/ckpt_profile_server.log", "w")
+    env = os.environ.copy()
+    proc = subprocess.Popen(
+        cmd, stdout=log_file, stderr=subprocess.STDOUT,
+        preexec_fn=os.setsid, env=env,
+    )
+    proc._log_file = log_file  # type: ignore
+    print(f"  Server started (pid={proc.pid})")
+    return proc
+
+
+def _wait_health(port: int, timeout: float = 300.0) -> bool:
+    import urllib.request
+    import urllib.error
+    url = f"http://localhost:{port}/health"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = urllib.request.urlopen(url, timeout=5)
+            if resp.status == 200:
+                return True
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(1.0)
+    return False
+
+
+def _stop_server(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        proc.wait(timeout=5)
+    log_file = getattr(proc, "_log_file", None)
+    if log_file:
+        log_file.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Profile checkpoint costs")
     parser.add_argument("--model", default="meta-llama/Llama-3.2-1B-Instruct")
     parser.add_argument("--output", default="experiments_v2/checkpoint_cost_profile.json")
     parser.add_argument("--port", type=int, default=8300)
-    parser.add_argument("--skip-prefill", action="store_true", help="Skip prefill benchmark (requires running server)")
+    parser.add_argument("--skip-prefill", action="store_true", help="Skip prefill benchmark")
     parser.add_argument("--skip-kv", action="store_true", help="Skip KV benchmark")
+    parser.add_argument("--skip-server", action="store_true",
+                        help="Assume server is already running on --port")
 
     args = parser.parse_args()
 
@@ -411,9 +474,20 @@ def main():
     print("Checkpoint Cost Profiler")
     print("=" * 70)
 
+    # Auto-start server for prefill benchmark (unless skipped or already running).
+    server_proc = None
+    if not args.skip_prefill and not args.skip_server:
+        print("\n  Starting server for prefill benchmark...")
+        server_proc = _start_server(args.model, args.port)
+        if not _wait_health(args.port):
+            print("  ERROR: Server failed to start")
+            _stop_server(server_proc)
+            sys.exit(1)
+        print("  Server healthy")
+
     # Prefill benchmark
     print("\n[1/2] T_prefill(n) benchmark...")
-    tokenizer_failed = False  # Track if tokenizer load failed
+    tokenizer_failed = False
 
     if args.skip_prefill:
         print("  Skipped (use --no-skip-prefill to enable)")
@@ -429,7 +503,13 @@ def main():
             num_warmup=2,
             num_trials=5,
         )
-        tokenizer_failed = profiler.tokenizer_failed  # Check if tokenizer load failed
+        tokenizer_failed = profiler.tokenizer_failed
+
+    # Stop server after prefill benchmark (KV benchmark doesn't need it).
+    if server_proc is not None:
+        print("  Stopping server...")
+        _stop_server(server_proc)
+        print("  Server stopped")
 
     # KV checkpoint benchmark
     print("\n[2/2] T_load(S) / T_ckpt(S) benchmark...")

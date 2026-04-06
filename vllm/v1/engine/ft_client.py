@@ -910,6 +910,14 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
     or no engine snapshots are available (degraded mode).
     """
 
+    @staticmethod
+    def _auto_kv_bytes(vllm_config) -> int:
+        """Compute KV bytes per token from model config."""
+        from vllm.v1.core.sched.ft_scheduler_impl import (
+            _auto_kv_bytes_per_token,
+        )
+        return _auto_kv_bytes_per_token(vllm_config)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -962,20 +970,12 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             detection_time_sec=detection_time,
             memory_capacity_bytes=mem_cap,
             checkpoint_config=CheckpointConfig(),
-            kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
+            kv_bytes_per_token=self._auto_kv_bytes(vllm_config),
             block_size=vllm_config.cache_config.block_size or 1,
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
             decode_capacity_profile_path=(
                 sched_cfg.ft_decode_capacity_profile or None
-            ),  # DEBUG: remove after verification
-        )
-        logger.info(
-            "CentralizedBendersFTClient: ft_decode_capacity_profile=%r, "
-            "hasattr=%s, all_ft_fields=%s",
-            getattr(sched_cfg, "ft_decode_capacity_profile", "MISSING"),
-            hasattr(sched_cfg, "ft_decode_capacity_profile"),
-            {k: getattr(sched_cfg, k) for k in dir(sched_cfg)
-             if k.startswith("ft_") and not k.startswith("__")},
+            ),
         )
 
         max_iter = getattr(sched_cfg, "benders_max_iterations", 20) or 20

@@ -10,6 +10,8 @@ Manages multiple GPU replicas that each load the same model. Handles:
 - Capacity accounting under failure scenarios.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
@@ -245,6 +247,7 @@ class ReplicaManager:
         self,
         requests: list[Request],
         max_failures: int,
+        decode_capacity_model: "DecodeCapacityModel | None" = None,
     ) -> bool:
         """Check if the system can handle all requests even with up to
         max_failures GPU failures (robust feasibility check).
@@ -253,27 +256,20 @@ class ReplicaManager:
         scenario with |ω| ≤ k, the surviving replicas must have enough
         capacity for all admitted requests.
 
-        Checks three dimensions:
-        1. Sequence count: total requests ≤ surviving * max_num_seqs
-        2. Prefill capacity: ∑P_j ≤ surviving * C_r^{pre} * H
-        3. Decode capacity: ∑G_j ≤ surviving * C_r^{dec} * H
-
         Args:
             requests: Currently admitted requests (including the candidate).
             max_failures: k — maximum number of simultaneous GPU failures.
+            decode_capacity_model: If provided, use decode-first capacity
+                model (slot-based) instead of serial-time model.
 
         Returns:
             True if feasible under worst-case failure.
         """
-        # Use dp_size (global replica count) instead of locally-registered
-        # replicas.  In the A-route architecture each EngineCore only
-        # registers itself, so len(get_healthy_replicas()) == 1 even when
-        # dp_size > 1, which would incorrectly reject all requests.
         all_replicas = self.get_healthy_replicas()
         num_replicas = self.dp_size
 
         if max_failures >= num_replicas:
-            return False  # All replicas could fail.
+            return False
 
         surviving = num_replicas - max_failures
         total_requests = len(requests)
@@ -285,8 +281,33 @@ class ReplicaManager:
         if total_requests > surviving * max_seqs_per_replica:
             return False
 
+        # Decode-first capacity model: use decode slots + residual prefill.
+        if (decode_capacity_model is not None
+                and not decode_capacity_model.is_fallback):
+            # Decode slot check: total requests ≤ surviving * Cap_dec
+            cap_dec = decode_capacity_model.decode_capacity()
+            if total_requests > surviving * cap_dec:
+                return False
+
+            # Residual prefill check: pending prefill tokens fit?
+            # Worst case: all requests land on one survivor after failures.
+            # Only count requests that still need prefill (not yet started).
+            total_prefill = sum(
+                r.prompt_len for r in requests
+                if r.num_computed_tokens == 0
+            )
+            # Use conservative estimate: max load per survivor
+            per_survivor_requests = (total_requests + surviving - 1) // surviving
+            rem_prefill_cap = decode_capacity_model.residual_prefill_capacity(
+                per_survivor_requests
+            )
+            if total_prefill > surviving * rem_prefill_cap:
+                return False
+
+            return True
+
+        # Legacy: serial-time capacity model.
         # 2. Prefill token capacity: ∑P_j ≤ surviving * C_r^{pre} * H
-        #    Uses throughput (tokens/sec), not batch size.
         total_prefill_tokens = sum(r.prompt_len for r in requests)
         min_prefill_throughput = min(
             (r.prefill_throughput for r in all_replicas),
@@ -297,7 +318,6 @@ class ReplicaManager:
             if total_prefill_tokens > prefill_capacity:
                 return False
         else:
-            # Throughput not profiled; fall back to batch-size-based check.
             max_batched = min(
                 r.max_num_batched_tokens for r in all_replicas
             ) if all_replicas else 0

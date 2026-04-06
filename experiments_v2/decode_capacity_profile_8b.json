@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "gpu": "NVIDIA RTX A6000",
+    "dp_size": 1,
+    "max_model_len": 4096,
+    "tpot_slo_ms": 50.0,
+    "planning_horizon_sec": 0.5
+  },
+  "decode_capacity": {
+    "default": 10,
+    "by_avg_ctx_bucket": {
+      "256": 50,
+      "1024": 10
+    }
+  },
+  "residual_prefill_capacity": {
+    "0": 17234,
+    "2": 14321,
+    "4": 13788,
+    "6": 13049,
+    "8": 13439,
+    "10": 13208
+  }
+}

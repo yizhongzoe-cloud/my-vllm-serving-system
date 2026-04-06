@@ -1,0 +1,223 @@
+model: meta-llama/Llama-3.1-8B-Instruct
+model_tag: 8B
+max_model_len: 4096
+gpu_memory_utilization: 0.9
+dtype: float16
+enforce_eager: true
+dp_size: 2
+ft_prefill_throughput: 4000.0
+ft_decode_throughput: 2000.0
+ft_load_bandwidth: 10.0e9
+ft_planning_horizon: 1.0
+ft_checkpoint_cost_profile: experiments_v2/checkpoint_cost_profile_8b.json
+ft_decode_capacity_profile: experiments_v2/decode_capacity_profile_8b.json
+failure_detection_time_ms: 100.0
+failure_timeout_sec: 5.0
+checkpoint_pool_bytes: 34359738368
+force_output_len: true
+workloads:
+  W1_Chat:
+    dataset: sharegpt
+    dataset_path: experiments_v2/datasets/cached/sharegpt_5000.jsonl
+    tpot_slo_ms: 100.0
+    arrival: poisson
+    description: Chatbot, decode-heavy
+  W2_Summary:
+    dataset: cnndm
+    dataset_path: experiments_v2/datasets/cached/cnndm_3000.jsonl
+    tpot_slo_ms: 200.0
+    arrival: poisson
+    description: Summarization, prefill-heavy
+  W3_Instruct:
+    dataset: alpaca
+    dataset_path: experiments_v2/datasets/cached/alpaca_full.jsonl
+    tpot_slo_ms: 50.0
+    arrival: poisson
+    description: Instruction-following, tight SLO
+  W4_Mixed:
+    mix:
+    - workload: W1_Chat
+      weight: 0.5
+    - workload: W3_Instruct
+      weight: 0.2
+    - workload: W2_Summary
+      weight: 0.3
+    arrival: poisson
+    description: Production mix, per-request SLO differentiation
+load_levels:
+  Light:
+    pct: 0.25
+    rps: 0.5
+  Moderate:
+    pct: 0.4
+    rps: 0.8
+  Heavy:
+    pct: 0.55
+    rps: 1.1
+slo:
+  ttft_ms: 1191.5
+  failure_gap_ms: 5572.4
+  ttft_base_ms: 238.3
+  gap_base_ms: 1857.5
+fault_timing:
+  none: null
+  F1_Early: 60.0
+  F2_Mid: 150.0
+  F3_Late: 240.0
+run_duration_sec: 300.0
+warmup_sec: 30.0
+seeds:
+- 42
+request_timeout_sec: 120.0
+server_startup_timeout: 600.0
+baselines:
+  No-FT:
+    scheduling_policy: fcfs
+    enable_checkpointing: false
+    max_gpu_failures: 0
+    fixed_checkpoint_blocks: 0
+  Periodic-Low:
+    scheduling_policy: fault_tolerant
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+  Periodic-High:
+    scheduling_policy: fault_tolerant
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 1
+  Benders-Only:
+    scheduling_policy: ft_benders_centralized
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+  Adaptive-Only:
+    scheduling_policy: fault_tolerant
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+  Our-System:
+    scheduling_policy: ft_benders_centralized
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+experiments:
+  E0_Smoke:
+    description: Pipeline validation
+    baselines:
+    - No-FT
+    - Our-System
+    workloads:
+    - W1_Chat
+    load_levels:
+    - Moderate
+    faults:
+    - none
+    - F2_Mid
+  E1a_Main:
+    description: End-to-end (8B full sweep)
+    baselines:
+    - No-FT
+    - Periodic-Low
+    - Periodic-High
+    - Benders-Only
+    - Adaptive-Only
+    - Our-System
+    workloads:
+    - W1_Chat
+    - W2_Summary
+    - W3_Instruct
+    - W4_Mixed
+    load_levels:
+    - Light
+    - Moderate
+    - Heavy
+    faults:
+    - none
+    - F1_Early
+    - F2_Mid
+    - F3_Late
+  E2_Recovery:
+    description: Recovery breakdown
+    baselines:
+    - No-FT
+    - Periodic-Low
+    - Periodic-High
+    - Our-System
+    workloads:
+    - W1_Chat
+    - W2_Summary
+    load_levels:
+    - Moderate
+    faults:
+    - F2_Mid
+  E3_Ablation:
+    description: Joint optimization ablation
+    baselines:
+    - Periodic-Low
+    - Periodic-High
+    - Benders-Only
+    - Adaptive-Only
+    - Our-System
+    workloads:
+    - W1_Chat
+    - W4_Mixed
+    load_levels:
+    - Moderate
+    - Heavy
+    faults:
+    - none
+    - F2_Mid
+  E4_Checkpoint_Tradeoff:
+    description: Checkpoint overhead vs recovery benefit
+    baselines:
+    - No-FT
+    - Periodic-Low
+    - Periodic-High
+    - Our-System
+    workloads:
+    - W1_Chat
+    load_levels:
+    - Moderate
+    - Heavy
+    faults:
+    - none
+    - F2_Mid
+  E5_Controller:
+    description: Solver overhead
+    baselines:
+    - Our-System
+    workloads:
+    - W1_Chat
+    - W2_Summary
+    - W3_Instruct
+    - W4_Mixed
+    load_levels:
+    - Light
+    - Moderate
+    - Heavy
+    faults:
+    - none
+  E6_SLO_Sensitivity:
+    description: SLO sensitivity
+    baselines:
+    - No-FT
+    - Our-System
+    workloads:
+    - W1_Chat
+    - W4_Mixed
+    load_levels:
+    - Moderate
+    faults:
+    - F2_Mid
+    slo_scales:
+      Tight:
+        ttft_mult: 3.0
+        gap_mult: 1.5
+      Moderate:
+        ttft_mult: 5.0
+        gap_mult: 3.0
+      Loose:
+        ttft_mult: 10.0
+        gap_mult: 5.0
+results_dir: results_v2

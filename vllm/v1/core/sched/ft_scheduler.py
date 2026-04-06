@@ -91,6 +91,10 @@ class FaultTolerantScheduler:
 
         self.replica_manager = ReplicaManager(dp_size=dp_size)
 
+        # Decode-first capacity model. Set externally by
+        # FaultTolerantSchedulerImpl after construction.
+        self._decode_cap_model = None
+
         self.failure_detector = FailureDetector(
             heartbeat_interval_sec=self.config.heartbeat_interval_sec,
             failure_timeout_sec=self.config.failure_timeout_sec,
@@ -191,7 +195,8 @@ class FaultTolerantScheduler:
         all_requests = current_requests + [request]
 
         if not self.replica_manager.check_capacity_under_failures(
-            all_requests, self.config.max_gpu_failures
+            all_requests, self.config.max_gpu_failures,
+            decode_capacity_model=self._decode_cap_model,
         ):
             logger.debug(
                 "Rejected request %s: insufficient capacity under "

@@ -141,6 +141,8 @@ def main():
                         help="Experiment name or 'all'")
     parser.add_argument("--resume", action="store_true",
                         help="Skip completed runs")
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing results (re-run all)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print run matrix without executing")
     parser.add_argument("--calibrate", action="store_true",

@@ -42,6 +42,7 @@ from vllm.v1.core.checkpoint_controller import CheckpointConfig
 from vllm.v1.core.sched.benders.cost_tables import CostTableBuilder
 from vllm.v1.core.sched.benders.solve_loop import BendersSolveLoop
 from vllm.v1.core.sched.ft_scheduler import FaultTolerantScheduler, FTSchedulerConfig
+from vllm.v1.core.sched.ft_scheduler_impl import _auto_kv_bytes_per_token
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.failure_detector import ReplicaStatus
@@ -138,7 +139,7 @@ class BendersFTSchedulerImpl(SchedulerInterface):
                 or 0.0
             ),
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
-            kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
+            kv_bytes_per_token=_auto_kv_bytes_per_token(vllm_config),
             checkpoint_cost_profile=sched_cfg.ft_checkpoint_cost_profile,
         )
         self._ft = FaultTolerantScheduler(config=ft_config, dp_size=dp_size)
@@ -168,18 +169,6 @@ class BendersFTSchedulerImpl(SchedulerInterface):
         # We store the full replica set for the solver only.
         self._all_replica_ids = list(range(dp_size))
 
-        # Clamp max_gpu_failures if not enough replicas.
-        num_replicas = dp_size
-        if ft_config.max_gpu_failures >= num_replicas:
-            clamped = max(0, num_replicas - 1)
-            logger.warning(
-                "max_gpu_failures=%d >= num_replicas=%d; clamping to %d",
-                ft_config.max_gpu_failures,
-                num_replicas,
-                clamped,
-            )
-            self._ft.config.max_gpu_failures = clamped
-
         # Benders solver components.
         planning_horizon = sched_cfg.ft_planning_horizon or self._ft.replica_manager.planning_horizon
         ckpt_cfg = self._ft.checkpoint_controller.config
@@ -208,7 +197,7 @@ class BendersFTSchedulerImpl(SchedulerInterface):
             detection_time_sec=ft_config.detection_time_sec,
             memory_capacity_bytes=mem_cap,
             checkpoint_config=ckpt_cfg,
-            kv_bytes_per_token=sched_cfg.ft_kv_bytes_per_token,
+            kv_bytes_per_token=_auto_kv_bytes_per_token(vllm_config),
             block_size=block_size,
             checkpoint_lambda=sched_cfg.ft_checkpoint_lambda,
             cost_model=solver_cost_model,

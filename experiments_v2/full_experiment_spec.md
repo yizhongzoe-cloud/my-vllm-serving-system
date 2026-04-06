@@ -376,3 +376,95 @@ ft_planning_horizon: 0.5        # 缩短前瞻窗口，减少保守性
 | 5 | **已修** | Solver 参数不匹配导致 33% 拒绝 | 调参：prefill 4000→40000, decode 2000→150, horizon 1.0→0.5 |
 | 6 | 低 | SLO 可能太松（violation 全 0） | 先跑看 Heavy 负载下是否有 violation |
 | 5 | 低 | E5 没测故障时 solver 开销 | 只测 fault=none。故障时 recovery_checker 可能让 solver 更慢，可选加 F2_Mid |
+
+---
+
+## 换模型标准步骤
+
+每次换模型（比如 1B → 8B → 70B），按以下顺序执行。
+
+### Step 0: 前置条件
+
+- 模型权重已下载：`python -c "from transformers import AutoConfig; print(AutoConfig.from_pretrained('模型名').num_hidden_layers)"`
+- GPU 数量够用：`nvidia-smi --query-gpu=name --format=csv,noheader`
+- 数据集已下载（只下载一次，所有模型共用）：`ls experiments_v2/datasets/cached/`
+
+### Step 1: Profile decode capacity（约 30 分钟）
+
+```bash
+/home/yzhong76/envs/sd_env/bin/python experiments_v2/profile_decode_capacity.py \
+    --model <模型名> \
+    --port 8300 \
+    --tpot-slo-ms 50 \
+    --max-model-len <max_model_len> \
+    --output experiments_v2/decode_capacity_profile_<tag>.json
+```
+
+### Step 2: Profile checkpoint costs（约 10 分钟）
+
+```bash
+/home/yzhong76/envs/sd_env/bin/python experiments_v2/profile_checkpoint_costs.py \
+    --model <模型名> \
+    --port 8300 \
+    --output experiments_v2/checkpoint_cost_profile_<tag>.json
+```
+
+### Step 3: Calibrate 负载和 SLO（约 1-2 小时，可选）
+
+```bash
+/home/yzhong76/envs/sd_env/bin/python experiments_v2/calibrate.py \
+    --config experiments_v2/config_<tag>.yaml \
+    --port 8300 \
+    --output experiments_v2/config_<tag>_calibrated.yaml
+```
+
+自动填入 config 的 load_levels.rps 和 slo 值。不跑的话手动填也行。
+
+### Step 4: 检查 config
+
+确认以下字段都不是 null：
+
+```yaml
+ft_checkpoint_cost_profile: "experiments_v2/checkpoint_cost_profile_<tag>.json"  # Step 2 产出
+ft_decode_capacity_profile: "experiments_v2/decode_capacity_profile_<tag>.json"  # Step 1 产出
+load_levels:
+  Moderate: {pct: 0.40, rps: <数字>}  # Step 3 或手动填
+slo:
+  ttft_ms: <数字>                      # Step 3 或手动填
+  failure_gap_ms: <数字>               # Step 3 或手动填
+```
+
+不需要手动改的（代码自动算）：`ft_kv_bytes_per_token`
+
+### Step 5: Smoke test → Step 6: 正式实验 → Step 7: 生成图表
+
+```bash
+# Smoke
+/home/yzhong76/envs/sd_env/bin/python experiments_v2/suite.py \
+    --config experiments_v2/config_<tag>.yaml --experiment E0_Smoke --port 8300
+
+# 正式
+/home/yzhong76/envs/sd_env/bin/python experiments_v2/suite.py \
+    --config experiments_v2/config_<tag>.yaml --experiment E1a_Main --port 8300
+
+# 图表
+/home/yzhong76/envs/sd_env/bin/python experiments_v2/analyze.py \
+    results_v2/<tag>/E1a_Main --output experiments_v2/figures/E1a_Main --all
+```
+
+### 各模型参数速查
+
+| 参数 | 1B | 8B | 70B |
+|---|---|---|---|
+| 模型名 | meta-llama/Llama-3.2-1B-Instruct | meta-llama/Llama-3.1-8B-Instruct | meta-llama/Llama-3.1-70B-Instruct |
+| max_model_len | 2048 | 4096 | 4096 |
+| dp_size | 2 | 2 或 4 | 2 |
+| GPU 需求 | 2 | 2 或 4 | 8 |
+| checkpoint_pool | 8 GB | 32 GB | 128 GB |
+
+### 什么时候需要重跑 profile
+
+- 换了模型 → 全部重跑（Step 1-3）
+- 换了 GPU → 全部重跑
+- 只改了实验参数（workload、fault、seed）→ 不需要重跑
+- 改了 vLLM/solver 代码 → 建议重跑 Step 3（calibrate）
