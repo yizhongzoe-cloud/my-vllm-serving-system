@@ -194,51 +194,13 @@ class KVCheckpointPool:
         )
 
         device = gpu_kv_caches[0].device
-        # Synchronous transfer — eliminates stream race as a variable.
+        # Transfer block indices to GPU (on default stream).
         block_indices_gpu = block_indices.to(device)
 
         if async_copy and torch.cuda.is_available():
             stream = self._get_copy_stream()
-            num_kv_blocks = gpu_kv_caches[0].shape[1]
 
-            # Diagnostic: log actual values before CUDA indexing (CPU-side,
-            # zero GPU cost, survives CUDA crashes).
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "Checkpoint %s: %d blocks, indices=%s, "
-                    "tensor_shape=%s, strides=%s, contiguous=%s",
-                    request_id,
-                    len(block_ids),
-                    block_ids[:5],
-                    gpu_kv_caches[0].shape,
-                    gpu_kv_caches[0].stride(),
-                    gpu_kv_caches[0].is_contiguous(),
-                )
-
-            # GPU-side verification: confirm the actual values on GPU match
-            # what Python sees.  This catches non_blocking races and memory
-            # corruption — costs one small D2H transfer.
-            gpu_max = int(block_indices_gpu.max().item())
-            gpu_min = int(block_indices_gpu.min().item())
-            if gpu_max >= num_kv_blocks or gpu_min < 0:
-                logger.error(
-                    "Checkpoint %s: GPU-side index OOB! "
-                    "gpu_min=%d, gpu_max=%d, num_kv_blocks=%d, "
-                    "cpu_indices=%s",
-                    request_id, gpu_min, gpu_max, num_kv_blocks,
-                    block_ids,
-                )
-                with self._lock:
-                    self._reserved_bytes -= estimated_bytes
-                return None
-
-            # Synchronize default stream BEFORE entering copy stream so
-            # that any error from the preceding forward pass surfaces here
-            # (not attributed to our checkpoint indexing).
-            torch.cuda.synchronize(device)
-
-            # Pre-allocate pinned memory from metadata — avoids GPU indexing
-            # on the default stream.
+            # Pre-allocate pinned memory.
             pinned_tensors: dict[int, torch.Tensor] = {}
             n_sel = len(block_ids)
             sample = gpu_kv_caches[0]
@@ -250,13 +212,24 @@ class KVCheckpointPool:
                     device="cpu",
                 ).pin_memory()
 
-            # Now do the actual async copy on the dedicated stream.
-            with torch.cuda.stream(stream):
-                for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
-                    subset = gpu_tensor[:, block_indices_gpu, :, :, :]
-                    pinned_tensors[layer_idx].copy_(subset, non_blocking=True)
+            # Stage 1 (default stream): gather the KV blocks into contiguous
+            # GPU buffers. This runs on the same stream as decode, so it
+            # naturally waits for the latest decode step to finish writing.
+            gpu_buffers: dict[int, torch.Tensor] = {}
+            for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
+                gpu_buffers[layer_idx] = gpu_tensor[:, block_indices_gpu, :, :, :].clone()
 
-            stream.synchronize()
+            # Stage 2 (copy stream): async copy from GPU buffers to pinned
+            # host memory. The event ensures copy stream waits for the
+            # gather above (on default stream) to complete. CPU does NOT
+            # block — decode continues on the default stream.
+            event = torch.cuda.current_stream(device).record_event()
+            with torch.cuda.stream(stream):
+                stream.wait_event(event)
+                for layer_idx in range(len(gpu_kv_caches)):
+                    pinned_tensors[layer_idx].copy_(
+                        gpu_buffers[layer_idx], non_blocking=True)
+
             entry.kv_tensors = pinned_tensors
         else:
             for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
@@ -350,6 +323,8 @@ class KVCheckpointPool:
 
         if torch.cuda.is_available():
             stream = self._get_copy_stream()
+            # Ensure any in-flight async save completes before we read.
+            stream.synchronize()
             with torch.cuda.stream(stream):
                 for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
                     host_tensor = entry.kv_tensors.get(layer_idx)

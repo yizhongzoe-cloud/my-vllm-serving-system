@@ -52,13 +52,12 @@
 
 | 优先级 | 方向 | 说明 | 出处 |
 |---|---|---|---|
-| ~~done~~ | ~~**诊断 FT 运行时开销来源**~~ | ~~TPOT 飙升的根因是 `max_gpu_failures` 被钳制到 0（EngineCore 的 dp_size=1 触发了保护逻辑），导致 checkpoint 从不 publish、solver 大量 infeasible。~~ **已修：删掉钳制逻辑，`max_gpu_failures` 保持原值。** | ft_scheduler_impl.py, benders_ft_scheduler_impl.py |
-| **P2** | **Checkpoint 异步拷贝** | KV checkpoint 从 GPU→Host 的拷贝改成非阻塞（`async_copy=True`），和 decode 计算重叠执行。代码已支持 `async_copy` 参数，但默认关闭。**如果 P1 确认 checkpoint 是瓶颈，这个直接解决。** | `kv_checkpoint_pool.py` 的 `save_checkpoint()` |
-| **P2** | **Solver 异步化** | 把 Benders solver 移到后台线程，当前 decode step 用上一轮的 admission 决策。**如果 P1 确认 solver 阻塞是瓶颈，这个直接解决。** | [idea_online_periodic.md §13](idea_online_periodic.md) |
-| **P3** | **SLO 改为应用驱动的固定值** | calibrate.py 目前用 5×TTFT_base 算 SLO，等于系统给自己出考卷。应改为固定值：TTFT=2000ms, Gap=3000ms。5 分钟改完。 | 对话中讨论 |
-| **P3** | **负载百分比降低** | 当前 25/40/55% of No-FT 饱和点，8B 上 FT baselines 在 Heavy 已过载。改为 15/25/35%。5 分钟改完。 | 8B E3 实验结果 |
-| **P4** | **LP 松弛替代 MIP** | Master problem 的 0/1 变量 LP 松弛，求解速度提升 10-100 倍。但不是当前 TPOT 高的主因。 | 对话中讨论 |
-| **P4** | **更强的 Benders cut** | 当前只用 no-good cut。可加 pool-overload cut、lifted cut，加速 solver 收敛。 | [slides/progress_slides.md](../../slides/progress_slides.md) Slide 13 |
+| ~~done~~ | ~~**Solver 异步化 + 缩短 epoch**~~ | ~~solver 移到后台线程 + epoch 从 100ms 缩到 20ms。~~ **已实现。** TPOT 没变，但 Goodput +7%，TTFT -11%。 | ft_client.py |
+| ~~done~~ | ~~**Checkpoint 拷贝异步化**~~ | ~~`save_checkpoint` 里 3 处 CPU 阻塞 + `collective_rpc` 同步等待。~~ **已修：(1) GPU 端改用 `record_event`+`wait_event` 跨 stream 同步，CPU 零阻塞。(2) checkpoint RPC 改成 fire-and-forget（ThreadPoolExecutor 后台执行），metadata 在发 RPC 前乐观更新。** 最终结果：Goodput 174.8→215.6（+23%，接近 No-FT 的 223.1），SLO violation 18.9%→4.9%，完成率恢复到 98.8%。 | `kv_checkpoint_pool.py`, `core.py` |
+| **P4** | **扩展到 dp=4** | 8B E3 结果表明 dp=2 下 routing 没有收益（Benders-Only < Adaptive-Only）。dp=4 下 routing 选择空间大，Benders 优势才能体现。 | 8B E3 实验结果 |
+| **P5** | **更强的 Benders cut** | 当前只用 no-good cut。可加 pool-overload cut、lifted cut，加速 solver 收敛。 | [slides/progress_slides.md](../../slides/progress_slides.md) Slide 13 |
+| **P5** | **SLO 改为应用驱动的固定值** | calibrate.py 目前用 5×TTFT_base 算 SLO。应改为固定值。不紧急——当前 SLO 问题是 TPOT 本身太高，不是阈值设定问题。 | 对话中讨论 |
+| ~~done~~ | ~~**诊断 FT 运行时开销来源**~~ | ~~根因是 `max_gpu_failures` 被钳制到 0 + EngineCore admission 过度拒绝。~~ **已修。** | ft_scheduler_impl.py, benders_ft_scheduler_impl.py |
 | ~~done~~ | ~~**Decode-first 容量模型**~~ | ~~用 decode slot + residual prefill 替代旧的串行时间约束。~~ **已实现。** 后续可升级：`w_j = α + β·ctx_j`、线性拟合替代查表。 | [decode_first_capacity_plan.md](../../experiments_v2/decode_first_capacity_plan.md) |
 
 ### 实验层面

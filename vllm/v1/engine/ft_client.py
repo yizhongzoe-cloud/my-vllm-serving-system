@@ -1005,16 +1005,20 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         # Global recovery plans from solver.
         self._recovery_plans: dict[frozenset[int], dict[str, int]] = {}
 
-        # Solver execution.
+        # Solver execution (async pipeline).
         self._solver_executor = ThreadPoolExecutor(max_workers=1)
         self._solver_budget_sec: float = getattr(
             sched_cfg, "benders_solver_budget_sec", 0.5
         ) or 0.5
         self._epoch_interval_sec: float = getattr(
-            sched_cfg, "benders_epoch_interval_sec", 0.1
-        ) or 0.1
+            sched_cfg, "benders_epoch_interval_sec", 0.02
+        ) or 0.02
         self._solve_epoch_task: asyncio.Task | None = None
-        self._solver_running = False
+        # Async solver state: solver runs in background, results dispatched
+        # when ready. Each epoch fires a new solve if pending requests exist
+        # and no solve is in flight.
+        self._solver_future: asyncio.Task | None = None
+        self._solver_pending: list[EngineCoreRequest] = []
 
         # All replica IDs for the solver.
         self._all_replica_ids = list(range(dp_size))
@@ -1059,13 +1063,41 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         )
 
     async def _solve_epoch_loop(self) -> None:
-        """Periodic solver epoch: gather snapshot, solve, dispatch."""
+        """Async solver pipeline: fire solver in background, dispatch when done.
+
+        Each epoch:
+        1. If solver finished → dispatch its results immediately.
+        2. If new pending requests and solver idle → fire new solver.
+
+        Uses asyncio.wait to react as soon as solver completes (not wait
+        for next epoch timer).
+        """
         try:
             while True:
-                await asyncio.sleep(self._epoch_interval_sec)
-                await self._run_solve_epoch()
+                if (self._solver_future is not None
+                        and not self._solver_future.done()):
+                    # Wait for EITHER epoch timer OR solver completion.
+                    sleep_task = asyncio.ensure_future(
+                        asyncio.sleep(self._epoch_interval_sec))
+                    done, _ = await asyncio.wait(
+                        [sleep_task, self._solver_future],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    # Cancel the sleep if solver finished first.
+                    if not sleep_task.done():
+                        sleep_task.cancel()
+                else:
+                    await asyncio.sleep(self._epoch_interval_sec)
+
+                # Step 1: Check if solver completed → dispatch.
+                await self._check_solver_result()
+
+                # Step 2: Fire new solver if pending and idle.
+                await self._maybe_fire_solver()
+
         except asyncio.CancelledError:
-            pass
+            if self._solver_future and not self._solver_future.done():
+                self._solver_future.cancel()
         except Exception:
             logger.exception(
                 "Centralized solver epoch loop crashed, "
@@ -1073,36 +1105,74 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             )
             await self._greedy_dispatch_pending()
 
-    async def _run_solve_epoch(self) -> None:
-        """Run one solver epoch."""
-        if not self._pending_solver_requests:
-            return  # Nothing to decide.
+    async def _check_solver_result(self) -> None:
+        """If the background solver has completed, dispatch its results."""
+        if self._solver_future is None or not self._solver_future.done():
+            return
 
-        # Cold start: no snapshots from any engine yet — can't build global
-        # view.  Dispatch pending requests via greedy so they actually reach
-        # an engine (which will then start sending snapshots back).
+        pending = self._solver_pending
+        self._solver_pending = []
+
+        try:
+            result = self._solver_future.result()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Centralized solver timed out, "
+                "degraded to greedy for %d requests", len(pending))
+            self._pending_solver_requests.extend(pending)
+            await self._greedy_dispatch_pending()
+            self._solver_future = None
+            return
+        except Exception:
+            logger.exception(
+                "Centralized solver failed, "
+                "degraded to greedy for %d requests", len(pending))
+            self._pending_solver_requests.extend(pending)
+            await self._greedy_dispatch_pending()
+            self._solver_future = None
+            return
+
+        self._solver_future = None
+
+        if result is None:
+            logger.warning(
+                "Centralized solver returned None (infeasible), "
+                "degraded to greedy for %d requests", len(pending))
+            self._pending_solver_requests.extend(pending)
+            await self._greedy_dispatch_pending()
+            return
+
+        await self._dispatch_solver_result(result, pending)
+
+    async def _maybe_fire_solver(self) -> None:
+        """Fire a new solver run if there are pending requests and no
+        solver is in flight."""
+        if not self._pending_solver_requests:
+            return
+
+        # Cold start: no snapshots yet → greedy bootstrap.
         if not self._engine_request_snapshots:
             logger.info(
                 "Centralized solver: no engine snapshots yet, "
                 "greedy bootstrap for %d requests",
-                len(self._pending_solver_requests),
-            )
+                len(self._pending_solver_requests))
             await self._greedy_dispatch_pending()
             return
 
-        if self._solver_running:
-            return  # Previous solve still in progress.
+        # Solver still running → wait.
+        if self._solver_future is not None and not self._solver_future.done():
+            return
 
         # Take pending requests atomically.
         pending = list(self._pending_solver_requests)
         self._pending_solver_requests.clear()
+        self._solver_pending = pending
 
-        # Build global active request list from all engine snapshots.
+        # Build global snapshot.
         all_active_snapshots: list[RequestSnapshot] = []
         for snaps in self._engine_request_snapshots.values():
             all_active_snapshots.extend(snaps)
 
-        # Healthy replicas: alive in our tracking + alive in replica snapshots.
         healthy_replicas = []
         for r_id in self._all_replica_ids:
             engine_id = self._index_to_engine.get(r_id)
@@ -1118,30 +1188,25 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         if not healthy_replicas:
             logger.warning(
                 "Centralized solver: no healthy replicas, "
-                "greedy fallback for %d requests",
-                len(pending),
-            )
+                "greedy fallback for %d requests", len(pending))
             self._pending_solver_requests.extend(pending)
+            self._solver_pending = []
             await self._greedy_dispatch_pending()
             return
 
-        # Build global cost table from snapshots + pending requests.
         cost_table = self._cost_builder.build_global_costs(
             all_active_snapshots, pending
         )
-
         if not cost_table:
+            # Put requests back so they're retried next epoch.
+            self._pending_solver_requests.extend(pending)
+            self._solver_pending = []
             return
 
-        # NOTE: In centralized mode, the cost table already contains ALL
-        # replicas' requests (from engine snapshots), so the recovery
-        # checker computes surv_load[r] accurately from the cost table
-        # itself.  No replica_load_overrides needed — unlike the per-engine
-        # path where remote replicas' requests aren't in the cost table.
-        self._solver_running = True
-        try:
-            loop = asyncio.get_event_loop()
-            result = await asyncio.wait_for(
+        # Fire solver in background (don't await).
+        loop = asyncio.get_event_loop()
+        self._solver_future = asyncio.ensure_future(
+            asyncio.wait_for(
                 loop.run_in_executor(
                     self._solver_executor,
                     self._solver.solve_epoch_from_costs,
@@ -1151,39 +1216,7 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
                 ),
                 timeout=self._solver_budget_sec,
             )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Centralized solver timed out (%.1fs), "
-                "degraded to greedy for %d requests",
-                self._solver_budget_sec,
-                len(pending),
-            )
-            self._pending_solver_requests.extend(pending)
-            await self._greedy_dispatch_pending()
-            return
-        except Exception:
-            logger.exception(
-                "Centralized solver failed, "
-                "degraded to greedy for %d requests",
-                len(pending),
-            )
-            self._pending_solver_requests.extend(pending)
-            await self._greedy_dispatch_pending()
-            return
-        finally:
-            self._solver_running = False
-
-        if result is None:
-            logger.warning(
-                "Centralized solver returned None (infeasible), "
-                "degraded to greedy for %d requests",
-                len(pending),
-            )
-            self._pending_solver_requests.extend(pending)
-            await self._greedy_dispatch_pending()
-            return
-
-        await self._dispatch_solver_result(result, pending)
+        )
 
     async def _dispatch_solver_result(self, result, pending) -> None:
         """Dispatch solver decisions to engines."""

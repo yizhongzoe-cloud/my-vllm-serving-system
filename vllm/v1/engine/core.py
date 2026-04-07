@@ -587,91 +587,89 @@ class EngineCore:
     ) -> dict[str, int] | None:
         """Trigger GPU→CPU KV checkpoint if using FT scheduler.
 
+        Async pipeline:
+        1. Collect results from PREVIOUS step's checkpoint RPC (if any).
+        2. Fire a NEW checkpoint RPC for this step (don't wait).
+
         Returns:
             Dict mapping request_id -> num_checkpointed_tokens for
-            successfully checkpointed requests, or None.
+            requests whose checkpoint completed (from previous step).
         """
         if not hasattr(self.scheduler, "ft_scheduler"):
             return None
 
         ft = self.scheduler.ft_scheduler
+        ckpt_updates: dict[str, int] = {}
+
+        # Step 1: Collect results from previous async RPC.
+        if hasattr(self, "_ft_ckpt_future") and self._ft_ckpt_future is not None:
+            try:
+                results = self._ft_ckpt_future.result()
+                if results and results[0]:
+                    metadata_updates: dict[str, tuple[int, int]] = {}
+                    for result in results[0]:
+                        if len(result) == 3:
+                            req_id, size_bytes, covered_tokens = result
+                        else:
+                            req_id, size_bytes = result
+                            request = ft.request_pool.get_request(req_id)
+                            covered_tokens = (
+                                request.num_computed_tokens
+                                if request is not None else 0
+                            )
+                        request = ft.request_pool.get_request(req_id)
+                        if request is not None:
+                            # Only update size_bytes from RPC result.
+                            # num_checkpointed_tokens was already set
+                            # eagerly when the RPC was fired.
+                            request.last_checkpoint_size_bytes = size_bytes
+                            metadata_updates[req_id] = (
+                                covered_tokens, size_bytes,
+                            )
+                    if metadata_updates:
+                        ft.update_checkpoint_metadata(metadata_updates)
+            except Exception as e:
+                logger.warning("FT checkpoint RPC failed: %s", e)
+            self._ft_ckpt_future = None
+
+        # Step 2: Fire new checkpoint RPC (async, don't wait).
         request_block_map: list[tuple[str, list[int], int]] = []
         if checkpoint_plan is None:
             checkpoint_requests = self.scheduler.get_checkpoint_requests()
-            if not checkpoint_requests:
-                return None
-            request_block_map = checkpoint_requests
+            if checkpoint_requests:
+                request_block_map = checkpoint_requests
         else:
             for req_id, block_ids in checkpoint_plan:
                 request = ft.request_pool.get_request(req_id)
                 if request is None or not block_ids:
                     continue
                 request_block_map.append((
-                    req_id,
-                    block_ids,
-                    request.num_computed_tokens,
+                    req_id, block_ids, request.num_computed_tokens,
                 ))
-            if not request_block_map:
-                return None
 
-        ckpt_updates: dict[str, int] = {}
+        if request_block_map:
+            # Eagerly update checkpoint metadata BEFORE firing RPC.
+            # num_checkpointed_tokens is known now; only size_bytes
+            # needs the RPC result (updated when RPC completes next step).
+            for req_id, block_ids, num_tokens in request_block_map:
+                request = ft.request_pool.get_request(req_id)
+                if request is not None:
+                    ft.checkpoint_controller.record_checkpoint(request)
+                    # record_checkpoint sets num_checkpointed_tokens to the
+                    # correct block-aligned value. Don't override.
+                    ckpt_updates[req_id] = request.num_checkpointed_tokens
 
-        try:
-            results = self.collective_rpc(
+            # Fire checkpoint RPC in background thread (don't block step).
+            if not hasattr(self, "_ft_ckpt_executor"):
+                from concurrent.futures import ThreadPoolExecutor
+                self._ft_ckpt_executor = ThreadPoolExecutor(max_workers=1)
+
+            self._ft_ckpt_future = self._ft_ckpt_executor.submit(
+                self.collective_rpc,
                 "checkpoint_kv_blocks",
-                args=(request_block_map,),
+                None,  # timeout
+                (request_block_map,),
             )
-
-            # Write checkpoint results back to FT controller/request state.
-            # results is a list (one per worker); take the first.
-            if results and results[0]:
-                # Collect (num_tokens, size_bytes) for metadata sync.
-                metadata_updates: dict[str, tuple[int, int]] = {}
-                for result in results[0]:
-                    if len(result) == 3:
-                        req_id, size_bytes, covered_tokens = result
-                    else:
-                        req_id, size_bytes = result
-                        request = ft.request_pool.get_request(req_id)
-                        covered_tokens = (
-                            request.num_computed_tokens
-                            if request is not None else 0
-                        )
-                    request = ft.request_pool.get_request(req_id)
-                    if request is not None:
-                        ft.checkpoint_controller.record_checkpoint(request)
-                        request.num_checkpointed_tokens = covered_tokens
-                        request.last_checkpoint_size_bytes = size_bytes
-                        ckpt_updates[req_id] = covered_tokens
-                        metadata_updates[req_id] = (
-                            covered_tokens,
-                            size_bytes,
-                        )
-                        logger.debug(
-                            "FT checkpoint recorded for request %s "
-                            "(%d bytes, %d tokens)",
-                            req_id,
-                            size_bytes,
-                            covered_tokens,
-                        )
-                # Sync metadata (with actual size_bytes from worker) to
-                # FT scheduler so RecoveryManager can estimate recovery
-                # costs accurately.
-                if metadata_updates:
-                    ft.update_checkpoint_metadata(metadata_updates)
-        except Exception as e:
-            logger.warning(
-                "FT checkpoint failed for %d requests: %s",
-                len(request_block_map),
-                e,
-            )
-            for rid, bids, ntok in request_block_map:
-                logger.warning(
-                    "  failed request %s: %d blocks, %d tokens",
-                    rid,
-                    len(bids),
-                    ntok,
-                )
 
         return ckpt_updates if ckpt_updates else None
 
