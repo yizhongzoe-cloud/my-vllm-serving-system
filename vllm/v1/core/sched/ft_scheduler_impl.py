@@ -21,6 +21,8 @@ In single-replica mode (DP=1), FT admission still applies SLO checks, but
 failure-tolerance for GPU crashes is not possible (no surviving replica).
 """
 
+import os
+import time
 from collections.abc import Iterable
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Optional
@@ -31,6 +33,30 @@ from vllm.v1.core.sched.ft_scheduler import FaultTolerantScheduler, FTSchedulerC
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P0-impl-3a: cProfile instrumentation for diagnosing the ~32 ms wrapper
+# overhead. Disabled by default (zero cost). Set FT_PROFILE_MAX_CALLS=N
+# to capture the first N schedule() calls and dump to FT_PROFILE_OUTPUT.
+#
+# Usage:
+#   FT_PROFILE_MAX_CALLS=500 \
+#   FT_PROFILE_OUTPUT=/tmp/ft_schedule_profile.txt \
+#   <run server normally>
+#
+# After N calls, a pstats dump (sorted by cumulative + tottime) is written
+# to the output file. Subsequent schedule() calls are NOT profiled.
+# ─────────────────────────────────────────────────────────────────────────────
+_ft_profile_state: dict = {
+    "profile": None,
+    "calls": 0,
+    "max_calls": int(os.environ.get("FT_PROFILE_MAX_CALLS", "0") or "0"),
+    "output_path": os.environ.get(
+        "FT_PROFILE_OUTPUT", "/tmp/ft_schedule_profile.txt"
+    ),
+    "wall_time_samples": [],  # list of (process_pending, base_schedule, ckpt_step) tuples
+    "dumped": False,
+}
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -106,7 +132,21 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
     ) -> None:
         # Build the base scheduler (handles all standard vLLM logic).
         base_vllm_config = _normalize_base_scheduler_config(vllm_config)
-        self._base = Scheduler(
+        # P0-impl-3a fix (2026-04-08): when async_scheduling is enabled,
+        # base must be AsyncScheduler (which manages num_output_placeholders).
+        # Otherwise the batch_queue=2 pipeline causes 50% under-sampling
+        # (num_new_tokens==0 every other step), doubling tpot. See
+        # experiments_v2/docs/e1a_quick_diagnosis.md "Final Root Cause".
+        if base_vllm_config.scheduler_config.async_scheduling:
+            from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+            _BaseSchedulerCls = AsyncScheduler
+            logger.info(
+                "FaultTolerantSchedulerImpl: async_scheduling=True, "
+                "using AsyncScheduler as base (P0-impl-3a fix)"
+            )
+        else:
+            _BaseSchedulerCls = Scheduler
+        self._base = _BaseSchedulerCls(
             vllm_config=base_vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=structured_output_manager,
@@ -268,24 +308,116 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
     def schedule(self) -> "SchedulerOutput":
         """FT hook: batch-admit pending requests, then run base scheduling
         and checkpoint decisions."""
-        # Batch-admit pending requests sorted by G_j (goodput-max).
-        self._process_pending_admissions()
+        # ── P0-impl-3a: optional cProfile + per-section wall timing ──
+        # Zero overhead when FT_PROFILE_MAX_CALLS is unset/0.
+        _state = _ft_profile_state
+        _profile_active = (
+            _state["max_calls"] > 0
+            and _state["calls"] < _state["max_calls"]
+        )
+        _pr = None
+        if _profile_active:
+            if _state["profile"] is None:
+                import cProfile
+                _state["profile"] = cProfile.Profile()
+            _pr = _state["profile"]
+            _pr.enable()
 
-        output = self._base.schedule()
+        try:
+            _t0 = time.perf_counter() if _profile_active else 0.0
+            # Batch-admit pending requests sorted by G_j (goodput-max).
+            self._process_pending_admissions()
 
-        # Trigger adaptive checkpointing for running requests.
-        # Block IDs are resolved via kv_cache_manager; actual GPU→CPU
-        # copies are triggered separately via collective_rpc in
-        # EngineCore.step() (see core.py checkpoint hook).
-        if self._ft.config.enable_checkpointing:
-            running = self._base.running
-            self._ft.run_checkpoint_step(
-                running_requests=running,
-                gpu_kv_caches=None,
-                kv_cache_manager=self._base.kv_cache_manager,
+            _t1 = time.perf_counter() if _profile_active else 0.0
+            output = self._base.schedule()
+
+            _t2 = time.perf_counter() if _profile_active else 0.0
+            # Trigger adaptive checkpointing for running requests.
+            # Block IDs are resolved via kv_cache_manager; actual GPU→CPU
+            # copies are triggered separately via collective_rpc in
+            # EngineCore.step() (see core.py checkpoint hook).
+            if self._ft.config.enable_checkpointing:
+                running = self._base.running
+                self._ft.run_checkpoint_step(
+                    running_requests=running,
+                    gpu_kv_caches=None,
+                    kv_cache_manager=self._base.kv_cache_manager,
+                )
+            _t3 = time.perf_counter() if _profile_active else 0.0
+
+            if _profile_active:
+                _state["wall_time_samples"].append(
+                    (_t1 - _t0, _t2 - _t1, _t3 - _t2)
+                )
+            return output
+        finally:
+            if _profile_active:
+                _pr.disable()
+                _state["calls"] += 1
+                if _state["calls"] >= _state["max_calls"] and not _state["dumped"]:
+                    _state["dumped"] = True
+                    self._ft_dump_profile()
+
+    def _ft_dump_profile(self) -> None:
+        """P0-impl-3a: dump cProfile + per-section wall timing summary."""
+        _state = _ft_profile_state
+        try:
+            import pstats
+            samples = _state["wall_time_samples"]
+            n = len(samples)
+            with open(_state["output_path"], "w") as f:
+                # ── Header & per-section wall timing ──
+                f.write(
+                    f"FT_PROFILE: captured {n} schedule() calls\n"
+                    f"Output path: {_state['output_path']}\n"
+                    f"\n"
+                    f"=== Per-section wall timing (ms) ===\n"
+                )
+                if n > 0:
+                    sums = [sum(s[i] for s in samples) for i in range(3)]
+                    avgs = [s / n * 1000 for s in sums]
+                    p50s = [
+                        sorted(s[i] for s in samples)[n // 2] * 1000
+                        for i in range(3)
+                    ]
+                    p95s = [
+                        sorted(s[i] for s in samples)[int(n * 0.95)] * 1000
+                        for i in range(3)
+                    ]
+                    section_names = [
+                        "_process_pending_admissions",
+                        "self._base.schedule()",
+                        "self._ft.run_checkpoint_step (if enabled)",
+                    ]
+                    f.write(
+                        f"{'Section':<45} {'avg':>10} {'p50':>10} {'p95':>10}\n"
+                    )
+                    for name, a, p50, p95 in zip(section_names, avgs, p50s, p95s):
+                        f.write(f"{name:<45} {a:>9.3f}ms {p50:>9.3f}ms {p95:>9.3f}ms\n")
+                    f.write(
+                        f"{'TOTAL':<45} {sum(avgs):>9.3f}ms "
+                        f"{sum(p50s):>9.3f}ms {sum(p95s):>9.3f}ms\n"
+                    )
+                f.write("\n")
+
+                # ── cProfile cumulative time top 50 ──
+                f.write("=== cProfile: top 50 by cumulative time ===\n")
+                stats = pstats.Stats(_state["profile"], stream=f)
+                stats.strip_dirs()
+                stats.sort_stats("cumulative")
+                stats.print_stats(50)
+
+                # ── cProfile total time top 50 ──
+                f.write("\n=== cProfile: top 50 by total time (excluding subcalls) ===\n")
+                stats.sort_stats("tottime")
+                stats.print_stats(50)
+
+            logger.info(
+                "FT_PROFILE: dumped %d schedule() samples to %s",
+                n, _state["output_path"],
             )
-
-        return output
+        except Exception as exc:  # pragma: no cover
+            logger.warning("FT_PROFILE dump failed: %s", exc)
 
     def update_from_output(
         self,

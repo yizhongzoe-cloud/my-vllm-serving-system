@@ -98,7 +98,20 @@ class BendersFTSchedulerImpl(SchedulerInterface):
     ) -> None:
         # Build the base scheduler (all standard vLLM logic).
         base_vllm_config = _normalize_base_scheduler_config(vllm_config)
-        self._base = Scheduler(
+        # P0-impl-3a fix (2026-04-08): when async_scheduling is enabled,
+        # base must be AsyncScheduler (which manages num_output_placeholders).
+        # Otherwise the batch_queue=2 pipeline causes 50% under-sampling
+        # (num_new_tokens==0 every other step), doubling tpot.
+        if base_vllm_config.scheduler_config.async_scheduling:
+            from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+            _BaseSchedulerCls = AsyncScheduler
+            logger.info(
+                "BendersFTSchedulerImpl: async_scheduling=True, "
+                "using AsyncScheduler as base (P0-impl-3a fix)"
+            )
+        else:
+            _BaseSchedulerCls = Scheduler
+        self._base = _BaseSchedulerCls(
             vllm_config=base_vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=structured_output_manager,
