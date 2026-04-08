@@ -76,6 +76,97 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+# ─────────────────────────────────────────────────────────────────────────────
+# P0-impl-3a: per-section wall timing for EngineCore.step().
+# Disabled by default. Enable with FT_STEP_TIMING_MAX_CALLS=N (e.g. 500).
+# Output: FT_STEP_TIMING_OUTPUT (default /tmp/ft_step_timing.txt)
+# ─────────────────────────────────────────────────────────────────────────────
+import os as _os
+_ft_step_timing_state: dict = {
+    "calls": 0,
+    "max_calls": int(_os.environ.get("FT_STEP_TIMING_MAX_CALLS", "0") or "0"),
+    "output_path": _os.environ.get(
+        "FT_STEP_TIMING_OUTPUT", "/tmp/ft_step_timing.txt"
+    ),
+    # samples is a list of 8-tuples: (sched, restore, exec_launch, grammar,
+    # forward_wait, aborts, update, post)
+    "samples": [],
+    "dumped": False,
+}
+
+
+def _ft_dump_step_timing() -> None:
+    """P0-impl-3a: dump per-section wall timing summary.
+
+    Sample tuple schema for step_with_batch_queue:
+        (total, prep, pop_and_wait, post, flag, _, _, _)
+    where flag = -1.0 (enqueue path) or 1.0 (dequeue path)
+    """
+    _state = _ft_step_timing_state
+    samples = _state["samples"]
+    n = len(samples)
+    # Add per-process suffix so dp workers don't overwrite each other
+    pid = _os.getpid()
+    output_path = f"{_state['output_path']}.pid{pid}"
+
+    enqueue_samples = [s for s in samples if s[4] < 0]
+    dequeue_samples = [s for s in samples if s[4] > 0]
+
+    def _stats(values: list[float]) -> tuple[float, float, float]:
+        if not values:
+            return (0.0, 0.0, 0.0)
+        sorted_v = sorted(values)
+        avg = sum(values) / len(values) * 1000
+        p50 = sorted_v[len(values) // 2] * 1000
+        p95_idx = min(len(values) - 1, int(len(values) * 0.95))
+        p95 = sorted_v[p95_idx] * 1000
+        return (avg, p50, p95)
+
+    try:
+        with open(output_path, "w") as f:
+            f.write(
+                f"FT_STEP_TIMING: captured {n} step_with_batch_queue() calls "
+                f"(pid={pid})\n"
+                f"  enqueue path (no GPU wait): {len(enqueue_samples)}\n"
+                f"  dequeue path (GPU wait):    {len(dequeue_samples)}\n"
+                f"\n"
+            )
+            f.write("=== Enqueue path: total call time ===\n")
+            if enqueue_samples:
+                a, p50, p95 = _stats([s[0] for s in enqueue_samples])
+                f.write(f"  avg={a:.3f}ms  p50={p50:.3f}ms  p95={p95:.3f}ms\n")
+            else:
+                f.write("  (none)\n")
+            f.write("\n=== Dequeue path: per-section breakdown ===\n")
+            if dequeue_samples:
+                section_names = [
+                    "1. total call",
+                    "2. enqueue-side prep (sched + exec launch)",
+                    "3. pop + future.result() — GPU forward wait",
+                    "4. update_from_output + deferred handling",
+                ]
+                f.write(
+                    f"{'Section':<48} {'avg':>10} {'p50':>10} {'p95':>10}\n"
+                )
+                for i, name in enumerate(section_names):
+                    a, p50, p95 = _stats([s[i] for s in dequeue_samples])
+                    f.write(
+                        f"{name:<48} {a:>9.3f}ms {p50:>9.3f}ms {p95:>9.3f}ms\n"
+                    )
+                # Verify section 1 = sum of 2..4 (sanity)
+                a1, _, _ = _stats([s[0] for s in dequeue_samples])
+                a234 = sum(_stats([s[i] for s in dequeue_samples])[0] for i in (1, 2, 3))
+                f.write(f"\n  sanity: section 1 ({a1:.3f}) ≈ sum 2..4 ({a234:.3f})\n")
+            else:
+                f.write("  (none)\n")
+        logger.info(
+            "FT_STEP_TIMING: dumped %d samples to %s "
+            "(enqueue=%d, dequeue=%d)",
+            n, output_path, len(enqueue_samples), len(dequeue_samples),
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("FT_STEP_TIMING dump failed: %s", exc)
+
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -530,15 +621,36 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
+        # ── P0-impl-3a: per-section wall timing ──
+        _ts_state = _ft_step_timing_state
+        _ts_active = (
+            _ts_state["max_calls"] > 0
+            and _ts_state["calls"] < _ts_state["max_calls"]
+        )
+        if _ts_active:
+            import time as _time
+            _t0 = _time.perf_counter()
+
         scheduler_output = self.scheduler.schedule()
+        if _ts_active:
+            _t1 = _time.perf_counter()
 
         # FT restore: schedule() has allocated KV blocks.  Restore
         # checkpoint KV into those blocks and patch scheduler_output
         # to skip the restored prefix (avoids redundant prefill).
         self._process_ft_pending_restores(scheduler_output)
+        if _ts_active:
+            _t2 = _time.perf_counter()
 
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        if _ts_active:
+            _t3 = _time.perf_counter()
+
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        if _ts_active:
+            _t4 = _time.perf_counter()
+
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
@@ -546,15 +658,38 @@ class EngineCore:
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+        if _ts_active:
+            _t5 = _time.perf_counter()
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if _ts_active:
+            _t6 = _time.perf_counter()
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if _ts_active:
+            _t7 = _time.perf_counter()
 
         self._ft_post_process(engine_core_outputs)
+        if _ts_active:
+            _t8 = _time.perf_counter()
+            _ts_state["samples"].append((
+                _t1 - _t0,  # 1. scheduler.schedule()
+                _t2 - _t1,  # 2. _process_ft_pending_restores
+                _t3 - _t2,  # 3. execute_model (launch, non-block)
+                _t4 - _t3,  # 4. get_grammar_bitmask
+                _t5 - _t4,  # 5. future.result() — GPU forward wait
+                _t6 - _t5,  # 6. _process_aborts_queue
+                _t7 - _t6,  # 7. update_from_output
+                _t8 - _t7,  # 8. _ft_post_process
+            ))
+            _ts_state["calls"] += 1
+            if _ts_state["calls"] >= _ts_state["max_calls"] and not _ts_state["dumped"]:
+                _ts_state["dumped"] = True
+                _ft_dump_step_timing()
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -795,6 +930,16 @@ class EngineCore:
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
 
+        # ── P0-impl-3a: per-section wall timing for step_with_batch_queue ──
+        _ts_state = _ft_step_timing_state
+        _ts_active = (
+            _ts_state["max_calls"] > 0
+            and _ts_state["calls"] < _ts_state["max_calls"]
+        )
+        if _ts_active:
+            import time as _time
+            _t_call_start = _time.perf_counter()
+
         model_executed = False
         deferred_scheduler_output = None
         deferred_checkpoint_plan: list[tuple[str, list[int]]] | None = None
@@ -846,6 +991,21 @@ class EngineCore:
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
+                    if _ts_active:
+                        _t_call_end = _time.perf_counter()
+                        _ts_state["samples"].append((
+                            _t_call_end - _t_call_start,  # 1. total call
+                            0.0,  # 2. future.result wait (not in this path)
+                            0.0,  # 3. update_from_output
+                            0.0,  # 4. _ft_post_process
+                            -1.0,  # 5. flag: enqueue path (no wait)
+                            0.0, 0.0, 0.0,
+                        ))
+                        _ts_state["calls"] += 1
+                        if (_ts_state["calls"] >= _ts_state["max_calls"]
+                                and not _ts_state["dumped"]):
+                            _ts_state["dumped"] = True
+                            _ft_dump_step_timing()
                     return None, True
 
         elif not batch_queue:
@@ -855,12 +1015,18 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
+        if _ts_active:
+            _t_pre_pop = _time.perf_counter()
         future, scheduler_output, exec_model_fut, checkpoint_plan = batch_queue.pop()
+        if _ts_active:
+            _t_pre_wait = _time.perf_counter()
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
             model_output = future.result()
+        if _ts_active:
+            _t_post_wait = _time.perf_counter()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -906,6 +1072,28 @@ class EngineCore:
         self._ft_post_process(
             engine_core_outputs, checkpoint_plan=checkpoint_plan
         )
+
+        if _ts_active:
+            _t_call_end = _time.perf_counter()
+            # 5 segments captured for the dequeue path:
+            # 1. total call time
+            # 2. enqueue-side prep (schedule + execute_model launch + sample) before pop
+            # 3. pop + future.result() wait — GPU forward wait time
+            # 4. update_from_output + deferred handling
+            # 5. _ft_post_process
+            _ts_state["samples"].append((
+                _t_call_end - _t_call_start,                  # 1. total
+                _t_pre_pop - _t_call_start,                   # 2. enqueue-side prep (this call)
+                _t_post_wait - _t_pre_pop,                    # 3. pop + future.result wait
+                _t_call_end - _t_post_wait,                   # 4. post-wait + ft_post_process
+                1.0,                                           # 5. flag: dequeue path
+                0.0, 0.0, 0.0,
+            ))
+            _ts_state["calls"] += 1
+            if (_ts_state["calls"] >= _ts_state["max_calls"]
+                    and not _ts_state["dumped"]):
+                _ts_state["dumped"] = True
+                _ft_dump_step_timing()
 
         return engine_core_outputs, model_executed
 

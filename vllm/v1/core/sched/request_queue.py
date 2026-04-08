@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import heapq
+import os
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -308,6 +309,14 @@ def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
     elif policy == SchedulingPolicy.SLO_AWARE:
         return SLOAwareRequestQueue()
     elif policy == SchedulingPolicy.FAULT_TOLERANT:
+        # P0-impl-3a verify (2026-04-08): SLO-aware base queue + FCFS reheapify
+        # behaviour was identified as the source of ~32 ms tpot overhead in
+        # fault_tolerant policy vs fcfs (Running reqs ~2x, see
+        # experiments_v2/docs/e1a_quick_diagnosis.md). Set the env var
+        # FT_USE_FCFS_BASE_QUEUE=1 to swap in FCFSRequestQueue and verify
+        # whether this is the root cause.
+        if os.environ.get("FT_USE_FCFS_BASE_QUEUE") == "1":
+            return FCFSRequestQueue()
         # Fault-tolerant mode uses SLO-aware queue for per-replica scheduling.
         # The FT-specific logic (admission, routing, checkpointing) is handled
         # by FaultTolerantScheduler which wraps the per-replica schedulers.

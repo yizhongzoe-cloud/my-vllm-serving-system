@@ -1,0 +1,241 @@
+# P0-impl-1 诊断 config — 不是论文用 config
+# ============================================
+# 目的：跑一个最小对照实验，区分以下两个根因：
+#   (1) checkpoint controller 阻塞 forward stream（实现层 bug）
+#   (2) Benders solver / decode capacity 配置不当（算法层 bug）
+#
+# 实验设计：
+#   - Our-System (现状, enable_checkpointing: true) vs
+#     Our-System-NoCkpt (实验组, enable_checkpointing: false)
+#   - W1_Chat / Moderate / {none, F2_Mid}
+#   - 1 seed, 短 run (90s 而不是 300s)
+#
+# 判定：
+#   - 如果 NoCkpt 的 tpot_p50 回到 ~30ms → 凶手是 checkpoint controller (P0-impl-3)
+#   - 如果 NoCkpt 的 tpot_p50 仍 ~60ms → 凶手是 Benders/profile (P1-env-1)
+#
+# 与 config_8b.yaml 的差异（只列改动，其余完全相同）：
+#   - 缩短 run_duration_sec / warmup_sec（90s/15s 而不是 300s/30s）
+#   - 新增 baseline: Our-System-NoCkpt
+#   - 新增 experiment: E_P0_Diag
+#
+# 用法：
+#   source venv/bin/activate
+#   CUDA_VISIBLE_DEVICES=4,5 python experiments_v2/suite.py \
+#       --config experiments_v2/config_8b_diag.yaml \
+#       --experiment E_P0_Diag \
+#       --port 8300
+
+# ---- Hardware & Model ----
+model: "meta-llama/Llama-3.1-8B-Instruct"
+model_tag: "8B_diag"   # 注意：单独的 model_tag 避免覆盖正式 results_v2/8B/
+max_model_len: 8192
+gpu_memory_utilization: 0.90
+dtype: "float16"
+enforce_eager: true
+dp_size: 2
+
+# ---- Solver / FT parameters ----
+ft_prefill_throughput: 4000.0
+ft_decode_throughput: 2000.0
+ft_load_bandwidth: 10.0e9
+ft_planning_horizon: 1.0
+ft_checkpoint_cost_profile: "experiments_v2/checkpoint_cost_profile_8b.json"
+ft_decode_capacity_profile: "experiments_v2/decode_capacity_profile_8b.json"
+failure_detection_time_ms: 100.0
+failure_timeout_sec: 5.0
+checkpoint_pool_bytes: 34359738368
+
+force_output_len: true
+
+# ---- Workloads ----
+workloads:
+  W1_Chat:
+    dataset: "sharegpt"
+    dataset_path: "experiments_v2/datasets/cached/sharegpt_5000.jsonl"
+    tpot_slo_ms: 100.0
+    arrival: "poisson"
+    description: "Chatbot, decode-heavy"
+
+  W2_Summary:
+    dataset: "cnndm"
+    dataset_path: "experiments_v2/datasets/cached/cnndm_3000.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "Summarization, prefill-heavy"
+
+# ---- Load levels ----
+load_levels:
+  Moderate: {pct: 0.40, rps: 1.0}
+
+# ---- SLO ----
+slo:
+  ttft_ms: 2000.0
+  failure_gap_ms: 3000.0
+  ttft_base_ms: 200.0
+  gap_base_ms: 1000.0
+
+# ---- Fault injection ----
+fault_timing:
+  none: null
+  F2_Mid: 45.0     # 注意：F2_Mid 时间也缩短了，因为 run_duration=90s
+
+# ---- Run parameters (DIAG: short run) ----
+run_duration_sec: 90.0    # vs 正式 300s
+warmup_sec: 15.0          # vs 正式 30s
+seeds: [42]
+request_timeout_sec: 120.0
+server_startup_timeout: 300.0
+
+# ---- Baselines ----
+# 详见 docs/p0_impl_1_experiment_design.md 的设计说明
+baselines:
+  # ====== Baseline: 无容错下界 (用于 P0-impl-3a 对照实验) ======
+  No-FT:
+    scheduling_policy: "fcfs"
+    enable_checkpointing: false
+    max_gpu_failures: 0
+    fixed_checkpoint_blocks: 0
+
+  # ====== Periodic baselines (P0-impl-3a fix verify) ======
+  Periodic-Low:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+
+  Periodic-High:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 1
+
+  # ====== 实验集 A：判罪 — checkpoint 路径整体 ======
+  Our-System:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0  # adaptive
+
+  Our-System-NoCkpt:           # A2：核心对照
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: false   # ← 关键差异
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+  # ====== 实验集 B：定位 ckpt 路径内的固定 vs 边际开销 ======
+  # 全部用 ft_benders_centralized 调度器，只改 fixed_checkpoint_blocks
+  Our-System-VeryLowFreq:      # B1：enable=true 但实际几乎不触发 save
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 99999  # ← 几乎永不触发 checkpoint
+
+  Our-System-LowFreq:          # B2
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 100
+
+  Our-System-MidFreq:          # B3
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 20
+
+  # ====== 实验集 C：scheduler 框架对比 ======
+  Adaptive-Only:               # C1：fault_tolerant + adaptive ckpt（相比 Our-System 只换调度器）
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0  # adaptive
+
+  Adaptive-Only-NoCkpt:        # C2：fault_tolerant 框架本身的开销（无 ckpt 干扰）
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+# ---- Experiments ----
+experiments:
+  E_P0_Diag_A:                 # 4 baselines × 1 cell = 4 runs, ~10 min
+    # 2×2 factor design: scheduler × checkpoint
+    # 与现有 No-FT (fcfs+off) 和 Periodic-Low (ft+on) 数据合在一起，
+    # 构成一个完整的 2×2 表，能同时区分 scheduler wrapper 和 ckpt 路径两个变量。
+    description: "P0-impl-1 Step 1 (2x2 factor): scheduler × ckpt"
+    baselines:
+      - "Our-System"            # ft_benders_centralized + ckpt on  (existing 60.7 ms)
+      - "Our-System-NoCkpt"     # ft_benders_centralized + ckpt off (TBD)
+      - "Adaptive-Only"         # fault_tolerant         + ckpt on  (TBD)
+      - "Adaptive-Only-NoCkpt"  # fault_tolerant         + ckpt off (TBD) ← 关键
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+  E_P0_Diag_B:                 # 3 baselines = 3 runs, ~7.5 min
+    description: "P0-impl-1 Step 2: ckpt frequency scan to disambiguate fixed vs marginal cost"
+    baselines:
+      - "Our-System-VeryLowFreq"
+      - "Our-System-LowFreq"
+      - "Our-System-MidFreq"
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+  E_P0_Diag_C:                 # 2 baselines = 2 runs, ~5 min
+    description: "P0-impl-1 Step 3: scheduler framework comparison"
+    baselines: ["Adaptive-Only", "Adaptive-Only-NoCkpt"]
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+  # ====== P0-impl-3a fix verify ======
+  E_P0_Fix_Verify:
+    # 7 baselines × W1_Chat × Moderate × none
+    # 验证 ft_scheduler_impl + benders_ft_scheduler_impl wrap AsyncScheduler 的 fix
+    # 期望：所有 fault_tolerant baseline 的 tpot 降到 ~30 ms
+    description: "P0-impl-3a fix verify: all 7 baselines after AsyncScheduler patch"
+    baselines:
+      - "No-FT"               # control (fcfs, unaffected by fix)
+      - "Periodic-Low"        # fault_tolerant + ckpt 10 blocks
+      - "Periodic-High"       # fault_tolerant + ckpt 1 block
+      - "Adaptive-Only-NoCkpt"  # fault_tolerant + ckpt off
+      - "Adaptive-Only"         # fault_tolerant + adaptive ckpt
+      - "Our-System-NoCkpt"     # ft_benders_centralized + ckpt off
+      - "Our-System"            # ft_benders_centralized + adaptive ckpt
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+  # ====== P0-impl-3a fix cross-sanity (workload + fault) ======
+  E_P0_Fix_Cross:
+    # 2 baselines × {W2/none, W1/F2_Mid} sanity
+    description: "P0-impl-3a fix cross-sanity: W2 + F2_Mid paths"
+    baselines: ["No-FT", "Adaptive-Only-NoCkpt"]
+    workloads: ["W2_Summary"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+  E_P0_Fix_Cross_Fault:
+    description: "P0-impl-3a fix cross-sanity: F2_Mid fault path"
+    baselines: ["No-FT", "Adaptive-Only-NoCkpt"]
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["F2_Mid"]
+
+  # 备用：如果想一次跑 A+B+C 全部 7 个 baselines（~17.5 min）
+  E_P0_Diag_All:
+    description: "P0-impl-1 全部诊断 cell 一次跑完（A+B+C）"
+    baselines:
+      - "Our-System"
+      - "Our-System-NoCkpt"
+      - "Our-System-VeryLowFreq"
+      - "Our-System-LowFreq"
+      - "Our-System-MidFreq"
+      - "Adaptive-Only"
+      - "Adaptive-Only-NoCkpt"
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+results_dir: "results_v2"

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -8,6 +9,118 @@ from dataclasses import replace
 from typing import Any
 
 import numpy as np
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P0-impl-3a: per-step batch composition instrumentation.
+# Disabled by default. Enable with FT_BATCH_LOG_MAX_CALLS=N (e.g. 500).
+# Output: FT_BATCH_LOG_OUTPUT (default /tmp/ft_batch_log.txt)
+#
+# For each call to base Scheduler.schedule(), record:
+#   (num_running, num_waiting, num_new, num_resumed, num_decode,
+#    total_scheduled_tokens, decode_tokens_only, prefill_tokens_only)
+# ─────────────────────────────────────────────────────────────────────────────
+_ft_batch_log_state: dict = {
+    "calls": 0,
+    "max_calls": int(os.environ.get("FT_BATCH_LOG_MAX_CALLS", "0") or "0"),
+    "output_path": os.environ.get(
+        "FT_BATCH_LOG_OUTPUT", "/tmp/ft_batch_log.txt"
+    ),
+    "samples": [],  # list of 8-tuples
+    "dumped": False,
+    # Per-step skip reason counters (P0-impl-3a deep dive)
+    "skip_pp_placeholder": 0,
+    "skip_async_max_tokens": 0,
+    "skip_num_new_zero": 0,
+}
+
+
+def _ft_dump_batch_log() -> None:
+    """P0-impl-3a: dump batch composition statistics."""
+    _state = _ft_batch_log_state
+    samples = _state["samples"]
+    n = len(samples)
+    pid = os.getpid()
+    output_path = f"{_state['output_path']}.pid{pid}"
+
+    def _stats(values):
+        if not values:
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+        s = sorted(values)
+        avg = sum(values) / len(values)
+        return (avg, s[0], s[len(s) // 2], s[int(len(s) * 0.95)], s[-1])
+
+    section_names = [
+        "num_running           (in-flight reqs)",
+        "num_waiting           (waiting queue)",
+        "num_new               (new prefills this step)",
+        "num_resumed           (resumed from preemption)",
+        "num_decode            (continuing decode this step)",
+        "total_scheduled_tokens (prompt + decode this step)",
+        "decode_tokens_only    (just decode tokens)",
+        "prefill_tokens_only   (just prompt chunks)",
+    ]
+    try:
+        with open(output_path, "w") as f:
+            f.write(
+                f"FT_BATCH_LOG: captured {n} schedule() calls (pid={pid})\n"
+                f"\n=== Per-step batch composition ===\n"
+            )
+            if n > 0:
+                f.write(f"{'Field':<48} {'avg':>10} {'min':>8} {'p50':>8} {'p95':>8} {'max':>8}\n")
+                for i, name in enumerate(section_names):
+                    a, mn, p50, p95, mx = _stats([s[i] for s in samples])
+                    f.write(f"{name:<48} {a:>10.2f} {mn:>8.0f} {p50:>8.0f} {p95:>8.0f} {mx:>8.0f}\n")
+
+                # Derived ratios
+                running = [s[0] for s in samples]
+                num_new = [s[2] for s in samples]
+                num_decode = [s[4] for s in samples]
+                total_tokens = [s[5] for s in samples]
+                decode_tokens = [s[6] for s in samples]
+                prefill_tokens = [s[7] for s in samples]
+                f.write("\n=== Derived ratios ===\n")
+                if running and any(running):
+                    sample_ratio = [
+                        (n_dec + n_new) / max(r, 1)
+                        for r, n_dec, n_new in zip(running, num_decode, num_new)
+                    ]
+                    a, mn, p50, p95, mx = _stats(sample_ratio)
+                    f.write(f"  sample_ratio = (decode+new)/running    avg={a:.3f}  p50={p50:.3f}  p95={p95:.3f}\n")
+                if total_tokens and any(total_tokens):
+                    decode_frac = [
+                        (d / t if t > 0 else 0)
+                        for d, t in zip(decode_tokens, total_tokens)
+                    ]
+                    a, mn, p50, p95, mx = _stats(decode_frac)
+                    f.write(f"  decode_token_frac = decode/total       avg={a:.3f}  p50={p50:.3f}  p95={p95:.3f}\n")
+                f.write(f"\n  steps with num_new > 0:  {sum(1 for n in num_new if n > 0)} / {n}\n")
+                f.write(f"  steps with num_decode>0: {sum(1 for d in num_decode if d > 0)} / {n}\n")
+                f.write(f"  steps with num_running >= 5: {sum(1 for r in running if r >= 5)} / {n}\n")
+                f.write(f"  steps with num_running >= 10: {sum(1 for r in running if r >= 10)} / {n}\n")
+                f.write(f"  steps with num_decode < num_running: {sum(1 for r, d, nn in zip(running, num_decode, num_new) if d + nn < r)} / {n}  ← under-sampling steps\n")
+                f.write("\n=== Skip-reason counters (cumulative across all steps) ===\n")
+                f.write(f"  skip_pp_placeholder    = {_state['skip_pp_placeholder']}  (PP>1 with output_placeholders > 0)\n")
+                f.write(f"  skip_async_max_tokens  = {_state['skip_async_max_tokens']}  (async scheduling, reached max_tokens)\n")
+                f.write(f"  skip_num_new_zero      = {_state['skip_num_new_zero']}  (num_new_tokens == 0 \u2014 likely main culprit)\n")
+                total_skips = (_state['skip_pp_placeholder']
+                              + _state['skip_async_max_tokens']
+                              + _state['skip_num_new_zero'])
+                f.write(f"  TOTAL skips            = {total_skips}\n")
+                if running:
+                    total_running = sum(running)
+                    sampled = sum(num_decode) + sum(num_new)
+                    f.write(f"  total_running across all steps = {total_running}\n")
+                    f.write(f"  total_sampled (decode+new)    = {sampled}\n")
+                    f.write(f"  total_skipped (running - sampled) = {total_running - sampled}\n")
+
+        from vllm.logger import init_logger
+        _logger = init_logger(__name__)
+        _logger.info("FT_BATCH_LOG: dumped %d samples to %s", n, output_path)
+    except Exception as exc:  # pragma: no cover
+        from vllm.logger import init_logger
+        _logger = init_logger(__name__)
+        _logger.warning("FT_BATCH_LOG dump failed: %s", exc)
+
 
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -348,6 +461,8 @@ class Scheduler(SchedulerInterface):
             # output placeholders for PP.
             # TODO: support PP + async scheduling without this limit
             if self.use_pp and request.num_output_placeholders > 0:
+                if _ft_batch_log_state["max_calls"] > 0:
+                    _ft_batch_log_state["skip_pp_placeholder"] += 1
                 req_index += 1
                 continue
 
@@ -364,6 +479,8 @@ class Scheduler(SchedulerInterface):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
+                if _ft_batch_log_state["max_calls"] > 0:
+                    _ft_batch_log_state["skip_async_max_tokens"] += 1
                 req_index += 1
                 continue
 
@@ -420,6 +537,8 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
+                if _ft_batch_log_state["max_calls"] > 0:
+                    _ft_batch_log_state["skip_num_new_zero"] += 1
                 req_index += 1
                 continue
 
@@ -918,6 +1037,35 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+        # ── P0-impl-3a: per-step batch composition logging ──
+        _bl_state = _ft_batch_log_state
+        if _bl_state["max_calls"] > 0 and _bl_state["calls"] < _bl_state["max_calls"]:
+            try:
+                num_running = len(self.running)
+                num_waiting = len(self.waiting)
+                n_new = len(scheduled_new_reqs)
+                n_resumed = len(scheduled_resumed_reqs)
+                n_decode = len(scheduled_running_reqs)
+                total_tok = total_num_scheduled_tokens
+                # Sum decode tokens (continuing decode reqs only)
+                decode_tok = sum(
+                    num_scheduled_tokens.get(r.request_id, 0)
+                    for r in scheduled_running_reqs
+                )
+                prefill_tok = total_tok - decode_tok
+                _bl_state["samples"].append((
+                    num_running, num_waiting, n_new, n_resumed,
+                    n_decode, total_tok, decode_tok, prefill_tok,
+                ))
+                _bl_state["calls"] += 1
+                if (_bl_state["calls"] >= _bl_state["max_calls"]
+                        and not _bl_state["dumped"]):
+                    _bl_state["dumped"] = True
+                    _ft_dump_batch_log()
+            except Exception:
+                pass  # never let instrumentation break scheduling
+
         return scheduler_output
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
