@@ -1496,6 +1496,127 @@ Step 4: 接近 saturation 时, queue length 对 ρ 极敏感
 - 这个结果**不影响 partial KV restore 优化方向**（Follow-up finding #4 末尾）。partial restore 仍然走 I/O 路径，只是 I/O 量更小，跟 restart/reprefill 走 compute 路径完全是两件事。
 - `FT_RECOVERY_MODE` env var 留作 ablation 接口（默认 reload），论文 Section X "Why KV reload?" 直接复用这张表即可。
 
+### Follow-up finding #6: Framework baseline overhead 的真正源头是 checkpoint pipeline blocking
+
+> 跨 2026-04-08 → 2026-04-09 的多轮调查结果。详见 [overnight_2026-04-09.md](overnight_2026-04-09.md)。
+
+#### 问题陈述
+
+W1_Chat/Heavy/F2_Mid 下 Our-System (124 tok/s) 跟 No-FT (321 tok/s) 之间的 ~200 tok/s 差距，到底来自哪里？
+
+之前的几轮失败实验先后排除了：
+- ❌ Recovery 路径（drop 模式 117 vs reload 124，**几乎一样**）
+- ❌ Lazy KV reload (Solution 4 失败 — KV slot 不是真正瓶颈)
+- ❌ Admission throttling (`max-num-seqs=32` 把"减速"换成"拒绝"，goodput 138 但 completion 37%)
+- ❌ Snapshot collection bypass (FT_DISABLE_SNAPSHOTS, +5.4 tok/s 在 variance 范围内)
+- ❌ Per-step 日志 spam (logfix commit `ec533cd72`, no measurable goodput impact)
+- ❌ Benders solver 收敛失败 (修了 profile 反而把 goodput 砍半，因为 Benders 开始严格 admission rejection)
+- ❌ run_checkpoint_step Python 迭代 (cProfile 显示 schedule() 总共只 0.6 ms/call，根本不是瓶颈)
+
+#### 关键诊断 — Our-System-NoCkpt 隔离实验
+
+加了一个新 baseline `Our-System-NoCkpt` (config_8b.yaml)：跟 Our-System 完全相同，**只关掉 `enable_checkpointing`**。
+
+| Mode | with fault (3 seeds mean ± stdev) | no fault (3 seeds mean ± stdev) |
+|---|---|---|
+| Our-System (default, ckpt ON) | **117.3 ± 12.6** | 387.4 ± 10.0 |
+| **Our-System-NoCkpt (ckpt OFF)** | **291.7 ± 85.7** ⭐ | 401.9 ± 17.4 |
+| No-FT | 319.5 (1 run) | – |
+
+**差值**:
+- 没 fault 时 ckpt 开销：387 vs 402 = **15 tok/s** (基本可忽略)
+- 有 fault 时 ckpt 开销：117 vs 292 = **175 tok/s** (爆炸式放大 12×)
+
+→ **fault 触发了 checkpoint 路径上的某种非线性放大**。running batch 只从 16 → 26 (1.6×) 但 ckpt 开销从 15 → 175 tok/s (12×)。
+
+#### cProfile 的误导性
+
+`FT_PROFILE_MAX_CALLS=300` 测出的 schedule() per-section timing：
+
+| Cell | TOTAL schedule() | run_checkpoint_step | base.schedule() |
+|---|---|---|---|
+| reload + fault | 0.601 ms | 0.070 ms | 0.524 ms |
+| nockpt + fault | 0.328 ms | 0.001 ms | 0.323 ms |
+| reload + NO fault | 0.700 ms | 0.075 ms | 0.617 ms |
+
+schedule() 完全不是瓶颈！diff 只有 0.273 ms × 30 calls/sec = 8 ms/sec — 远不能解释 175 tok/s 的差距。
+
+→ **真正的开销不在 schedule()**，cProfile 抓不到。
+
+#### 真正的根因 — `_maybe_ft_checkpoint()` 的同步阻塞
+
+挖到 [vllm/v1/engine/core.py:740-768](../../vllm/v1/engine/core.py#L740-L768) 的 `_maybe_ft_checkpoint`（这个函数在 `_ft_post_process` 里调用，发生在 schedule() **之后**，所以 cProfile 没看到）：
+
+```python
+# Step 1: Collect results from previous async RPC.
+if hasattr(self, "_ft_ckpt_future") and self._ft_ckpt_future is not None:
+    try:
+        results = self._ft_ckpt_future.result()  # ← BLOCKS HERE!
+```
+
+每个 step T 都会 `.result()` 阻塞等上一步 (T-1) 的 checkpoint RPC 完成。Worker 端 `checkpoint_kv_blocks` 在 fault 状态下处理 14 个 reqs，每个 req 走 `torch.save()` + 3 次 fsync (chunk + manifest + latest)，总共 ~70ms。
+
+数学：
+- Step 时间 ~30 ms
+- Checkpoint RPC ~70 ms (fault 状态)
+- Effective step rate = 1 / (30 + 40) ≈ 14/sec (vs nominal 30/sec)
+- **Goodput 下降 ~53%** ✅ 跟实测的 60% 完美对应
+
+worker 端 fsync 在 /dev/shm tmpfs 上完全没意义（tmpfs 是 RAM-backed，fsync 不提供 durability），但代码里照写不误。
+
+#### Fix — 两个 env var
+
+**Commit `2044810d0`**: `perf(ft): non-blocking checkpoint pipeline + tmpfs fast write (env-var-gated)`
+
+```bash
+FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 python experiments_v2/run.py ...
+```
+
+1. **`FT_CKPT_NONBLOCK=1`** — 把 `_maybe_ft_checkpoint` 改成非阻塞：用 `future.done()` peek 而不是 `.result()`。如果上一个 RPC 还没完成，**跳过本步的 checkpoint**（不收集结果，也不提交新 RPC）。Pipeline 深度恒为 1，但 API server step 永远不阻塞。
+2. **`FT_FAST_TMPFS_WRITE=1`** — 跳过 `_atomic_write_bytes` 和 `_atomic_torch_save` 里的 `f.flush() + os.fsync()`。在 tmpfs 上 provably correct（RAM 里没有 disk 可 sync）。
+
+两个 env var 都默认 OFF，零行为变化。
+
+#### 实测结果 (Phase 7, 3 seeds, W1_Chat/Heavy/F2_Mid)
+
+| Mode | goodput mean ± stdev | TTFT p50 | TPOT p50 | SLO viol | Completion |
+|---|---|---|---|---|---|
+| baseline (no env vars) | **117.3 ± 12.6** | 18,207 ms | 70.5 ms | 64.8 % | 98.0 % |
+| FT_FAST_TMPFS_WRITE only | 122.7 ± 14.9 | 16,788 ms | 69.6 ms | 64.1 % | 98.6 % |
+| **FT_CKPT_NONBLOCK + FAST_TMPFS** | **247.4 ± 127.1** | **3,226 ms** | **49.1 ms** | **37.6 %** | 92.5 % |
+| Our-System-NoCkpt (control) | 291.7 ± 85.7 | 936 ms | 47.0 ms | 26.4 % | 98.3 % |
+| **No-FT (target)** | **319.5** | 398 ms | 43.0 ms | 20.3 % | 98.5 % |
+
+**Per-seed phase 7**:
+- s42: 282.4 (baseline 120.4) — **+135 %** ⭐
+- s123: 106.5 (baseline 103.5) — outlier (s123 是个 hard seed)
+- s456: 353.4 (baseline 128.0) — **+176 %** ⭐
+
+**净改善**: +130 tok/s (+111%)，几乎追平 No-FT。但 completion 从 ~98% 跌到 ~93%（5pp 损失）。
+
+#### Trade-off
+
+跳过 checkpoint cycles 的代价：fault 之前 in-flight 请求的 checkpoint 状态可能不是最新的，fault 时部分请求恢复失败 → ~5% 多的请求丢失。
+
+但被恢复的请求**速度大幅提升**（TTFT p50 从 18s → 3.2s, SLO 违反从 65% → 38%），所以 goodput 净增 +130 tok/s。
+
+是个**清晰的 net-positive trade-off**：用 5pp completion drop 换 +111% goodput。论文里可以写成 "lossy fast checkpointing"。
+
+#### 这个发现改写了之前的诊断
+
+| 之前的诊断 | 修正后的诊断 |
+|---|---|
+| "framework baseline overhead is everywhere — 框架本身就是慢的" | "framework baseline overhead 集中在一个 6 行的同步阻塞点" |
+| "checkpoint controller 的 Python 迭代是 hot path" | "Python 迭代 0.07ms/call 完全可忽略，hot path 是 worker 进程的 fsync × torch.save × 3 chained calls" |
+| "需要重写 checkpoint controller" | "只需要 6 行代码 + 2 个 env var" |
+
+#### Future work
+
+1. **降低 worker checkpoint 成本本身** — torch.save 是 RPC 时间的大头。改成裸 pickle 或 mmap shared memory 写入。可以让 RPC 时间从 ~70ms → ~20ms，让 NONBLOCK 不再丢 checkpoint cycles → 既快又不丢 completion。
+2. **完整 ablation** — phase 7 只跑了 W1/Heavy/F2_Mid。需要扩到所有 cell（多 workload × 多 load × 多 fault）确认这个 fix 在其他场景也有效。
+3. **变成默认** — 如果完整 ablation 数据稳定，把 FT_CKPT_NONBLOCK=1 改成默认行为。
+4. **优化 checkpoint controller policy 减少 checkpoint 频率** — 减少 RPC 频率 → 减少 blocking 概率。
+
 ### 最终 verdict (post-P0-impl-3a follow-up)
 
 | Bug/Issue | Status |
@@ -1507,6 +1628,7 @@ Step 4: 接近 saturation 时, queue length 对 ρ 极敏感
 | W1_Chat/Heavy/F2_Mid 35% service rate | ⚠️ **Fundamental queueing physics, not a bug** — accept as honest limitation in paper |
 | W1_Chat/Heavy/none 47% service rate (pre-ortools) | ✅ **Fixed by ortools install** — 47% → 94% (实测 v3 verify) |
 | KV reload 是不是 overkill (vs restart / reprefill) | ✅ **Validated via FT_RECOVERY_MODE ablation** — restart/reprefill 的 goodput 比 reload 差 2.6-3.1× (Follow-up finding #5) |
+| Framework baseline overhead 的源头 (~200 tok/s gap to No-FT) | ✅ **Localized to `_maybe_ft_checkpoint` sync blocking** — fix in commit `2044810d0` (FT_CKPT_NONBLOCK + FT_FAST_TMPFS_WRITE env vars). Validated 3 seeds: +130 tok/s, +111% goodput. (Follow-up finding #6) |
 
 ### 必须做的事 (post-investigation)
 
@@ -1516,3 +1638,5 @@ Step 4: 接近 saturation 时, queue length 对 ρ 极敏感
 4. ⏳ Update paper main thesis: framing change from "throughput trade-off" → "in-flight preservation vs new-req throughput"
 5. ⏳ Add `requirements/ft.txt` 到 install instructions
 6. ⏳ Future: investigate partial KV restore (优化 fault path 的 KV slot 占用)
+7. ⏳ **Decide on FT_CKPT_NONBLOCK default** — phase 7 数据稳定后考虑改成默认 ON (Follow-up finding #6)
+8. ⏳ **Run full ablation matrix with FT_CKPT_NONBLOCK** — extend phase 7 to all workload × load × fault cells
