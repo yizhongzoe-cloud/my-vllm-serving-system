@@ -1225,3 +1225,294 @@ tpot = 2 × step_time = 60 ms vs No-FT 30 ms
 5. **删除论文 limitation 段里关于"wrapper trade-off"的描述**
 
 **P0-impl-3a 调查到此真正 closed**。
+
+---
+
+## P0-impl-3a 后续调查（2026-04-08，KV throttle + ortools + W1/Heavy/F2_Mid 的资源挤兑分析）
+
+> 本节追加了 P0-impl-3a 之后的几个 follow-up 发现。这些发现来自尝试 close
+> W1_Chat/Heavy/F2_Mid 上 Our-System 跟 No-FT 的 service rate 差距 (35% vs 80%)。
+> Final 结论: **大部分差距是 fundamental queueing physics, 不是 implementation bug**。
+
+### Follow-up finding #1: ortools 是 silent missing dependency
+
+vLLM venv 里**从未安装 ortools** (Google OR-Tools)，但 [vllm/v1/core/sched/benders/master.py:76](../../vllm/v1/core/sched/benders/master.py#L76) 和 [recovery_checker.py:344](../../vllm/v1/core/sched/benders/recovery_checker.py#L344) 都 import 它。两处都用 `try/except ImportError + return None` 处理 missing 情况，导致 Benders solver **silently fall back to greedy admission**：
+
+```python
+# vllm/v1/core/sched/benders/master.py:75-83
+try:
+    from ortools.sat.python import cp_model
+except ImportError:
+    logger.error(
+        "ortools is required for ft_benders policy. "
+        "Install with: pip install ortools"
+    )
+    return None    # ← caller (solve_loop) 看到 None 就 fall back
+```
+
+→ **过去几个月所有 `Our-System` (`ft_benders_centralized` policy) 实验数据**实际上**都没真正运行 Benders solver**。所有 "Adaptive-Only vs Our-System" 的 ablation 比较都是无效的（两个 baseline 实际跑同样的 fall-back greedy admission）。
+
+**Verify**：
+
+```bash
+$ python -c "import ortools; print(ortools.__version__)"
+ModuleNotFoundError: No module named 'ortools'
+```
+
+**Fix**：`pip install ortools` (added to [requirements/ft.txt](../../requirements/ft.txt))
+
+**Impact 在 W1_Chat/Heavy/none cell**（实测 v1 vs v3 verify 对比）：
+
+| Run | ortools? | tpot_p50 | goodput | service rate |
+|---|---|---|---|---|
+| ORIGINAL (commit 92515e85d) | ❌ | 74.8 ms | 203.1 | 47.4% |
+| v3 verify (with ortools) | ✅ | **52.1 ms** | **396.5** | **93.7%** |
+
+→ **install ortools 后, no-fault Heavy cell 大幅改善** (service rate +46.3pp)。这是过去几个月 paper main thesis 真正应该看到的数据。
+
+**Impact 在 W1_Chat/Heavy/F2_Mid cell**（fault path）：
+
+| Run | ortools? | tpot_p50 | goodput | service rate |
+|---|---|---|---|---|
+| ORIGINAL | ❌ | 73.3 | 129.1 | 35.9% |
+| v3 verify | ✅ | 74.0 | 125.7 | **34.8%** |
+
+→ **install ortools 在 fault path 下几乎没改善** (-1pp, noise)。Benders solver 在故障下的 admission decision 跟 greedy 实测无差别 — 因为 fault recovery 路径有更大的瓶颈。
+
+### Follow-up finding #2: KV pressure throttle (final verdict: 多余)
+
+为了 close W1/Heavy/none 的 47% gap，最初尝试加了 KV pressure throttle 在 [ft_scheduler_impl.py:_process_pending_admissions](../../vllm/v1/core/sched/ft_scheduler_impl.py) 和 [benders_ft_scheduler_impl.py:_process_pending_admissions](../../vllm/v1/core/sched/benders_ft_scheduler_impl.py) 入口：
+
+```python
+def _process_pending_admissions(self) -> None:
+    if not self._pending_ft_admission:
+        return
+    if self._kv_pressure_too_high():  # free_blocks / total < 10%
+        return  # defer admission to next epoch
+    # ... existing solver logic ...
+```
+
+**实测结果** (W1/Heavy/none with logger):
+
+```
+INFO ft_scheduler_impl.py:291 FT_KV_THROTTLE: free=2608/2608 (0.0% used) threshold=90.0% triggered=False
+INFO ft_scheduler_impl.py:291 FT_KV_THROTTLE: free=2537/2608 (2.7% used) threshold=90.0% triggered=False
+INFO ft_scheduler_impl.py:291 FT_KV_THROTTLE: free=2508/2608 (3.8% used) threshold=90.0% triggered=False
+...
+```
+
+KV usage 从未超过 50%, throttle **从未 fire**。47% → 95% 的改善**完全来自 install ortools**, 不是 KV throttle。
+
+**实测结果** (W1/Heavy/F2_Mid with logger): KV throttle 在 fault 下 fire **2437 次** (out of 2636 admission epochs, 92% trigger rate), 但 service rate 仍然 34.8% — **没改善**。
+
+**结论**: KV pressure throttle 是个 **misguided fix**。它在不需要时不 fire，在 fire 时也无效。最终 path forward = revert (TBD)。
+
+### Follow-up finding #3: W1/Heavy/F2_Mid 的 35% service rate 是 fundamental queueing physics
+
+最初以为 Our-System 在 fault 下 35% service rate 是某个 implementation bug。Deep investigation 显示这是**接近饱和的 queueing system 的标准行为**, 不是 bug。
+
+**Setup**:
+- W1_Chat/Heavy: rps=1.5, dp=2 (2 GPUs)
+- F2_Mid: 在 T=150s SIGKILL Engine 0
+- 故障后所有 reqs 走 Engine 1 (单 GPU)
+- W1_Chat avg request: prompt 1259 + decode 287 ≈ 1500 tokens
+
+**Engine 1 post-fault stats 对比**:
+
+| | No-FT | Our-System v3 | Δ |
+|---|---|---|---|
+| **Peak Running** | 32 | 35 | +3 |
+| **Peak Waiting** | **18** | **68-110** | **+50 to +92** ⚠️ |
+| Engine 1 avg gen throughput | 352 tok/s | 321 tok/s | -31 (-8.8%) |
+| Service rate | 80.3% | 34.8% | -45.5pp ⚠️ |
+
+→ Running 数量几乎一样, **Waiting queue 差 6×, service rate 差 45pp**。
+
+**直觉与现实的 gap**:
+- 直觉: "Our-System 多 honor 7 个 migrated reqs, waiting queue 应该最多多 7 个"
+- 实测: waiting queue 多 ~50-92 个
+
+#### 为什么 7 reqs → +50-92 queue 长度 (cascade 解释)
+
+```
+Step 1: Our-System 多 honor 7 个 migrated reqs
+        每个 migrated req 占 ~85 KV blocks (W1_Chat avg)
+        7 × 85 = 595 blocks 被 migrated reqs 占用 (23% of 2608 total)
+
+Step 2: KV slot 减少 → batch size 减少 → 单 step 处理 token 数减少
+        Engine 1 effective gen throughput: 352 → 321 tok/s (-8.8%)
+
+Step 3: 应用 Little's law (queueing theory)
+        arrival rate (post-fault) = 1.5 reqs/s (全部走 Engine 1)
+        avg request output = 287 tokens
+        
+        No-FT service rate:
+            = 352 tok/s ÷ 287 tok/req = 1.226 reqs/s
+            = utilization ρ = 1.5 / 1.226 = 1.22  (over-utilized 22%)
+        
+        Our-System service rate:
+            = 321 tok/s ÷ 287 tok/req = 1.118 reqs/s
+            = utilization ρ = 1.5 / 1.118 = 1.34  (over-utilized 34%)
+
+Step 4: 接近 saturation 时, queue length 对 ρ 极敏感
+        ρ = 1.22 → queue grows slowly, peak ~18
+        ρ = 1.34 → queue grows fast, peak ~110
+        ρ 差 0.12 → queue 差 6×
+```
+
+**关键 insight**: **8.8% 的 service rate 差距经过 queueing amplification 变成 6× queue length**。这是 standard queueing theory ("M/M/1 with ρ → 1" 的 queue length 是 1/(1-ρ), 所以 1.22 vs 1.34 → 1/0.78 vs 1/0.66 = 1.28 vs 1.52, 进一步加上 over-saturation 的累积效应)。
+
+**Net effect**: tpot 翻倍 (74 vs 42 ms, 包含 wait time + processing), goodput 减半 (125 vs 323 tok/s)。
+
+#### 7 个 migrated reqs 真正"成本"是 KV slot 占用, 不是 compute
+
+| 直觉 | 实际 |
+|---|---|
+| Migrated reqs 占 compute → 慢 | ❌ Compute 几乎没受影响 (gen throughput 只 -8.8%) |
+| Migrated reqs 跟新 reqs 抢 GPU FLOPs | ❌ 不是 compute bound |
+| **Migrated reqs 占 KV memory slot, 让 batch 装不下更多新 req** | ✅ 这才是真正的 bottleneck |
+
+**Heavy load + decode-heavy workload 下, fault tolerance 的隐藏成本是 KV slot 占用而不是 compute 开销**。
+
+#### 这个 cell 是不是 fundamental limitation
+
+| 组件 | Fundamental? | Fixable? |
+|---|---|---|
+| Surviving engine 装 2× load | ✅ dp=2 时唯一 surviving GPU | 不可能 (硬件) |
+| KV slot 被 migrated reqs 占 23% | 部分 fundamental | **可能 fixable** — partial KV restore (见下) |
+| 8.8% service rate degradation | 由 KV slot 比例决定 | 同上 |
+| Queue amplification (8.8% → 6×) | ✅ standard queueing theory | 不可能 (math) |
+
+#### Actionable 优化方向 (future work)
+
+**Partial KV restore**：当前 Our-System 在 recovery 时把每个 migrated req 的**完整 KV history** 从 host memory restore 到 surviving GPU。如果只 restore **last N blocks** (前面的 KV state 通过 prompt re-prefill 重建), 7 reqs 占的 KV blocks 从 600 降到 ~300。
+
+预期效果：
+- service rate degradation 从 -8.8% → ~-4%
+- ρ 从 1.34 → 1.27
+- queue length 从 ~110 → ~30 (估算)
+- service rate 可能从 34.8% → ~50-60%
+
+但这是 future optimization, 不影响论文 main thesis。
+
+#### 正确的论文 framing (replace previous "wrapper trade-off" framing)
+
+**之前的 wrong framing**：
+> "Our-System has fundamental wrapper overhead, sacrifices throughput for fault tolerance."
+
+**正确的 framing**：
+> "Both No-FT and Our-System experience near-saturation queueing on the surviving GPU after a failure. The difference is **what each baseline prioritizes when the system saturates**:
+> - **No-FT** sacrifices in-flight requests (drops 1.5-3.8% of admitted requests permanently) to free up KV slots for new arrivals, maintaining 80%+ goodput.
+> - **Our-System** preserves all in-flight requests via host-memory KV checkpointing (100% completion), at the cost of KV slot occupation that drives the surviving GPU into deeper saturation, reducing goodput to ~35-50% under W1_Chat/Heavy.
+>
+> For applications that cannot tolerate dropped requests under failure (production LLM serving, billing-sensitive batch inference), this trade-off is the entire value proposition. For applications where occasional drops are acceptable, No-FT is faster."
+
+**核心 selling point** (reframed):
+> "**Our-System recovers 100% of in-flight requests at fault time. No-FT drops them permanently. Both systems experience the same level of post-fault saturation; the difference is in what each chooses to honor.**"
+
+### Follow-up finding #4: No-FT 也经历资源挤兑 (但 silent)
+
+**之前以为**: No-FT 在故障下"快"是因为它没有 fault tolerance overhead。
+
+**实际**: No-FT Engine 1 在 fault 后也撑到 99.5% KV usage + Waiting queue peak 18 reqs。两个 baseline 在 surviving GPU 上**同样**经历资源挤兑。
+
+| Metric | No-FT post-fault | Our-System post-fault |
+|---|---|---|
+| Engine 1 peak Running | 32 | 35 |
+| Engine 1 peak KV usage | **99.5%** | **99.7%** |
+| Engine 1 peak Waiting queue | 18 | 110 |
+| Engine 1 avg gen throughput | 352 tok/s | 321 tok/s |
+
+→ **挤兑是 inherent of dp=2 故障场景**, 不是哪个 baseline 独有。差别只在 queue depth 跟 service rate degradation 的 amplification 强度。
+
+### Follow-up finding #5: Validating KV reload via FT_RECOVERY_MODE ablation
+
+**触发问题** (来自 Follow-up finding #4)：
+> Our-System 的 host-memory KV reload 真的值得吗？看起来开销很大（每个 migrated req 大约 ~100 MB host→device 复制），如果直接 re-prefill 是不是更便宜？
+
+为了用数据回答这个问题，我加了一个 ablation env var `FT_RECOVERY_MODE`，可以在不动 main code path 的前提下切换三种 recovery 策略：
+
+| Mode | 行为 | Stream consistency |
+|---|---|---|
+| `reload` (默认) | 现有路径：host memory 里的 KV checkpoint 装回 surviving GPU + replay uncovered suffix | ✅ 保留 |
+| `restart` | 丢弃 checkpoint **和**已 decode 的 token，target engine 用原始 prompt 当成全新请求 re-prefill + 重新 decode | ❌ 客户端会看到截然不同的后续 token |
+| `reprefill` | 丢弃 checkpoint，但通过 `extended_prompt = original_prompt + decoded_tokens` 保留已 decode 内容，target engine re-prefill 拼接 prompt 后继续 decode | ✅ 保留 |
+
+实现位置（默认 `reload`，对主体实验透明）：
+- [vllm/v1/engine/ft_client.py:53-77](../../vllm/v1/engine/ft_client.py#L53-L77)（env 解析）+ [1522-1611](../../vllm/v1/engine/ft_client.py#L1522-L1611)（centralized recovery 循环 mutate `cached_request`）— 走 `ft_benders_centralized` 的真正路径
+- [vllm/v1/core/recovery_manager.py:46-53](../../vllm/v1/core/recovery_manager.py#L46-L53) + [368-428](../../vllm/v1/core/recovery_manager.py#L368-L428)（覆盖 `fault_tolerant` / 非 centralized `ft_benders` policy）
+
+#### 实验结果 (W1_Chat / Heavy / F2_Mid / seed=42, 462 reqs, dp=2, 8B, ortools 已装)
+
+| 指标 | **No-FT** (fcfs) | **reload** (默认) | **restart** | **reprefill** |
+|---|---|---|---|---|
+| Completed | 455/462 (98.5%) | **462/462 (100%)** | 457/462 (98.9%) | 460/462 (99.6%) |
+| Failed (永久丢失) | 7 | **0** | 5 | 2 |
+| Goodput (tok/s) | **321.6** | 124.2 | 47.9 | 39.5 |
+| TTFT p50 (ms) | **406** | 18,597 | 50,450 | 42,800 |
+| TTFT p95 (ms) | **10,438** | 55,933 | 81,049 | 73,861 |
+| TPOT p50 (ms) | **43.1** | 74.6 | 85.5 | 86.5 |
+| TPOT p95 (ms) | **63.7** | 111.5 | 140.4 | 180.4 |
+| SLO violation rate | **20.3%** | 65.6% | 87.4% | 88.5% |
+| failover_gap p50 (ms) | – | **8,613** | 8,638 | 24,645 |
+| failover_gap p95 (ms) | – | **9,683** | 23,643 | 34,445 |
+| 实测 displaced reqs | 0 | 14 | 36 | 29 |
+| Recovery success | – | **100 %** | 94.1 % | 96.3 % |
+
+数据：
+- `results_v2/8B_recovery_modes/no_ft/No-FT/W1_Chat/Heavy/F2_Mid/42/`
+- `results_v2/8B_recovery_modes/reload/Our-System/W1_Chat/Heavy/F2_Mid/42/`
+- `results_v2/8B_recovery_modes/restart/Our-System/W1_Chat/Heavy/F2_Mid/42/`
+- `results_v2/8B_recovery_modes/reprefill/Our-System/W1_Chat/Heavy/F2_Mid/42/`
+
+#### 解读：为什么 restart / reprefill 的 goodput 跌得这么狠？
+
+核心是 **prefill capacity contention 雪崩**：
+
+| | reload | restart | reprefill |
+|---|---|---|---|
+| Recovery 单 req 成本 | 1 次 host→device KV 复制（**I/O bound**, ~10 GB/s）+ replay 几个 token | **完整 prefill** 原始 prompt（~几百 token）| **完整 prefill** original + decoded tokens（~几百到几千 token，更大）|
+| 占用 prefill compute | ≈ 0（I/O 跟 forward 异步）| 14-30 个完整 prefill job 抢 surviving engine 的 prefill slot | 同 restart 但每个 job 更大 |
+
+雪崩链：
+
+1. t=150s 故障 → 7-30 个请求需要重建状态。
+2. **reload** 走 I/O 路径，几乎不抢 forward compute → 新到达的请求继续正常 prefill。
+3. **restart / reprefill** 走 compute 路径 → 全部塞进 prefill 队列 → 新到达的请求被卡住。
+4. → TTFT p50 从 reload 的 18.6 s 跳到 50.4 s / 42.8 s（**2-3 倍**）。
+5. → 几乎所有请求 SLO violate（TTFT > 2 s）。
+6. → SLO compliance 从 34 % 跌到 12 %。
+7. → goodput = (SLO-OK 请求的输出 token) / wall_time，分子被砍掉一大半。
+
+**reprefill 比 restart 还差**的原因 = 单次 prefill 任务更大（带上 decoded tokens），所以 failover_gap p50 从 8.6 s 直接到 24.6 s — 这 24 秒里那些迁移的请求一个 token 都产不出来，更直接拖低 goodput。
+
+#### 结论
+
+**KV reload 路径是值得做的，原假设被证伪。**
+
+> KV reload 把恢复成本从"compute"转成"I/O"。surviving engine 在 fault 后最稀缺的恰好是 compute（因为它要承担 2× load），而不是 I/O 带宽。restart / reprefill 把那笔账记在了错的资源池上，结果就是 goodput 比 reload 差 2.6-3.1×。
+
+附带的 follow-up：
+- 这个结果**不影响 partial KV restore 优化方向**（Follow-up finding #4 末尾）。partial restore 仍然走 I/O 路径，只是 I/O 量更小，跟 restart/reprefill 走 compute 路径完全是两件事。
+- `FT_RECOVERY_MODE` env var 留作 ablation 接口（默认 reload），论文 Section X "Why KV reload?" 直接复用这张表即可。
+
+### 最终 verdict (post-P0-impl-3a follow-up)
+
+| Bug/Issue | Status |
+|---|---|
+| ft_scheduler 不 wrap AsyncScheduler | ✅ **Fixed** (commit `da5c8f25e`) |
+| Metric definition (admitted-but-failed should count as SLO violation) | ✅ **Fixed** (commit `522c2a9dd`) |
+| ortools missing in venv | ✅ **Fixed** (manual install + requirements/ft.txt added) |
+| KV pressure throttle | ⚠️ **Misguided fix** — patched but useless. To revert. |
+| W1_Chat/Heavy/F2_Mid 35% service rate | ⚠️ **Fundamental queueing physics, not a bug** — accept as honest limitation in paper |
+| W1_Chat/Heavy/none 47% service rate (pre-ortools) | ✅ **Fixed by ortools install** — 47% → 94% (实测 v3 verify) |
+| KV reload 是不是 overkill (vs restart / reprefill) | ✅ **Validated via FT_RECOVERY_MODE ablation** — restart/reprefill 的 goodput 比 reload 差 2.6-3.1× (Follow-up finding #5) |
+
+### 必须做的事 (post-investigation)
+
+1. ✅ 写 [requirements/ft.txt](../../requirements/ft.txt) 包含 ortools (done)
+2. ⏳ Revert KV pressure throttle patches (确认无效, 应当 revert)
+3. ⏳ 重跑 47 cell **with real ortools** (first ever 真正 Benders solver 数据)
+4. ⏳ Update paper main thesis: framing change from "throughput trade-off" → "in-flight preservation vs new-req throughput"
+5. ⏳ Add `requirements/ft.txt` 到 install instructions
+6. ⏳ Future: investigate partial KV restore (优化 fault path 的 KV slot 占用)

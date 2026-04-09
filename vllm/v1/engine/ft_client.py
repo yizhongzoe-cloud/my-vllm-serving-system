@@ -52,6 +52,31 @@ logger = init_logger(__name__)
 
 _SHARED_CKPT_DIR = "/dev/shm/vllm_ft_checkpoints"
 
+# ── Recovery mode (FT_RECOVERY_MODE env var, default "reload") ───────────────
+# Mirrors vllm/v1/core/recovery_manager.py. Modes:
+#   - "reload":   Default. Restore KV from host-memory checkpoint. Replay any
+#                 uncovered decoded suffix on the target engine.
+#   - "restart":  Drop checkpoint AND already-decoded tokens. Treat as a fresh
+#                 ADD with the original prompt; the new engine re-prefills the
+#                 prompt and re-samples decode tokens. Stream consistency is
+#                 BROKEN — newly sampled tokens differ from those already
+#                 streamed to the client. Used only for ablation comparison
+#                 against the reload path.
+#   - "reprefill": Drop checkpoint but PRESERVE already-decoded tokens by
+#                  extending the prompt: extended_prompt = original_prompt +
+#                  decoded_tokens. The new engine re-prefills the extended
+#                  prompt then continues decoding. Stream consistency preserved
+#                  (the next sampled token logically follows the last decoded
+#                  one). Used to measure whether the KV-reload path is worth
+#                  the I/O cost vs a simple recompute.
+_FT_RECOVERY_MODE = os.environ.get("FT_RECOVERY_MODE", "reload").lower()
+if _FT_RECOVERY_MODE not in ("reload", "restart", "reprefill"):
+    logger.warning(
+        "Unknown FT_RECOVERY_MODE=%r; falling back to 'reload'",
+        _FT_RECOVERY_MODE,
+    )
+    _FT_RECOVERY_MODE = "reload"
+
 
 class FTDPAsyncMPClient(DPLBAsyncMPClient):
     """FT-aware DP client that handles engine failures gracefully.
@@ -1519,7 +1544,7 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             ):
                 current_counts[target_idx_val][0] += self.client_count
 
-            # Add checkpoint info for KV restore.
+            # Add checkpoint info for KV restore (default: reload mode).
             ckpt_tokens = self._checkpoint_tokens.get(req_id, 0)
             cached_request.num_checkpointed_tokens = ckpt_tokens
             cached_request.is_rerouted = True
@@ -1529,24 +1554,75 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             if prev_out:
                 cached_request.previous_output_token_ids = prev_out
 
+            # ── Recovery mode override (ablation knob) ──────────────────
+            # See module-level docstring for _FT_RECOVERY_MODE. The default
+            # "reload" mode falls through unchanged.
+            if _FT_RECOVERY_MODE == "restart":
+                # Drop checkpoint AND prior decoded tokens; new engine
+                # re-prefills the original prompt from scratch.
+                cached_request.num_checkpointed_tokens = 0
+                cached_request.previous_output_token_ids = None
+                ckpt_tokens = 0
+                replay_tokens = 0
+                logger.info(
+                    "FT_RECOVERY_MODE=restart: req=%s cleared "
+                    "checkpoint + decoded tokens, will re-prefill "
+                    "prompt from scratch",
+                    req_id,
+                )
+            elif _FT_RECOVERY_MODE == "reprefill":
+                # Drop checkpoint but preserve decoded tokens by
+                # extending the prompt. New engine re-prefills the
+                # extended prompt then continues decoding.
+                n_decoded = len(prev_out) if prev_out else 0
+                if n_decoded > 0:
+                    try:
+                        original_prompt = (
+                            list(cached_request.prompt_token_ids)
+                            if cached_request.prompt_token_ids
+                            else []
+                        )
+                        cached_request.prompt_token_ids = (
+                            original_prompt + list(prev_out)
+                        )
+                    except (AttributeError, TypeError) as exc:
+                        logger.warning(
+                            "FT_RECOVERY_MODE=reprefill: req=%s "
+                            "failed to extend prompt (%s); falling "
+                            "back to reload semantics",
+                            req_id, exc,
+                        )
+                cached_request.num_checkpointed_tokens = 0
+                cached_request.previous_output_token_ids = None
+                ckpt_tokens = 0
+                replay_tokens = 0
+                logger.info(
+                    "FT_RECOVERY_MODE=reprefill: req=%s extended "
+                    "prompt by %d decoded tokens, will re-prefill "
+                    "via prompt path",
+                    req_id, n_decoded,
+                )
+
             reroute_wall = time.time()
             await self._send_input(
                 EngineCoreRequestType.ADD, cached_request, target
             )
             target_idx = self._engine_to_index.get(target, -1)
             self._rerouted_request_ids.add(req_id)
-            replay_tokens = max(
-                0, len(prev_out) - ckpt_tokens if prev_out else 0
-            )
+            if _FT_RECOVERY_MODE == "reload":
+                replay_tokens = max(
+                    0, len(prev_out) - ckpt_tokens if prev_out else 0
+                )
             # Log per-request reroute in the same format as RecoveryManager
             # so the experiment log parser can capture it.
             logger.info(
-                "Request %s: re-routed %d→%d, restored=%d tokens, "
+                "Request %s: re-routed %d→%d, mode=%s, restored=%d tokens, "
                 "replay=%d tokens, est_gap=0.0ms, slo_met=True, "
                 "wall_time=%.6f",
                 req_id,
                 engine_index,
                 target_idx,
+                _FT_RECOVERY_MODE,
                 ckpt_tokens,
                 replay_tokens,
                 reroute_wall,

@@ -13,8 +13,21 @@ Orchestrates the failover process when a GPU replica fails:
 
 The key constraint is the failover-gap SLO:
     T^{det} + S^{ckpt}/B^{ld} + U_j/C^{rep} + 1/C^{dec} ≤ D_j^{gap}
+
+Recovery modes (FT_RECOVERY_MODE env var, default "reload"):
+  - "reload":   Current behavior — restore KV from host memory checkpoint.
+  - "restart":  Drop checkpoint, drop already-decoded tokens, treat as a
+                fresh request (re-prefill prompt + re-decode from scratch).
+                Stream consistency: BROKEN (newly sampled tokens differ
+                from already-emitted ones).
+  - "reprefill": Drop checkpoint but keep already-decoded tokens. Submit
+                 as a fresh request with extended_prompt = original_prompt
+                 + already_decoded. vLLM re-prefills the extended prompt
+                 then continues decoding from the same logical position.
+                 Stream consistency: PRESERVED.
 """
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -29,6 +42,15 @@ from vllm.v1.core.request_pool import RequestPool
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# Recovery mode controlled by env var. See module docstring.
+_FT_RECOVERY_MODE = os.environ.get("FT_RECOVERY_MODE", "reload").lower()
+if _FT_RECOVERY_MODE not in ("reload", "restart", "reprefill"):
+    logger.warning(
+        "Unknown FT_RECOVERY_MODE=%r; falling back to 'reload'",
+        _FT_RECOVERY_MODE,
+    )
+    _FT_RECOVERY_MODE = "reload"
 
 
 @dataclass
@@ -343,7 +365,68 @@ class RecoveryManager:
                 success=False,
             )
 
-        # Step d: Re-assign request to target replica.
+        # Step d: Apply recovery mode (reload / restart / reprefill).
+        # See module docstring for mode descriptions.
+        if _FT_RECOVERY_MODE == "restart":
+            # Method 1: Drop both checkpoint and already-decoded tokens.
+            # vLLM treats this as a brand-new request and re-prefills the
+            # original prompt from scratch. WARNING: stream consistency is
+            # broken — newly sampled tokens will differ from those already
+            # emitted to the client.
+            request.num_checkpointed_tokens = 0
+            request.num_computed_tokens = 0
+            request.last_checkpoint_size_bytes = 0
+            try:
+                request.output_token_ids.clear()
+            except AttributeError:
+                pass  # immutable container — best effort
+            tokens_restored = 0
+            tokens_to_replay = 0  # full re-prefill happens via normal path
+            logger.info(
+                "FT_RECOVERY_MODE=restart: req=%s cleared checkpoint + "
+                "decoded tokens, will re-prefill prompt from scratch",
+                request.request_id,
+            )
+        elif _FT_RECOVERY_MODE == "reprefill":
+            # Method 2: Drop checkpoint, but keep already-decoded tokens
+            # by extending the prompt. vLLM re-prefills the extended prompt
+            # (= original_prompt + decoded_tokens) and continues decoding
+            # from the same logical position. Stream consistency preserved.
+            decoded_token_ids = list(request.output_token_ids)
+            n_decoded = len(decoded_token_ids)
+            if n_decoded > 0:
+                # Extend the prompt with already-emitted decoded tokens.
+                # Try multiple field names since vllm Request internals vary.
+                try:
+                    new_prompt = list(request.prompt_token_ids) + decoded_token_ids
+                    request.prompt_token_ids = new_prompt
+                    if hasattr(request, "num_prompt_tokens"):
+                        request.num_prompt_tokens = len(new_prompt)
+                except (AttributeError, TypeError) as exc:
+                    logger.warning(
+                        "FT_RECOVERY_MODE=reprefill: req=%s failed to extend "
+                        "prompt (%s); falling back to restart",
+                        request.request_id, exc,
+                    )
+                # Clear decoded state — these tokens are now in the prompt.
+                try:
+                    request.output_token_ids.clear()
+                except AttributeError:
+                    pass
+            request.num_checkpointed_tokens = 0
+            request.num_computed_tokens = 0
+            request.last_checkpoint_size_bytes = 0
+            tokens_restored = 0
+            tokens_to_replay = 0
+            logger.info(
+                "FT_RECOVERY_MODE=reprefill: req=%s extended prompt by "
+                "%d decoded tokens, will re-prefill via prompt path",
+                request.request_id, n_decoded,
+            )
+        # Else: "reload" mode — keep request.num_checkpointed_tokens as set
+        # above; EngineCore will trigger restore_kv_blocks via
+        # _process_ft_pending_restores().
+
         self.replica_manager.release_request(request)
         self.replica_manager.assign_request(request, target_replica_id)
         # Use readmit_request (not admit_request) to properly transition
@@ -353,12 +436,13 @@ class RecoveryManager:
         )
 
         logger.info(
-            "Request %s: re-routed %d→%d, "
+            "Request %s: re-routed %d→%d, mode=%s "
             "restored=%d tokens, replay=%d tokens, "
             "est_gap=%.1fms, slo_met=%s",
             request.request_id,
             failed_replica_id,
             target_replica_id,
+            _FT_RECOVERY_MODE,
             tokens_restored,
             tokens_to_replay,
             estimated_gap * 1000,
