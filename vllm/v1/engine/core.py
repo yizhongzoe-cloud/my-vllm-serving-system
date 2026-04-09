@@ -845,8 +845,21 @@ class EngineCore:
 
         Only active when policy is ft_benders_centralized and the
         scheduler has an ft_scheduler with a request pool.
+
+        FT_DISABLE_SNAPSHOTS env-var bypass: when set to "1", skip
+        snapshot construction entirely. Snapshots are only consumed by
+        the centralized Benders solver, which on W1_Chat/Heavy is in
+        greedy fallback ~98% of the time because the cost model is
+        configured for A6000 dp=1 (see e1a_quick_diagnosis.md follow-up
+        #6 — Benders profile mismatch). When that holds, the snapshots
+        are wasted CPU + msgpack + ZMQ traffic. Default is OFF (no
+        behavior change). Used to measure how much per-step overhead
+        the snapshot path actually consumes.
         """
         if not hasattr(self.scheduler, "ft_scheduler"):
+            return None
+
+        if os.environ.get("FT_DISABLE_SNAPSHOTS") == "1":
             return None
 
         ft = self.scheduler.ft_scheduler
@@ -869,8 +882,14 @@ class EngineCore:
         return snapshots
 
     def _build_replica_snapshot(self) -> ReplicaSnapshot | None:
-        """Build ReplicaSnapshot for the centralized solver."""
+        """Build ReplicaSnapshot for the centralized solver.
+
+        Same FT_DISABLE_SNAPSHOTS gate as _build_active_snapshots.
+        """
         if not hasattr(self.scheduler, "ft_scheduler"):
+            return None
+
+        if os.environ.get("FT_DISABLE_SNAPSHOTS") == "1":
             return None
 
         waiting, running = self.scheduler.get_request_counts()
