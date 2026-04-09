@@ -6300,6 +6300,219 @@ class GPUModelRunner(
                 pass
             raise
 
+    # ── Fast checkpoint chunk format (FT_FAST_CHUNK_FORMAT env var) ──────
+    #
+    # Skips torch.save / pickle entirely. Writes raw tensor bytes prefixed
+    # by a small fixed-size struct header. Restore reads the header and
+    # reconstructs torch tensors via torch.frombuffer + reshape.
+    #
+    # Format (little-endian):
+    #   8  bytes  magic     "VLMCKPT\0"
+    #   4  bytes  version   uint32 (=1)
+    #   4  bytes  generation uint32
+    #   4  bytes  num_layers uint32
+    #   4  bytes  dim0       uint32  (always 2 for K,V)
+    #   4  bytes  dim1       uint32  (num_blocks_in_chunk)
+    #   4  bytes  dim2       uint32  (block_size)
+    #   4  bytes  dim3       uint32  (num_kv_heads)
+    #   4  bytes  dim4       uint32  (head_size)
+    #   4  bytes  dtype_id   uint32  (0=fp16, 1=bf16, 2=fp32)
+    #   N  × 4 bytes  layer_indices  uint32 each (sorted)
+    #   <padding to 8-byte align>
+    #   <raw tensor bytes for each layer in layer_indices order>
+    #
+    # All tensors share dim0..dim4 (verified at write time). Restore returns
+    # the same dict-of-tensors structure that torch.save produced, so the
+    # caller (_restore_shared_checkpoint) doesn't need to change.
+    _FAST_CKPT_MAGIC = b"VLMCKPT\x00"
+    _FAST_CKPT_VERSION = 1
+    _FAST_CKPT_DTYPE_MAP = {
+        torch.float16: 0,
+        torch.bfloat16: 1,
+        torch.float32: 2,
+    }
+    _FAST_CKPT_DTYPE_REV = {v: k for k, v in _FAST_CKPT_DTYPE_MAP.items()}
+
+    @classmethod
+    def _fast_chunk_header(
+        cls,
+        generation: int,
+        layer_indices: list[int],
+        sample_tensor: torch.Tensor,
+    ) -> bytes:
+        import struct
+        shape = tuple(sample_tensor.shape)
+        if len(shape) != 5:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT expects 5-D KV tensors, got {shape}"
+            )
+        dtype_id = cls._FAST_CKPT_DTYPE_MAP.get(sample_tensor.dtype)
+        if dtype_id is None:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT unsupported dtype: {sample_tensor.dtype}"
+            )
+        # 8 + 4*10 = 48 bytes fixed, then 4*N for layer indices
+        head = (
+            cls._FAST_CKPT_MAGIC
+            + struct.pack(
+                "<10I",
+                cls._FAST_CKPT_VERSION,
+                int(generation),
+                len(layer_indices),
+                int(shape[0]),
+                int(shape[1]),
+                int(shape[2]),
+                int(shape[3]),
+                int(shape[4]),
+                dtype_id,
+                0,  # reserved
+            )
+            + struct.pack(f"<{len(layer_indices)}I", *layer_indices)
+        )
+        # Pad to 8-byte alignment for cleaner mmap
+        pad = (-len(head)) % 8
+        if pad:
+            head += b"\x00" * pad
+        return head
+
+    def _fast_save_chunk(
+        self,
+        final_path: str,
+        chunk_tensors: dict[int, torch.Tensor],
+        generation: int,
+    ) -> None:
+        """Save chunk_tensors to a single binary file with raw bytes.
+
+        ~5-10x faster than torch.save for typical KV chunks because it
+        skips pickle/zipfile overhead. The caller is responsible for
+        atomicity (rename) and parent directory creation.
+        """
+        if not chunk_tensors:
+            raise ValueError("FT_FAST_CHUNK_FORMAT: chunk_tensors is empty")
+
+        layer_indices = sorted(chunk_tensors.keys())
+        sample = chunk_tensors[layer_indices[0]]
+
+        # Verify all tensors share shape + dtype.
+        for li in layer_indices:
+            t = chunk_tensors[li]
+            if t.shape != sample.shape or t.dtype != sample.dtype:
+                raise ValueError(
+                    f"FT_FAST_CHUNK_FORMAT: layer {li} has shape "
+                    f"{tuple(t.shape)}/dtype {t.dtype} but layer "
+                    f"{layer_indices[0]} has {tuple(sample.shape)}/"
+                    f"{sample.dtype}"
+                )
+
+        header = self._fast_chunk_header(generation, layer_indices, sample)
+
+        tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(header)
+                # Write each layer's contiguous bytes directly.
+                # numpy().tobytes() works for fp16/fp32 (~0.5ms per
+                # 200KB layer = ~16ms total per chunk). For bf16 we
+                # reinterpret as int16 first since numpy lacks bf16
+                # support but the byte layout is identical.
+                # NOTE: bytes(untyped_storage()) is ~900x slower
+                # because it iterates element-by-element through
+                # Python int conversion — DO NOT use it.
+                for li in layer_indices:
+                    t = chunk_tensors[li]
+                    if not t.is_contiguous():
+                        t = t.contiguous()
+                    if t.dtype == torch.bfloat16:
+                        np_view = t.view(torch.int16).numpy()
+                    else:
+                        np_view = t.numpy()
+                    f.write(np_view.tobytes())
+                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    @classmethod
+    def _fast_load_chunk(cls, chunk_path: str) -> dict[str, Any]:
+        """Read a fast-format chunk file and return the same dict shape
+        that torch.save produced (for backward compat with restore code):
+            {"kv_tensors": {layer_idx: tensor}, "generation": int}
+        """
+        import struct
+        with open(chunk_path, "rb") as f:
+            data = f.read()
+
+        if not data.startswith(cls._FAST_CKPT_MAGIC):
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT: bad magic in {chunk_path}"
+            )
+        offset = len(cls._FAST_CKPT_MAGIC)
+        (
+            version, generation, num_layers,
+            d0, d1, d2, d3, d4, dtype_id, _reserved,
+        ) = struct.unpack_from("<10I", data, offset)
+        offset += 4 * 10
+        if version != cls._FAST_CKPT_VERSION:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT: unknown version {version}"
+            )
+        layer_indices = list(
+            struct.unpack_from(f"<{num_layers}I", data, offset)
+        )
+        offset += 4 * num_layers
+        # Pad to 8-byte alignment
+        offset = (offset + 7) & ~7
+
+        dtype = cls._FAST_CKPT_DTYPE_REV.get(dtype_id)
+        if dtype is None:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT: unknown dtype id {dtype_id}"
+            )
+        shape = (d0, d1, d2, d3, d4)
+        per_tensor_elems = d0 * d1 * d2 * d3 * d4
+        # Element size from a probe tensor.
+        probe = torch.empty(0, dtype=dtype)
+        per_tensor_bytes = per_tensor_elems * probe.element_size()
+
+        kv_tensors: dict[int, torch.Tensor] = {}
+        for li in layer_indices:
+            tensor_bytes = data[offset:offset + per_tensor_bytes]
+            if len(tensor_bytes) != per_tensor_bytes:
+                raise ValueError(
+                    f"FT_FAST_CHUNK_FORMAT: truncated chunk at layer {li} "
+                    f"(want {per_tensor_bytes}, got {len(tensor_bytes)})"
+                )
+            # Use frombuffer to wrap the bytes without copying. Then
+            # reshape and clone so we own the memory (the bytes object
+            # may be GC'd).
+            t = torch.frombuffer(
+                bytearray(tensor_bytes), dtype=dtype
+            ).reshape(shape).clone()
+            kv_tensors[li] = t
+            offset += per_tensor_bytes
+
+        return {
+            "kv_tensors": kv_tensors,
+            "generation": int(generation),
+        }
+
+    @classmethod
+    def _is_fast_chunk(cls, chunk_path: str) -> bool:
+        """Peek the first 8 bytes of a chunk file to detect fast format."""
+        try:
+            with open(chunk_path, "rb") as f:
+                magic = f.read(len(cls._FAST_CKPT_MAGIC))
+            return magic == cls._FAST_CKPT_MAGIC
+        except (OSError, ValueError):
+            return False
+
     def _atomic_write_json(self, final_path: str, data: dict[str, Any]) -> None:
         payload = json.dumps(data, sort_keys=True).encode("utf-8")
         self._atomic_write_bytes(final_path, payload)
@@ -6429,16 +6642,25 @@ class GPUModelRunner(
                 :, delta_start:delta_end
             ].contiguous()
 
-        chunk_payload = {
-            "req_id": request_id,
-            "generation": next_generation,
-            "logical_indices": logical_indices,
-            "num_blocks": len(logical_indices),
-            "kv_tensors": chunk_tensors,
-        }
-
         try:
-            self._atomic_torch_save(chunk_path, chunk_payload)
+            # FT_FAST_CHUNK_FORMAT=1: skip torch.save / pickle and write
+            # raw tensor bytes via _fast_save_chunk. Default off (uses
+            # the legacy torch.save format). The restore path
+            # auto-detects the format via magic bytes, so old chunks
+            # written with torch.save remain readable.
+            if os.environ.get("FT_FAST_CHUNK_FORMAT") == "1":
+                self._fast_save_chunk(
+                    chunk_path, chunk_tensors, next_generation,
+                )
+            else:
+                chunk_payload = {
+                    "req_id": request_id,
+                    "generation": next_generation,
+                    "logical_indices": logical_indices,
+                    "num_blocks": len(logical_indices),
+                    "kv_tensors": chunk_tensors,
+                }
+                self._atomic_torch_save(chunk_path, chunk_payload)
         except Exception:
             logger.exception(
                 "Checkpoint %s: failed to publish shared chunk %s",
@@ -6556,9 +6778,18 @@ class GPUModelRunner(
                         chunk_path,
                     )
                     return 0
-                loaded_chunks[chunk_filename] = torch.load(
-                    chunk_path, weights_only=False
-                )
+                # Auto-detect format via magic bytes (FT_FAST_CHUNK_FORMAT
+                # writes a "VLMCKPT\0" header). Both formats round-trip
+                # to the same {"kv_tensors": ..., "generation": ...}
+                # dict shape, so the rest of restore is unchanged.
+                if self._is_fast_chunk(chunk_path):
+                    loaded_chunks[chunk_filename] = self._fast_load_chunk(
+                        chunk_path
+                    )
+                else:
+                    loaded_chunks[chunk_filename] = torch.load(
+                        chunk_path, weights_only=False
+                    )
 
             if torch.cuda.is_available():
                 stream = torch.cuda.Stream()

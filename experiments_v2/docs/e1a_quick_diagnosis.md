@@ -1564,18 +1564,22 @@ if hasattr(self, "_ft_ckpt_future") and self._ft_ckpt_future is not None:
 
 worker 端 fsync 在 /dev/shm tmpfs 上完全没意义（tmpfs 是 RAM-backed，fsync 不提供 durability），但代码里照写不误。
 
-#### Fix — 两个 env var
+#### Fix — 三个 env var (phase 7 + phase 8)
 
-**Commit `2044810d0`**: `perf(ft): non-blocking checkpoint pipeline + tmpfs fast write (env-var-gated)`
+**Commits**:
+- `2044810d0` `perf(ft): non-blocking checkpoint pipeline + tmpfs fast write` (phase 7)
+- *(phase 8 commit pending)* `perf(ft): raw-bytes checkpoint chunk format`
 
 ```bash
-FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 python experiments_v2/run.py ...
+FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 FT_FAST_CHUNK_FORMAT=1 \
+    python experiments_v2/run.py ...
 ```
 
 1. **`FT_CKPT_NONBLOCK=1`** — 把 `_maybe_ft_checkpoint` 改成非阻塞：用 `future.done()` peek 而不是 `.result()`。如果上一个 RPC 还没完成，**跳过本步的 checkpoint**（不收集结果，也不提交新 RPC）。Pipeline 深度恒为 1，但 API server step 永远不阻塞。
 2. **`FT_FAST_TMPFS_WRITE=1`** — 跳过 `_atomic_write_bytes` 和 `_atomic_torch_save` 里的 `f.flush() + os.fsync()`。在 tmpfs 上 provably correct（RAM 里没有 disk 可 sync）。
+3. **`FT_FAST_CHUNK_FORMAT=1`** — 把 chunk 文件的 serialization 从 `torch.save()`（pickle + zipfile）换成 raw bytes + 48-byte struct header (`VLMCKPT\0` magic)。restore 通过 magic auto-detect 跟旧 torch.save chunks 兼容。每 chunk save 时间从 ~14 ms → ~8.6 ms (1.7×)。worker `checkpoint_kv_blocks` RPC 总时间从 ~70 ms → ~50 ms，**让 NONBLOCK 几乎不再 drop checkpoint cycles**。
 
-两个 env var 都默认 OFF，零行为变化。
+三个 env var 都默认 OFF，零行为变化。
 
 #### 实测结果 (Phase 7, 3 seeds, W1_Chat/Heavy/F2_Mid)
 
@@ -1593,6 +1597,22 @@ FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 python experiments_v2/run.py ...
 - s456: 353.4 (baseline 128.0) — **+176 %** ⭐
 
 **净改善**: +130 tok/s (+111%)，几乎追平 No-FT。但 completion 从 ~98% 跌到 ~93%（5pp 损失）。
+
+#### Phase 8 增量验证 (1 seed = s42, FAST_CHUNK_FORMAT 加在 phase 7 之上)
+
+| Mode (seed 42) | goodput | completion | TTFT p50 | TTFT p95 | SLO viol | failed |
+|---|---|---|---|---|---|---|
+| baseline | 120.4 | 100.0 % | 16,581 | 52,337 | 66.5 % | 0 |
+| + NONBLOCK + FAST_TMPFS (phase 7) | 282.4 | 95.2 % | 536 | 10,054 | 31.2 % | 22 |
+| **+ NONBLOCK + FAST_TMPFS + FAST_CHUNK** ⭐ | **299.1** | **100.0 %** | **507** | **9,401** | **27.3 %** | **0** |
+| Our-System-NoCkpt (control) | 315.3 | 98.7 % | 500 | 10,175 | 23.6 % | 6 |
+| No-FT (target) | 319.5 | 98.5 % | 398 | 10,436 | 20.3 % | 7 |
+
+**关键改进**: 加 FAST_CHUNK_FORMAT 之后 **completion 从 95.2 % 回到 100 %**，**failed 从 22 降到 0**。worker RPC 时间下降让 NONBLOCK 几乎不再触发 skip 路径，5 pp completion drop 完全消失。
+
+**Goodput 离 No-FT 的差距**: phase 7 -11.6 % → **phase 8 -6.4 %** (vs baseline -62.3 %)。
+
+⚠️ Phase 8 是单 seed 数据。phase 7 在 hard seed s123 上只 +3 %, 需要 phase 8 也跑 3-seed 验证。
 
 #### Trade-off
 
