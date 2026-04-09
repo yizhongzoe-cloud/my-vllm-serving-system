@@ -77,6 +77,58 @@ if _FT_RECOVERY_MODE not in ("reload", "restart", "reprefill"):
     )
     _FT_RECOVERY_MODE = "reload"
 
+# ── API server cProfile (FT_API_PROFILE_SECONDS env var) ─────────────────
+# When set, the CentralizedBendersFTClient schedules a one-shot cProfile
+# window over the API server process's main asyncio event loop. The
+# profile catches: aiohttp request handling, ft_client output processing,
+# snapshot updates, the Benders solver foreground path. (Background
+# threads — e.g. the ThreadPoolExecutor that runs the actual cp_model
+# solve — are NOT captured by cProfile; if the profile shows the API
+# server is mostly idle, that means CPU is in the executor thread.)
+#
+# Usage:
+#   FT_API_PROFILE_SECONDS=60 \
+#   FT_API_PROFILE_DELAY=60 \
+#   FT_API_PROFILE_OUTPUT=/tmp/api_profile.txt \
+#   python ...
+#
+# The profile starts FT_API_PROFILE_DELAY seconds after the client is
+# initialized (skip warmup) and runs for FT_API_PROFILE_SECONDS seconds.
+# Default: disabled (0 seconds).
+try:
+    _FT_API_PROFILE_SECONDS = float(
+        os.environ.get("FT_API_PROFILE_SECONDS", "0")
+    )
+except ValueError:
+    _FT_API_PROFILE_SECONDS = 0.0
+try:
+    _FT_API_PROFILE_DELAY = float(
+        os.environ.get("FT_API_PROFILE_DELAY", "60")
+    )
+except ValueError:
+    _FT_API_PROFILE_DELAY = 60.0
+_FT_API_PROFILE_OUTPUT = os.environ.get(
+    "FT_API_PROFILE_OUTPUT", "/tmp/ft_api_profile.txt"
+)
+
+
+def _ft_rmtree_silent(path: str) -> None:
+    """Silent rmtree for FT_ASYNC_CLEANUP background cleanup.
+
+    Suppresses FileNotFoundError (race with concurrent cleanup) and
+    logs other OSErrors at WARNING. Used as the target callable for
+    `loop.run_in_executor(None, _ft_rmtree_silent, request_dir)`.
+    Module-level so the executor can pickle it cleanly.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(
+            "FT_ASYNC_CLEANUP: rmtree(%s) failed: %s", path, exc,
+        )
+
 
 class FTDPAsyncMPClient(DPLBAsyncMPClient):
     """FT-aware DP client that handles engine failures gracefully.
@@ -148,8 +200,37 @@ class FTDPAsyncMPClient(DPLBAsyncMPClient):
         )
 
     def _cleanup_shared_checkpoint_request(self, request_id: str) -> None:
-        """Remove shared checkpoint artifacts after global request termination."""
+        """Remove shared checkpoint artifacts after global request termination.
+
+        FT_ASYNC_CLEANUP=1: when set, the actual rmtree is sent to the
+        default asyncio executor (a ThreadPoolExecutor) so the syscall
+        chain doesn't block the API server's event loop. This matters
+        because each rmtree of a /dev/shm/<req_id>/ tree typically
+        contains 2-3 chunk + manifest + latest files; per-request
+        cleanup observed at ~26 ms each in the API server cProfile.
+        At ~3 finished reqs/sec, that's ~80 ms/sec of event loop
+        blocking — the largest single hot spot in the API server's
+        Python time (35 % of 8 s captured over a 60 s window).
+
+        Default off: caller may run on a thread that doesn't have an
+        asyncio loop attached, in which case we fall back to the sync
+        path. The fallback also covers shutdown / abort paths where
+        we'd rather block synchronously than leave dangling rmtree work.
+        """
         request_dir = os.path.join(_SHARED_CKPT_DIR, request_id)
+
+        if os.environ.get("FT_ASYNC_CLEANUP") == "1":
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.run_in_executor(
+                    None, _ft_rmtree_silent, request_dir,
+                )
+                return
+
+        # Sync fallback (default).
         try:
             shutil.rmtree(request_dir)
         except FileNotFoundError:
@@ -1057,10 +1138,89 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             self._solver_budget_sec,
         )
 
+        # FT_API_PROFILE_SECONDS: schedule a one-shot cProfile window.
+        # We can't run asyncio.create_task here because the event loop
+        # may not be running yet at __init__ time. Defer to the first
+        # add_request_async call via a guard flag.
+        self._ft_api_profile_scheduled = False
+        if _FT_API_PROFILE_SECONDS > 0:
+            logger.info(
+                "FT_API_PROFILE: will start cProfile %.0fs after init, "
+                "run for %.0fs, dump to %s",
+                _FT_API_PROFILE_DELAY,
+                _FT_API_PROFILE_SECONDS,
+                _FT_API_PROFILE_OUTPUT,
+            )
+
+    def _maybe_start_api_profile(self) -> None:
+        """Schedule the API server cProfile window on first opportunity."""
+        if self._ft_api_profile_scheduled:
+            return
+        if _FT_API_PROFILE_SECONDS <= 0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._ft_api_profile_scheduled = True
+        loop.create_task(self._ft_api_profile_task())
+
+    async def _ft_api_profile_task(self) -> None:
+        """Wait FT_API_PROFILE_DELAY seconds, enable cProfile for
+        FT_API_PROFILE_SECONDS, dump to FT_API_PROFILE_OUTPUT.
+        """
+        import cProfile
+        import io
+        import pstats
+
+        try:
+            await asyncio.sleep(_FT_API_PROFILE_DELAY)
+        except asyncio.CancelledError:
+            return
+        logger.info(
+            "FT_API_PROFILE: cProfile START (window=%.0fs)",
+            _FT_API_PROFILE_SECONDS,
+        )
+        prof = cProfile.Profile()
+        prof.enable()
+        try:
+            await asyncio.sleep(_FT_API_PROFILE_SECONDS)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            prof.disable()
+
+        try:
+            stream = io.StringIO()
+            stats = pstats.Stats(prof, stream=stream)
+            stats.sort_stats("cumulative")
+            stream.write(
+                f"FT_API_PROFILE: captured ~{_FT_API_PROFILE_SECONDS:.0f}s of "
+                f"API server cProfile (cumulative time, top 80)\n\n"
+            )
+            stats.print_stats(80)
+            stream.write("\n\n=== Sorted by total time (top 80) ===\n\n")
+            stats.sort_stats("tottime")
+            stats.print_stats(80)
+            os.makedirs(
+                os.path.dirname(_FT_API_PROFILE_OUTPUT) or ".", exist_ok=True
+            )
+            with open(_FT_API_PROFILE_OUTPUT, "w") as f:
+                f.write(stream.getvalue())
+            logger.info(
+                "FT_API_PROFILE: dumped to %s", _FT_API_PROFILE_OUTPUT,
+            )
+        except Exception:
+            logger.exception("FT_API_PROFILE: dump failed")
+
     # ---- Override: queue requests instead of immediate routing ----
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         """Queue request for solver epoch instead of routing immediately."""
+        # Lazy-start the API server profile on first request (we now
+        # know the event loop is running). No-op when env var unset.
+        self._maybe_start_api_profile()
+
         self._request_cache[request.request_id] = request
         self._pending_solver_requests.append(request)
         self._ensure_solve_epoch_task()
