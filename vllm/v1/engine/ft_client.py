@@ -1160,7 +1160,13 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         self._solver_future = None
 
         if result is None:
-            logger.warning(
+            # P0-impl-3a follow-up: demoted from WARNING to DEBUG.
+            # Fires once per Benders failure (hundreds per 5-min run on
+            # W1_Chat/Heavy because the solver routinely hits the
+            # iteration cap). At that volume WARNING is non-actionable
+            # spam — the same condition is already counted via the
+            # greedy fallback path metrics.
+            logger.debug(
                 "Centralized solver returned None (infeasible), "
                 "degraded to greedy for %d requests", len(pending))
             self._pending_solver_requests.extend(pending)
@@ -1333,7 +1339,9 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             for omega, plan in result.recovery_plans.items()
         }
 
-        logger.info(
+        # P0-impl-3a follow-up: per-epoch summary demoted from INFO to
+        # DEBUG (fires once per Benders solver epoch, ~25-450/run).
+        logger.debug(
             "Centralized solver epoch: dispatched %d/%d requests, "
             "%d rejected, %d recovery plans",
             dispatched,
@@ -1364,7 +1372,13 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
                 )
 
         if pending:
-            logger.warning(
+            # P0-impl-3a follow-up: demoted from WARNING to INFO.
+            # Fires once per greedy dispatch fallback (~hundreds/run
+            # when Benders solver consistently hits its iteration cap);
+            # WARNING is too noisy at that frequency. Kept at INFO
+            # because run.py parses this line via _EPOCH_FALLBACK_RE
+            # for per-epoch fallback metrics.
+            logger.info(
                 "Greedy fallback: dispatched %d requests (degraded path)",
                 len(pending),
             )

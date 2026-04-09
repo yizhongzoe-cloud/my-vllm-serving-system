@@ -331,8 +331,13 @@ class BendersSolveLoop:
                 return result
 
         # Step 7: Max iterations exceeded.
+        # P0-impl-3a follow-up: this fires hundreds of times per 5-min run
+        # on W1_Chat/Heavy because Benders frequently hits the iteration
+        # cap and falls through to greedy. At that frequency WARNING is
+        # non-actionable spam. Demoted to DEBUG; the fall-through itself
+        # is still observable via greedy dispatch counts.
         elapsed = time.monotonic() - start_time
-        logger.warning(
+        logger.debug(
             "Benders did not converge in %d iterations (%.3fs); "
             "falling back to greedy",
             self._max_iterations,
