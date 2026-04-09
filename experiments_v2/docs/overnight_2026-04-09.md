@@ -57,9 +57,9 @@ Phase 8 fix: replace `torch.save()` (pickle/zipfile, ~14 ms for 6 MB) with raw `
 - `1aa319f92 perf(ft): add FT_FAST_CHUNK_FORMAT env var (raw bytes vs torch.save)` (phase 8)
 - `5f45a1bbf test(ft): add FT_BG_PUBLISH env var (background-thread shared publish)` (phase 10, tested negative)
 
-### Tested but rejected (phase 9 + 10 + 11)
+### Tested but rejected (phase 9 + 10 + 11 + 12 + 13)
 
-After phase 8 we tried three more optimizations targeting the worker side. All turned out to be net-neutral or net-negative on the same single-seed cell.
+After phase 8 we tried five more optimizations. The only one that produced clean data on what's slow was phase 12 (cProfile of the API server process). The others turned out to be net-neutral or net-negative on single-seed runs because they attacked the wrong layer.
 
 | Phase | Optimization | seed 42 goodput | completion | active@fault | Verdict |
 |---|---|---|---|---|---|
@@ -67,12 +67,52 @@ After phase 8 we tried three more optimizations targeting the worker side. All t
 | 9 | + FT_PINNED_BUFFER_POOL | 243.8 | 98.1 % | 8 | ❌ reverted (data race) |
 | 10 | + FT_BG_PUBLISH | 270.9 | 100.0 % | 8 | ⚠️ committed but tested negative; default off |
 | 11 | + FT_INLINE_MANIFEST | 231.8 | 100.0 % | 7 | ⚠️ committed but tested negative; default off |
+| 12 | + FT_API_PROFILE_SECONDS=60 (instrumentation only) | 245.6 | 100.0 % | – | 🔍 profiling tool committed |
+| 13 | + FT_ASYNC_CLEANUP (run rmtree on bg thread) | 239.7 | 100.0 % | 6 | ⚠️ committed but tested negative; default off |
 
 **Phase 9 (pinned buffer pool)** was reverted because of an implicit data race: the existing `save_checkpoint` path launches an async GPU→host copy on a separate CUDA stream and returns the pinned tensor reference WITHOUT synchronizing. The current code "works" because Python overhead between launch and read is slower than the copy. Recycling buffers introduces a window where the pool returns a buffer whose previous async copy may not have completed, so a new copy can race with the previous read. The 9 lost requests in phase 9 (vs 0 in phase 8 with same `active_requests_at_fault=8`) are consistent with this hypothesis. A correct fix would require an explicit `copy_stream.synchronize()` somewhere, which defeats the async-copy purpose.
 
 **Phase 10 (background-thread publish)** is committed but tested negative. The fix sends the per-request `_publish_shared_checkpoint` file writes to a single-worker `ThreadPoolExecutor` and adds an explicit `copy_stream.synchronize()` so the background thread sees consistent pinned-memory bytes. Backpressure is enforced via `prev_future.result()` at the start of each RPC. Despite all the correctness pieces, single-seed result is **270.9** (vs phase 8 299.1) — slightly worse. Likely cause: GIL contention. Most of `_fast_save_chunk` releases GIL during `f.write()` syscalls, but the inter-call Python overhead serializes through the GIL and eats into the main worker's other Python work. Kept as `FT_BG_PUBLISH=1` opt-in env var (default off) for future investigation, e.g. once the work can be moved to a non-GIL background mechanism (separate process, or asyncio loop with file I/O moved to an executor).
 
 **Phase 11 (inline manifest in chunk header)** is committed but tested negative. The fix bumps the fast chunk format from v1 → v2 by repurposing the `reserved` slot in the header as `manifest_bytes_len`. When `FT_INLINE_MANIFEST=1` is set together with `FT_FAST_CHUNK_FORMAT=1`, `_publish_shared_checkpoint` embeds the cumulative `SharedCheckpointManifest` JSON directly into the chunk header and skips writing the separate `manifest_*.json` and `latest_*` pointer files entirely (saves 2 of 3 file writes per save). Restore extension `_scan_latest_inline_manifest` scans the request directory for chunk files written by this rank, finds the highest generation, and reads the embedded manifest from it. Implementation correctness verified by inspecting `/dev/shm` after a run: each request directory contains ONLY `chunk_rank0_<gen>.pt` files, no manifest_*.json or latest_rank0 — the file ops are successfully skipped. Single-seed result is **231.8** (vs phase 8 299.1) — within phase 7's measured variance band (106-353 across 3 seeds), so we can't conclude regression vs improvement without 3-seed validation. Kept as opt-in `FT_INLINE_MANIFEST=1` env var (requires `FT_FAST_CHUNK_FORMAT=1` to take effect).
+
+**Phase 12 (API server cProfile via FT_API_PROFILE_SECONDS)** — first systematic profile of the API server process. We've been profiling the engine workers all along (via `FT_PROFILE_MAX_CALLS` which targets `schedule()`); phase 12 adds the same kind of instrumentation to the ft_client / API server side. Implementation: schedule a one-shot cProfile window starting `FT_API_PROFILE_DELAY` seconds after init (skip warmup), running for `FT_API_PROFILE_SECONDS`. Captures the asyncio main loop (handles aiohttp, ft_client output processing, snapshot updates, foreground Benders solver). Background threads are NOT captured.
+
+Phase 12 result on a 60s window over W1_Chat/Heavy/F2_Mid: **8.075 s** of profiled CPU time. Top hot spots by cumulative time:
+
+| function | cumtime | tottime | calls | description |
+|---|---|---|---|---|
+| `ft_process_outputs_socket` | 3.21 s | 0.04 s | 2972 | ZMQ recv + decode + process |
+| `process_engine_outputs` | 2.85 s | 0.04 s | 3102 | ft_client output processing |
+| `_cleanup_shared_checkpoint_request` | **2.80 s** | 0.002 s | **107** | per-finished-req `shutil.rmtree` |
+| `posix.unlink` | 2.78 s | 2.78 s | 312 | **9 ms per unlink** ⚠️ |
+| `stream_response` (aiohttp) | 2.28 s | 0.16 s | 28534 | OpenAI response streaming |
+| Pydantic init/validate | ~0.8 s | 0.06 s | 86k | OpenAI JSON ser/de |
+| `_solve_epoch_loop` | 0.16 s | 0.02 s | 2864 | Benders foreground path |
+
+The biggest single hot spot was `_cleanup_shared_checkpoint_request` at **35 % of profiled CPU**. Each finished request synchronously called `shutil.rmtree('/dev/shm/<req_id>/')` which `posix.unlink`'d 3 files at ~9 ms each. With ~3 finished reqs/sec, that's ~80 ms/sec of asyncio event loop blocking from cleanup alone. (The ft_process_outputs_socket / process_engine_outputs cumtime is high because the cleanup was called from inside their call chain, not because their own work is slow.)
+
+**Phase 13 (FT_ASYNC_CLEANUP)** — based on phase 12, moved the cleanup to `loop.run_in_executor`. Phase 13b re-ran phase 12's profile with the fix on. The cleanup hot spot disappeared:
+
+| metric | sync (12) | async (13b) |
+|---|---|---|
+| total profiled CPU in 60 s | **8.075 s** | **4.97 s** |
+| `_cleanup_shared_checkpoint_request` | 2.80 s | NOT in top 80 |
+| `ft_process_outputs_socket` | 3.21 s | 0.38 s |
+| `process_engine_outputs` | 2.85 s | 1.13 s |
+
+The fix succeeds at the implementation level (-38 % main-thread CPU) but **macro goodput in non-profile mode (phase 13: 239.7) does not improve over phase 8 (299.1)**. Reason: the API server main thread was already running at ~13 % CPU utilization (8 s / 60 s in profile mode where profile adds overhead). Freeing more of an already-idle thread doesn't translate to goodput because the actual bottleneck is somewhere else — engine GPU compute, ZMQ message rate, or the worker side that this profile doesn't capture from the API server process. Kept as `FT_ASYNC_CLEANUP=1` opt-in env var for future investigation.
+
+### Lessons learned (phase 9-13)
+
+**Five consecutive optimizations didn't improve macro goodput beyond phase 8** despite all being correct implementations of their target. The pattern is consistent: phase 8 already crossed the threshold where the API server main thread is no longer the bottleneck. Further optimizations there free up CPU that wasn't being used.
+
+The remaining 6.4 % gap to No-FT (299 vs 319) is most likely:
+- On the engine worker side (PyTorch C++ time we can't profile from Python)
+- In ZMQ message rate / serialization (msgpack overhead per output batch)
+- Or fundamentally bound by the asynchronous handover between API server ↔ engine ↔ worker
+
+To attack it further would need: profile the engine worker process (not just `schedule()`), or measure ZMQ throughput separately.
 
 ### Not tried (lower priority after phase 8)
 
