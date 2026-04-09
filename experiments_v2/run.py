@@ -1008,7 +1008,15 @@ def _wait_for_health(port: int, timeout: float = 300.0) -> bool:
 
 
 def _stop_server(proc: subprocess.Popen) -> None:
-    """Gracefully stop the server process group."""
+    """Gracefully stop the server process group.
+
+    P0-impl-3a-followup fix (2026-04-08): vLLM dp=2 + ft_scheduler servers
+    can take >15s to fully shut down (dp coordinator + 2 worker processes
+    + ft cleanup). Previously the second `proc.wait(timeout=5)` would raise
+    an uncaught TimeoutExpired, killing run.py and losing metrics.json
+    even though benchmark had already completed. Now we catch all timeouts
+    and trust the OS to reap the SIGKILL'd process group.
+    """
     if proc.poll() is not None:
         return
     try:
@@ -1016,13 +1024,22 @@ def _stop_server(proc: subprocess.Popen) -> None:
     except (ProcessLookupError, OSError):
         pass
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=15)  # was 10
     except subprocess.TimeoutExpired:
+        logger.warning(
+            "Server did not exit within 15s of SIGTERM; sending SIGKILL"
+        )
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=10)  # was 5
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Server did not exit within 10s of SIGKILL; abandoning "
+                "process (OS will reap). Continuing to next cell."
+            )
     log_file = getattr(proc, "_log_file", None)
     if log_file:
         log_file.close()

@@ -143,6 +143,25 @@ experiments:
     load_levels: ["Light", "Moderate", "Heavy"]
     faults: ["none", "F2_Mid"]
 
+  # ====== Post-fix re-run, split for parallel GPU pairs ======
+  # P0-impl-3a fix (da5c8f25e) invalidated all old E1a_Quick data.
+  # Re-run with clean fix, split across GPU 4-5 + GPU 6-7 to halve wall time.
+  E1a_Quick_v2_HalfA:
+  # 24 cells, ~2.8h on GPU 4-5
+    description: "Post-fix re-run Half A (No-FT + Periodic-Low) on GPU 4-5"
+    baselines: ["No-FT", "Periodic-Low"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  E1a_Quick_v2_HalfB:
+  # 24 cells, ~2.8h on GPU 6-7
+    description: "Post-fix re-run Half B (Periodic-High + Our-System) on GPU 6-7"
+    baselines: ["Periodic-High", "Our-System"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
   E1a_Main:
   # 288
     description: "End-to-end (8B full sweep)"
