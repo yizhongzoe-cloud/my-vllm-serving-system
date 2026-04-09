@@ -16,5 +16,10 @@
   "failover_gap_p95_ms": 2585.3954434394836,
   "failover_gap_p99_ms": 2585.3961205482483,
   "time_to_stable_sec": null,
-  "recovery_success_rate": 1.0
+  "recovery_success_rate": 1.0,
+  "admitted": 159,
+  "slo_violations_admitted_failed": 0,
+  "slo_violations_admitted_slo": 13,
+  "slo_violation_rate_failed_only": 0.0,
+  "slo_violation_rate_slo_only": 0.08176100628930817
 }

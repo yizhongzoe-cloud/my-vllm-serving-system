@@ -2,7 +2,7 @@
   "total_requests": 462,
   "completed": 216,
   "failed": 246,
-  "admission_rate": 0.4675324675324675,
+  "admission_rate": 1.0,
   "completion_rate": 0.4675324675324675,
   "goodput": 0.0,
   "ttft_p50_ms": 23862.4050617218,
@@ -16,5 +16,10 @@
   "failover_gap_p95_ms": 0.0,
   "failover_gap_p99_ms": 0.0,
   "time_to_stable_sec": null,
-  "recovery_success_rate": 1.0
+  "recovery_success_rate": 1.0,
+  "admitted": 462,
+  "slo_violations_admitted_failed": 246,
+  "slo_violations_admitted_slo": 216,
+  "slo_violation_rate_failed_only": 0.5324675324675324,
+  "slo_violation_rate_slo_only": 0.4675324675324675
 }

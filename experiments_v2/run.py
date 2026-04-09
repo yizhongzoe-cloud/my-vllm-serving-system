@@ -822,15 +822,36 @@ def compute_metrics(
     recoveries: list[dict] | None = None,
     epochs: list[dict] | None = None,
 ) -> dict:
-    """Compute aggregate metrics from per-request results."""
+    """Compute aggregate metrics from per-request results.
+
+    P0-impl-3a-followup (2026-04-08): SLO violation rate now includes
+    admitted-but-failed requests (e.g. dropped due to GPU failure with
+    no fault tolerance). Previously these were silently excluded
+    because the metric only iterated `successful` requests, making
+    No-FT look perfect under faults despite dropping requests.
+
+    Definition: a request "violates SLO" if it was admitted by the
+    server (HTTP 200 + no transport error) and either:
+      (a) failed to complete (incomplete_stream / empty_stream / abort), OR
+      (b) completed but violated TTFT, TPOT, or failover-gap SLO
+
+    The denominator is `admitted` requests, not `total` (we don't
+    blame the server for client-side admission rejections, e.g.
+    HTTP 429 / 5xx, which are counted separately).
+    """
     total = len(results)
+    admitted = [r for r in results if r.admitted]
+    n_admitted = len(admitted)
     successful = [r for r in results if r.success]
     completed = len(successful)
     failed = total - completed
 
     completion_rate = completed / total if total > 0 else 0.0
 
-    # Goodput: output tokens from requests satisfying SLO / actual runtime.
+    # Goodput: output tokens from admitted requests satisfying SLO / actual runtime.
+    # Note: an admitted-but-failed request contributes 0 tokens to goodput
+    # (it didn't satisfy SLO). This is the same as before for tokens, but
+    # the denominator (slo_violation_rate) now includes failed requests.
     slo_satisfied = [
         r for r in successful
         if not (r.ttft_violated or r.tpot_violated or r.gap_violated)
@@ -853,12 +874,22 @@ def compute_metrics(
         if r.affected_by_failure
     ]
 
-    # SLO violation: any SLO violated among successful requests.
-    violated = sum(
-        1 for r in successful
-        if r.ttft_violated or r.tpot_violated or r.gap_violated
+    # SLO violation: an admitted request violates SLO if it either:
+    #   - failed to complete (admitted but no clean finish), OR
+    #   - completed but violated TTFT / TPOT / failover-gap.
+    # Denominator: admitted requests (not total — admission rejections
+    # aren't the server's fault).
+    violated_admitted_failed = sum(
+        1 for r in admitted if not r.success
     )
-    slo_violation_rate = violated / completed if completed > 0 else 0.0
+    violated_admitted_slo = sum(
+        1 for r in admitted
+        if r.success and (r.ttft_violated or r.tpot_violated or r.gap_violated)
+    )
+    violated = violated_admitted_failed + violated_admitted_slo
+    slo_violation_rate = (
+        violated / n_admitted if n_admitted > 0 else 0.0
+    )
 
     # Recovery success rate: fraction of failure-affected requests that succeeded.
     affected = [r for r in results if r.affected_by_failure]
@@ -876,7 +907,8 @@ def compute_metrics(
         "total_requests": total,
         "completed": completed,
         "failed": failed,
-        "admission_rate": sum(1 for r in results if r.admitted) / total if total > 0 else 0.0,
+        "admitted": n_admitted,
+        "admission_rate": n_admitted / total if total > 0 else 0.0,
         "completion_rate": completion_rate,
         "goodput": goodput,
         "ttft_p50_ms": pct(ttft_vals, 50),
@@ -886,6 +918,17 @@ def compute_metrics(
         "tpot_p95_ms": pct(tpot_vals, 95),
         "tpot_p99_ms": pct(tpot_vals, 99),
         "slo_violation_rate": slo_violation_rate,
+        # P0-impl-3a-followup: breakdown of slo_violation_rate
+        # so we can see how much comes from failed admitted requests
+        # vs SLO-violated successful requests
+        "slo_violations_admitted_failed": violated_admitted_failed,
+        "slo_violations_admitted_slo": violated_admitted_slo,
+        "slo_violation_rate_failed_only": (
+            violated_admitted_failed / n_admitted if n_admitted > 0 else 0.0
+        ),
+        "slo_violation_rate_slo_only": (
+            violated_admitted_slo / n_admitted if n_admitted > 0 else 0.0
+        ),
         "failover_gap_p50_ms": pct(gap_vals, 50),
         "failover_gap_p95_ms": pct(gap_vals, 95),
         "failover_gap_p99_ms": pct(gap_vals, 99),
@@ -1137,11 +1180,31 @@ def _classify_result(result: RequestResult, finish_reason: str | None) -> None:
     """Classify request outcome based on finish_reason, error, and output_tokens.
 
     Sets result.admitted, result.success, and result.error.
+
+    P0-impl-3a-followup (2026-04-08): "admitted" now means "the server
+    accepted the request and either returned data or started streaming",
+    not just "no transport error". Previously, requests that started
+    streaming but later hit a client-side timeout (e.g. due to backpressure)
+    were marked admitted=False, which made them invisible to admission_rate
+    and slo_violation_rate metrics. They are now correctly marked admitted=True
+    so they count as SLO violations under the corrected metric definition.
     """
-    # Mark admission: HTTP 200 with no transport error = admitted.
-    if result.error is None or result.error.startswith("HTTP"):
-        result.admitted = result.error is None
+    # Mark admission. A request was admitted by the server if any of:
+    #   1. No error at all (clean completion)
+    #   2. HTTP 200 was returned (server accepted, even if stream incomplete)
+    #   3. We received at least one token (server started streaming)
+    # Only client-side rejections (HTTP 4xx/5xx, connection refused) are NOT admitted.
+    if result.error is None:
+        result.admitted = True
+    elif result.error.startswith("HTTP"):
+        # HTTP 4xx/5xx = server rejected admission
+        result.admitted = False
+    elif result.output_tokens > 0:
+        # Streaming started → server admitted, regardless of how it ended
+        # (timeout, ClientError, partial stream, etc.)
+        result.admitted = True
     else:
+        # Transport error before any data → not admitted
         result.admitted = False
 
     # Mark success based on finish_reason.

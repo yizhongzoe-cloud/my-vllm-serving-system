@@ -11,10 +11,15 @@
   "tpot_p50_ms": 28.65227225214936,
   "tpot_p95_ms": 35.90388431888722,
   "tpot_p99_ms": 39.68194463978641,
-  "slo_violation_rate": 0.0,
+  "slo_violation_rate": 0.03773584905660377,
   "failover_gap_p50_ms": 0.0,
   "failover_gap_p95_ms": 0.0,
   "failover_gap_p99_ms": 0.0,
   "time_to_stable_sec": null,
-  "recovery_success_rate": 0.0
+  "recovery_success_rate": 0.0,
+  "admitted": 159,
+  "slo_violations_admitted_failed": 6,
+  "slo_violations_admitted_slo": 0,
+  "slo_violation_rate_failed_only": 0.03773584905660377,
+  "slo_violation_rate_slo_only": 0.0
 }
