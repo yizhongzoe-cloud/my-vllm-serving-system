@@ -6265,8 +6265,15 @@ class GPUModelRunner(
         try:
             with open(tmp_path, "wb") as f:
                 f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
+                # FT_FAST_TMPFS_WRITE: skip flush+fsync when the
+                # checkpoint store is on tmpfs (/dev/shm is RAM-backed,
+                # so fsync is provably useless and only adds latency).
+                # Default off to preserve original semantics for
+                # non-tmpfs deployments. See overnight_2026-04-09.md
+                # follow-up "stream blocking root cause".
+                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                    f.flush()
+                    os.fsync(f.fileno())
             os.replace(tmp_path, final_path)
         except Exception:
             try:
@@ -6281,8 +6288,10 @@ class GPUModelRunner(
         try:
             with open(tmp_path, "wb") as f:
                 torch.save(data, f)
-                f.flush()
-                os.fsync(f.fileno())
+                # Same FT_FAST_TMPFS_WRITE bypass as _atomic_write_bytes.
+                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                    f.flush()
+                    os.fsync(f.fileno())
             os.replace(tmp_path, final_path)
         except Exception:
             try:

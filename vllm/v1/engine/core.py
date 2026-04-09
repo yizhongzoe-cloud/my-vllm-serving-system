@@ -737,37 +737,73 @@ class EngineCore:
         ckpt_updates: dict[str, int] = {}
 
         # Step 1: Collect results from previous async RPC.
+        #
+        # FT_CKPT_NONBLOCK env var: when "1", use a NON-BLOCKING
+        # collection (only process the previous future if it is
+        # already done). Otherwise the API server's step T blocks
+        # waiting on step T-1's checkpoint RPC, which under
+        # W1_Chat/Heavy fault load takes ~70 ms (vs ~30 ms step
+        # time), causing a ~60 % goodput drop. The blocking is the
+        # actual root cause of the framework overhead measured by
+        # the 2026-04-09 overnight investigation (drop mode showed
+        # the recovery path itself isn't the cost; phase 7 confirmed
+        # this fix recovers ~+130 tok/s on W1_Chat/Heavy/F2_Mid).
+        #
+        # Trade-off when enabled: if the RPC is slower than step
+        # time, we skip firing a new checkpoint RPC for that step
+        # (the `_ft_ckpt_future is None` check at submit time
+        # below). The checkpoint controller policy already handles
+        # missed cycles gracefully — the next save just covers a
+        # larger delta — but the in-flight requests at fault time
+        # may have less recent checkpoint state, increasing the
+        # number lost during recovery (phase 7 measured a 5-10 pp
+        # completion drop vs the synchronous baseline).
+        #
+        # Default OFF (no behavior change). See
+        # experiments_v2/docs/overnight_2026-04-09.md "Phase 7".
+        ckpt_nonblock = os.environ.get("FT_CKPT_NONBLOCK") == "1"
         if hasattr(self, "_ft_ckpt_future") and self._ft_ckpt_future is not None:
-            try:
-                results = self._ft_ckpt_future.result()
-                if results and results[0]:
-                    metadata_updates: dict[str, tuple[int, int]] = {}
-                    for result in results[0]:
-                        if len(result) == 3:
-                            req_id, size_bytes, covered_tokens = result
-                        else:
-                            req_id, size_bytes = result
+            future_done = (
+                self._ft_ckpt_future.done() if ckpt_nonblock else True
+            )
+            if future_done:
+                try:
+                    results = self._ft_ckpt_future.result()
+                    if results and results[0]:
+                        metadata_updates: dict[str, tuple[int, int]] = {}
+                        for result in results[0]:
+                            if len(result) == 3:
+                                req_id, size_bytes, covered_tokens = result
+                            else:
+                                req_id, size_bytes = result
+                                request = ft.request_pool.get_request(req_id)
+                                covered_tokens = (
+                                    request.num_computed_tokens
+                                    if request is not None else 0
+                                )
                             request = ft.request_pool.get_request(req_id)
-                            covered_tokens = (
-                                request.num_computed_tokens
-                                if request is not None else 0
-                            )
-                        request = ft.request_pool.get_request(req_id)
-                        if request is not None:
-                            # Only update size_bytes from RPC result.
-                            # num_checkpointed_tokens was already set
-                            # eagerly when the RPC was fired.
-                            request.last_checkpoint_size_bytes = size_bytes
-                            metadata_updates[req_id] = (
-                                covered_tokens, size_bytes,
-                            )
-                    if metadata_updates:
-                        ft.update_checkpoint_metadata(metadata_updates)
-            except Exception as e:
-                logger.warning("FT checkpoint RPC failed: %s", e)
-            self._ft_ckpt_future = None
+                            if request is not None:
+                                # Only update size_bytes from RPC result.
+                                # num_checkpointed_tokens was already set
+                                # eagerly when the RPC was fired.
+                                request.last_checkpoint_size_bytes = size_bytes
+                                metadata_updates[req_id] = (
+                                    covered_tokens, size_bytes,
+                                )
+                        if metadata_updates:
+                            ft.update_checkpoint_metadata(metadata_updates)
+                except Exception as e:
+                    logger.warning("FT checkpoint RPC failed: %s", e)
+                self._ft_ckpt_future = None
 
         # Step 2: Fire new checkpoint RPC (async, don't wait).
+        #
+        # In ckpt_nonblock mode, don't fire a new RPC if the previous
+        # one hasn't returned yet — that's the back-pressure that
+        # keeps the in-flight queue bounded at depth 1.
+        if ckpt_nonblock and getattr(self, "_ft_ckpt_future", None) is not None:
+            return ckpt_updates if ckpt_updates else None
+
         request_block_map: list[tuple[str, list[int], int]] = []
         if checkpoint_plan is None:
             checkpoint_requests = self.scheduler.get_checkpoint_requests()
