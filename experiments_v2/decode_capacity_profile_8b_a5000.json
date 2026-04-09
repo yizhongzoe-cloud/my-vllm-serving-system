@@ -1,0 +1,34 @@
+{
+  "meta": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "gpu": "NVIDIA RTX A5000",
+    "dp_size": 2,
+    "max_model_len": 8192,
+    "tpot_slo_ms": 50.0,
+    "planning_horizon_sec": 1.0,
+    "_source": "ROUGH ESTIMATE — not measured. Derived from observed runtime stats during 2026-04-09 logfix/lazy-reload investigation: pre-fault avg running batch ~16-21, post-fault avg running batch ~26 on W1_Chat/Heavy. NOT calibrated via dedicated benchmark. The original decode_capacity_profile_8b.json was for A6000 dp=1 max_model_len=4096 planning_horizon=0.5 — completely wrong for current setup, causing Benders solver to declare admission infeasible on every epoch (decode_capacity=10 < active_running=25). See e1a_quick_diagnosis.md follow-up #6 (Benders profile mismatch). Note that even with this corrected profile, Benders may over-reject because the system runs ABOVE the 'safe' SLO-compliant capacity in practice."
+  },
+  "decode_capacity": {
+    "default": 26,
+    "by_avg_ctx_bucket": {
+      "256": 40,
+      "512": 32,
+      "1024": 26,
+      "2048": 18,
+      "4096": 12
+    }
+  },
+  "residual_prefill_capacity": {
+    "0": 17234,
+    "2": 14321,
+    "4": 13788,
+    "6": 13049,
+    "8": 13439,
+    "10": 13208,
+    "16": 11500,
+    "20": 10800,
+    "26": 9500,
+    "32": 8500,
+    "40": 7000
+  }
+}

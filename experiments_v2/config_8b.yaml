@@ -125,6 +125,16 @@ baselines:
     max_gpu_failures: 1
     fixed_checkpoint_blocks: 0
 
+  # Same as Our-System but with checkpoint controller off. Used to
+  # isolate how much of the framework baseline overhead comes from the
+  # checkpoint controller (per-step running-req iteration + GPU→host
+  # copies). Compare against Our-System on the same workload.
+  Our-System-NoCkpt:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
 # ---- Experiments ----
 experiments:
   E0_Smoke:
