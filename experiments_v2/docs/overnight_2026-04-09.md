@@ -4,6 +4,35 @@
 
 Find the actual source of Our-System's framework baseline overhead so we can attack it tomorrow. Today's session established that the gap between Our-System (124 tok/s) and No-FT (321 tok/s) on W1_Chat/Heavy is **~200 tok/s**, and that this gap is **NOT** in the recovery path (drop mode showed ~117 tok/s — almost identical to reload). The cost is somewhere in the everyday FT machinery. Tonight's job is to localize *which part* of that machinery.
 
+## Result (read this first)
+
+**Found the bottleneck and shipped a fix.** Two new env vars (default OFF) recover ~+130 tok/s on W1_Chat/Heavy/F2_Mid:
+
+```bash
+FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 python experiments_v2/run.py ...
+```
+
+| Mode | goodput mean ± stdev (3 seeds) | TTFT p50 | SLO violation |
+|---|---|---|---|
+| baseline (no env vars) | **117.3 ± 12.6** | 18,207 | 64.8 % |
+| FT_FAST_TMPFS_WRITE only | 122.7 ± 14.9 | 16,788 | 64.1 % |
+| **FT_CKPT_NONBLOCK + FAST_TMPFS** | **247.4 ± 127.1** | 3,226 | **37.6 %** |
+| Our-System-NoCkpt (control) | 291.7 ± 85.7 | 936 | 26.4 % |
+| No-FT (target, 1 seed) | 319.5 | 398 | 20.3 % |
+
+**Per-seed phase 7**:
+- s42: **282.4** (vs baseline 120.4) — **+135 %**
+- s123: 106.5 (vs baseline 103.5) — outlier seed, +2.9 %
+- s456: **353.4** (vs baseline 128.0) — **+176 %**
+
+Trade-off: completion drops from ~98 % → ~93 %. The fix works by skipping checkpoint cycles when the previous RPC hasn't returned yet, so in-flight requests at fault time may have less recent checkpoint state and more get lost during recovery.
+
+**Root cause**: API server's `_maybe_ft_checkpoint()` at line 740 uses `_ft_ckpt_future.result()` which BLOCKS waiting for the previous step's checkpoint RPC. Under W1_Chat/Heavy fault load the RPC takes ~70 ms while step time is ~30 ms, so the API server step rate drops from ~30/sec to ~14/sec — exactly the 60 % goodput drop observed (117 tok/s reload baseline vs 292 tok/s NoCkpt).
+
+The fix uses `future.done()` to peek at the previous RPC and skip both result-collection and new-RPC submission when it isn't ready yet. Pipeline depth stays at 1 (no unbounded queue) but the API server step never blocks on the checkpoint RPC.
+
+**Code commit**: `2044810d0 perf(ft): non-blocking checkpoint pipeline + tmpfs fast write (env-var-gated)`
+
 ## TL;DR for the morning
 
 1. **Read first**: [results_v2/8B_overnight_2026-04-09/SUMMARY.md](../../results_v2/8B_overnight_2026-04-09/SUMMARY.md) — auto-generated table of every run
