@@ -57,23 +57,25 @@ Phase 8 fix: replace `torch.save()` (pickle/zipfile, ~14 ms for 6 MB) with raw `
 - `1aa319f92 perf(ft): add FT_FAST_CHUNK_FORMAT env var (raw bytes vs torch.save)` (phase 8)
 - `5f45a1bbf test(ft): add FT_BG_PUBLISH env var (background-thread shared publish)` (phase 10, tested negative)
 
-### Tested but rejected (phase 9 + 10)
+### Tested but rejected (phase 9 + 10 + 11)
 
-After phase 8 we tried two more optimizations targeting the worker side. Both turned out to be net-neutral or net-negative on the same single-seed cell.
+After phase 8 we tried three more optimizations targeting the worker side. All turned out to be net-neutral or net-negative on the same single-seed cell.
 
-| Phase | Optimization | seed 42 goodput | completion | Verdict |
-|---|---|---|---|---|
-| 8 | NONBLOCK + FAST_TMPFS + FAST_CHUNK (current best) | **299.1** | **100.0 %** | ✅ committed, default off |
-| 9 | + FT_PINNED_BUFFER_POOL (recycle pinned host buffers) | 243.8 | 98.1 % | ❌ reverted |
-| 10 | + FT_BG_PUBLISH (background-thread shared publish) | 270.9 | 100.0 % | ⚠️ committed but tested negative; default off |
+| Phase | Optimization | seed 42 goodput | completion | active@fault | Verdict |
+|---|---|---|---|---|---|
+| 8 | NONBLOCK + FAST_TMPFS + FAST_CHUNK (current best) | **299.1** | **100.0 %** | 8 | ✅ committed, default off |
+| 9 | + FT_PINNED_BUFFER_POOL | 243.8 | 98.1 % | 8 | ❌ reverted (data race) |
+| 10 | + FT_BG_PUBLISH | 270.9 | 100.0 % | 8 | ⚠️ committed but tested negative; default off |
+| 11 | + FT_INLINE_MANIFEST | 231.8 | 100.0 % | 7 | ⚠️ committed but tested negative; default off |
 
 **Phase 9 (pinned buffer pool)** was reverted because of an implicit data race: the existing `save_checkpoint` path launches an async GPU→host copy on a separate CUDA stream and returns the pinned tensor reference WITHOUT synchronizing. The current code "works" because Python overhead between launch and read is slower than the copy. Recycling buffers introduces a window where the pool returns a buffer whose previous async copy may not have completed, so a new copy can race with the previous read. The 9 lost requests in phase 9 (vs 0 in phase 8 with same `active_requests_at_fault=8`) are consistent with this hypothesis. A correct fix would require an explicit `copy_stream.synchronize()` somewhere, which defeats the async-copy purpose.
 
 **Phase 10 (background-thread publish)** is committed but tested negative. The fix sends the per-request `_publish_shared_checkpoint` file writes to a single-worker `ThreadPoolExecutor` and adds an explicit `copy_stream.synchronize()` so the background thread sees consistent pinned-memory bytes. Backpressure is enforced via `prev_future.result()` at the start of each RPC. Despite all the correctness pieces, single-seed result is **270.9** (vs phase 8 299.1) — slightly worse. Likely cause: GIL contention. Most of `_fast_save_chunk` releases GIL during `f.write()` syscalls, but the inter-call Python overhead serializes through the GIL and eats into the main worker's other Python work. Kept as `FT_BG_PUBLISH=1` opt-in env var (default off) for future investigation, e.g. once the work can be moved to a non-GIL background mechanism (separate process, or asyncio loop with file I/O moved to an executor).
 
+**Phase 11 (inline manifest in chunk header)** is committed but tested negative. The fix bumps the fast chunk format from v1 → v2 by repurposing the `reserved` slot in the header as `manifest_bytes_len`. When `FT_INLINE_MANIFEST=1` is set together with `FT_FAST_CHUNK_FORMAT=1`, `_publish_shared_checkpoint` embeds the cumulative `SharedCheckpointManifest` JSON directly into the chunk header and skips writing the separate `manifest_*.json` and `latest_*` pointer files entirely (saves 2 of 3 file writes per save). Restore extension `_scan_latest_inline_manifest` scans the request directory for chunk files written by this rank, finds the highest generation, and reads the embedded manifest from it. Implementation correctness verified by inspecting `/dev/shm` after a run: each request directory contains ONLY `chunk_rank0_<gen>.pt` files, no manifest_*.json or latest_rank0 — the file ops are successfully skipped. Single-seed result is **231.8** (vs phase 8 299.1) — within phase 7's measured variance band (106-353 across 3 seeds), so we can't conclude regression vs improvement without 3-seed validation. Kept as opt-in `FT_INLINE_MANIFEST=1` env var (requires `FT_FAST_CHUNK_FORMAT=1` to take effect).
+
 ### Not tried (lower priority after phase 8)
 
-- **Embed manifest into chunk header (skip 2 of 3 file ops per save)** — analyzed but not tried. With phase 8 already at 100 % completion and the API server non-blocking on RPC, faster RPC doesn't translate directly to goodput. Estimated savings: ~28 ms/RPC, but no measurable goodput effect.
 - **Pipeline depth > 1 (`max_workers > 1` for `_ft_ckpt_executor`)** — would require auditing whether `collective_rpc` is thread-safe across parallel calls. Phase 8 already keeps RPC < step time with NONBLOCK, so deeper pipelining shouldn't gain much.
 
 ## TL;DR for the morning
