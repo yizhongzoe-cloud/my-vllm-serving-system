@@ -185,6 +185,16 @@ experiments:
     load_levels: ["Light", "Moderate", "Heavy"]
     faults: ["none", "F2_Mid"]
 
+  # NoFT-Reprefill baseline: lightest "don't drop displaced reqs" strategy.
+  # Run as a separate experiment so it can be launched independently.
+  E1a_NoFT_Reprefill:
+  # 12 cells, ~1.5h
+    description: "NoFT-Reprefill baseline (fault_tolerant + no ckpt + reprefill recovery)"
+    baselines: ["NoFT-Reprefill"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
   E1a_Quick_v2_HalfB:
   # 24 cells, ~2.8h on GPU 6-7
     description: "Post-fix re-run Half B (Periodic-High + Our-System) on GPU 6-7"
