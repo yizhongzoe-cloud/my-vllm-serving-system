@@ -1,17 +1,21 @@
 {
   "meta": {
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "gpu": "NVIDIA RTX A6000",
-    "dp_size": 1,
-    "max_model_len": 4096,
+    "gpu": "NVIDIA RTX A5000",
+    "dp_size": 2,
+    "max_model_len": 8192,
     "tpot_slo_ms": 50.0,
-    "planning_horizon_sec": 0.5
+    "planning_horizon_sec": 1.0,
+    "_calibration_note": "Rough estimate from 2026-04-09 runtime observations. Pre-fault steady state: 16-21 concurrent decode reqs per engine. Post-fault surviving engine: 26 concurrent reqs (step time ~35ms, still under TPOT 50ms SLO for most reqs). Residual prefill capacity values retained from A6000 profile as rough approximation — not yet measured on A5000."
   },
   "decode_capacity": {
-    "default": 10,
+    "default": 26,
     "by_avg_ctx_bucket": {
-      "256": 50,
-      "1024": 10
+      "256": 40,
+      "512": 32,
+      "1024": 26,
+      "2048": 18,
+      "4096": 12
     }
   },
   "residual_prefill_capacity": {
@@ -20,6 +24,9 @@
     "4": 13788,
     "6": 13049,
     "8": 13439,
-    "10": 13208
+    "10": 13208,
+    "16": 11500,
+    "20": 10800,
+    "26": 9500
   }
 }
