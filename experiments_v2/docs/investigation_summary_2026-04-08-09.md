@@ -96,9 +96,9 @@ Our-System（ft_benders_centralized + adaptive checkpoint + KV reload recovery�
 | **No-FT** | 丢弃 displaced | 无 | **319.5** | 18.8% | 98.5 | 330.9 |
 | NoFT-Restart | Re-prefill prompt | 无 | 290.1 | 29.4% | 100 | 337.3 |
 | NoFT-Reprefill | Extended prompt | 无 | 291.3 | 29.0% | 100 | 337.3 |
-| **Our-System** | **KV reload** | **Non-blocking** ⭐ | **299.1** | **25.3%** | **100** | **337.3** |
 | Our-System-Restart | Re-prefill prompt | Non-blocking | 47.9 | 87.4% | 98.9 | — |
 | Our-System-Reprefill | Extended prompt | Non-blocking | 39.5 | 88.5% | 99.6 | — |
+| **Our-System** | **KV reload** | **Non-blocking** ⭐ | **299.1** | **25.3%** | **100** | **337.3** |
 
 ### 关键发现
 
