@@ -32,6 +32,7 @@ greedy admission to ensure liveness.
 Activated by setting scheduling_policy="ft_benders" in the engine config.
 """
 
+import os
 from collections.abc import Iterable
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Optional
@@ -263,10 +264,117 @@ class BendersFTSchedulerImpl(SchedulerInterface):
         self._pending_ft_admission.append(request)
         self._base.add_request(request)
 
+    # KV pressure threshold: defer admission when free fraction is below
+    # this value (i.e. usage > 1 - threshold). 0.10 means defer when KV
+    # cache is more than 90% full.
+    #
+    # Solution 3 (admission throttling): both this threshold and the
+    # running-batch cap (_FT_MAX_RUNNING_BATCH) are env-var controllable
+    # so the same code can run as the historical 90 % no-op throttle
+    # OR as the post-fault aggressive throttle that keeps ρ < 1 on the
+    # surviving engine.
+    _KV_FREE_RATIO_FLOOR: float = float(
+        os.environ.get("FT_KV_FREE_RATIO_FLOOR", "0.10")
+    )
+
+    # Solution 3: hard cap on running batch for the surviving engine.
+    # 0 = disabled (default).  When set, the Benders admission path will
+    # refuse to admit new client requests if the base scheduler's running
+    # list already has this many requests, regardless of KV occupancy.
+    # Migrated requests reroute via ft_client (bypassing this gate) and
+    # therefore are NOT throttled — exactly the asymmetry we want during
+    # failover, where migrated work should drain while new arrivals
+    # backpressure to the client.
+    _FT_MAX_RUNNING_BATCH: int = int(
+        os.environ.get("FT_MAX_RUNNING_BATCH", "0")
+    )
+
+    # P0-impl-3a follow-up: how often run_checkpoint_step() runs its
+    # full per-running-request policy iteration. K=1 (default) preserves
+    # existing behavior. K>1 evaluates only every Kth step, trading
+    # checkpoint freshness for ~K× less Python iteration overhead on
+    # the scheduling critical path. The skipped-step KV→host copies
+    # would have happened on later steps anyway since the policy is
+    # mostly time/block based, not per-token.
+    _FT_CHECKPOINT_STEP_INTERVAL: int = max(
+        1, int(os.environ.get("FT_CHECKPOINT_STEP_INTERVAL", "1"))
+    )
+
+    def _kv_pressure_too_high(self) -> bool:
+        """Check whether GPU KV cache is too full to safely admit more.
+
+        Returns True iff the fraction of free KV blocks is below
+        _KV_FREE_RATIO_FLOOR. Benders solver does not consider real-time
+        KV cache occupancy in its capacity model, so we add an explicit
+        post-solver throttle here.
+        """
+        try:
+            block_pool = self._base.kv_cache_manager.block_pool
+            total_blocks = block_pool.num_gpu_blocks - 1  # exclude null
+            if total_blocks <= 0:
+                logger.info(
+                    "BENDERS_KV_THROTTLE: skip check (total_blocks=%d)",
+                    total_blocks,
+                )
+                return False
+            free_blocks = block_pool.get_num_free_blocks()
+            free_ratio = free_blocks / total_blocks
+            triggered = free_ratio < self._KV_FREE_RATIO_FLOOR
+            # P0-impl-3a follow-up: was INFO, demoted to DEBUG (per-step
+            # spam consumed measurable API-server CPU).
+            logger.debug(
+                "BENDERS_KV_THROTTLE: free=%d/%d (%.1f%% used) "
+                "threshold=%.1f%% triggered=%s pending=%d",
+                free_blocks, total_blocks, (1 - free_ratio) * 100,
+                (1 - self._KV_FREE_RATIO_FLOOR) * 100,
+                triggered, len(self._pending_ft_admission),
+            )
+            return triggered
+        except Exception as exc:
+            logger.warning("BENDERS_KV_THROTTLE: check failed: %s", exc)
+            return False
+
+    def _running_batch_too_high(self) -> bool:
+        """Solution 3: hard cap on running batch.
+
+        Returns True iff the cap is enabled (FT_MAX_RUNNING_BATCH > 0)
+        AND the base scheduler already has that many requests in its
+        running list. Used to refuse new admission while leaving the
+        migrated-request reroute path untouched (it goes through a
+        different code path in core.py:add_request).
+        """
+        cap = self._FT_MAX_RUNNING_BATCH
+        if cap <= 0:
+            return False
+        n_running = len(self._base.running)
+        triggered = n_running >= cap
+        if triggered:
+            logger.info(
+                "BENDERS_RUNNING_THROTTLE: running=%d cap=%d "
+                "triggered=True pending=%d",
+                n_running, cap, len(self._pending_ft_admission),
+            )
+        return triggered
+
     def _process_pending_admissions(self) -> None:
         """Replace greedy admission with Benders solver."""
         if not self._pending_ft_admission:
             return
+
+        # KV pressure throttle: defer admission when GPU KV cache is too
+        # full. Benders solver's capacity model is profile-based and does
+        # not see real-time KV occupancy, so without this throttle the
+        # solver over-admits in heavy decode-heavy workloads (W1_Chat/Heavy)
+        # and Running reqs grow until KV saturates at 99-100%.
+        if self._kv_pressure_too_high():
+            return  # leave pending in queue, retry next epoch
+
+        # Solution 3: running-batch cap. Bites BEFORE KV saturates,
+        # preventing the post-fault decode-capacity cascade by refusing
+        # new admissions while migrated requests are draining. No-op
+        # when FT_MAX_RUNNING_BATCH is unset (default).
+        if self._running_batch_too_high():
+            return  # leave pending in queue, retry next epoch
 
         pending = list(self._pending_ft_admission)
         self._pending_ft_admission.clear()
@@ -361,20 +469,94 @@ class BendersFTSchedulerImpl(SchedulerInterface):
                     request.request_id, RequestStatus.FINISHED_ABORTED
                 )
 
+    # ── Dynamic post-fault batch cap (FT_POST_FAULT_MAX_SEQS env var) ────
+    # When set (e.g. FT_POST_FAULT_MAX_SEQS=22), the surviving engine's
+    # max_num_running_reqs is lowered after a fault is detected so that
+    # the base scheduler doesn't let the running batch inflate to 2×.
+    # This keeps input-tensor preparation fast (~16 ms at batch=20 vs
+    # ~25 ms at batch=26, measured via FT_STEP_TIMING_MAX_CALLS).
+    #
+    # The cap restores to the original value after FT_RECOVERY_GRACE_SEC
+    # seconds (default 120 s, long enough for migrated reqs to drain).
+    #
+    # This is different from the static --max-num-seqs flag because:
+    # 1. Only applies POST-FAULT (pre-fault throughput unaffected)
+    # 2. Doesn't reject requests at Benders level (just queues them)
+    # 3. Auto-restores after grace period
+    #
+    # Default: 0 = disabled. Set to the per-engine pre-fault running
+    # batch (e.g. 22 for dp=2 W1/Heavy).
+    _FT_POST_FAULT_MAX_SEQS: int = int(
+        os.environ.get("FT_POST_FAULT_MAX_SEQS", "0")
+    )
+    _FT_RECOVERY_GRACE_SEC: float = float(
+        os.environ.get("FT_RECOVERY_GRACE_SEC", "120")
+    )
+
     def schedule(self) -> "SchedulerOutput":
         """Batch-admit pending requests via Benders, then run base scheduling."""
         self._process_pending_admissions()
 
+        # Dynamic post-fault batch cap.
+        cap = self._FT_POST_FAULT_MAX_SEQS
+        if cap > 0:
+            # Check if any replica is failed.
+            in_recovery = False
+            fault_time = getattr(self, "_ft_fault_time", None)
+            for r in self._all_replica_ids:
+                status = self._ft.failure_detector.get_status(r)
+                if status == ReplicaStatus.FAILED:
+                    if fault_time is None:
+                        import time as _time
+                        self._ft_fault_time = _time.monotonic()
+                        logger.info(
+                            "FT_POST_FAULT_MAX_SEQS: fault detected, "
+                            "capping running batch to %d for %.0fs",
+                            cap, self._FT_RECOVERY_GRACE_SEC,
+                        )
+                    in_recovery = True
+                    break
+
+            if fault_time is not None:
+                import time as _time
+                elapsed = _time.monotonic() - fault_time
+                if elapsed < self._FT_RECOVERY_GRACE_SEC:
+                    in_recovery = True
+                elif in_recovery:
+                    # Grace period expired — restore original cap.
+                    pass
+
+            if not hasattr(self, "_ft_original_max_running"):
+                self._ft_original_max_running = (
+                    self._base.max_num_running_reqs
+                )
+            if in_recovery:
+                self._base.max_num_running_reqs = min(
+                    cap, self._ft_original_max_running,
+                )
+            else:
+                self._base.max_num_running_reqs = (
+                    self._ft_original_max_running
+                )
+
         output = self._base.schedule()
 
         # Adaptive checkpointing (same as baseline).
+        # P0-impl-3a follow-up: optionally throttle the per-step
+        # checkpoint policy iteration. The full Python loop over
+        # running requests is the dominant scheduler overhead vs
+        # upstream fcfs; with K>1 we evaluate only every K steps.
         if self._ft.config.enable_checkpointing:
-            running = self._base.running
-            self._ft.run_checkpoint_step(
-                running_requests=running,
-                gpu_kv_caches=None,
-                kv_cache_manager=self._base.kv_cache_manager,
+            self._ckpt_step_counter = (
+                getattr(self, "_ckpt_step_counter", 0) + 1
             )
+            if self._ckpt_step_counter % self._FT_CHECKPOINT_STEP_INTERVAL == 0:
+                running = self._base.running
+                self._ft.run_checkpoint_step(
+                    running_requests=running,
+                    gpu_kv_caches=None,
+                    kv_cache_manager=self._base.kv_cache_manager,
+                )
 
         return output
 

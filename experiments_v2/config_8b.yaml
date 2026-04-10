@@ -135,6 +135,27 @@ baselines:
     max_gpu_failures: 1
     fixed_checkpoint_blocks: 0
 
+  # Lightest possible "don't drop displaced reqs" baseline:
+  # fault_tolerant scheduler (no Benders solver), no checkpointing,
+  # max_gpu_failures=1 (handle faults). On fault, displaced reqs
+  # have no checkpoint state → recovery re-prefills from scratch.
+  #
+  # Use with FT_RECOVERY_MODE=reprefill to extend the prompt with
+  # already-decoded tokens (preserves stream consistency), or with
+  # the default "reload" mode which degrades to restart (full
+  # re-prefill of original prompt only, since there's no checkpoint
+  # to reload).
+  #
+  # Comparison: No-FT drops displaced reqs entirely (goodput looks
+  # good but loses work). This baseline keeps them at the cost of
+  # re-prefill overhead. Our-System keeps them with KV reload
+  # (faster recovery but has checkpoint overhead).
+  NoFT-Reprefill:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
 # ---- Experiments ----
 experiments:
   E0_Smoke:

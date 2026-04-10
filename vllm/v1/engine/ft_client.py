@@ -1341,6 +1341,17 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         if not self._pending_solver_requests:
             return
 
+        # FT_SKIP_SOLVER=1: bypass Benders solver entirely and go
+        # straight to greedy dispatch. On W1_Chat/Heavy the solver
+        # fails to converge 98 % of the time (profile mismatch —
+        # see e1a_quick_diagnosis.md follow-up #6). Each failed
+        # solve still burns CPU in the bg ThreadPoolExecutor
+        # (cost_table build + cp_model setup + 20 iterations).
+        # Skipping it eliminates that CPU waste entirely. Default off.
+        if os.environ.get("FT_SKIP_SOLVER") == "1":
+            await self._greedy_dispatch_pending()
+            return
+
         # Cold start: no snapshots yet → greedy bootstrap.
         if not self._engine_request_snapshots:
             logger.info(
@@ -1722,6 +1733,28 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             ckpt_tokens = self._checkpoint_tokens.get(req_id, 0)
             cached_request.num_checkpointed_tokens = ckpt_tokens
             cached_request.is_rerouted = True
+
+            # FT_DEPRIORITIZE_MIGRATED=1: reset the rerouted request's
+            # arrival_time to NOW so the SLO-aware scheduler queue
+            # doesn't put it ahead of new arrivals.
+            #
+            # Problem: migrated reqs have old arrival_time → their
+            # ttft_deadline = old_arrival + 2s is ALREADY PAST → slack
+            # is deeply negative → SLO-aware queue sorts them FIRST.
+            # This blocks new arrivals that still have positive slack
+            # (their deadlines haven't expired yet), causing 30+ extra
+            # TTFT violations vs No-FT.
+            #
+            # Fix: pretend the migrated req just arrived. Its new
+            # ttft_deadline = now + 2s → positive slack → sorts AFTER
+            # new arrivals. The migrated req's TTFT SLO is already
+            # violated anyway (can't undo the fault gap), so
+            # deprioritizing it doesn't make things worse for it.
+            #
+            # Default off (preserves current "most-urgent-first"
+            # scheduling semantics).
+            if os.environ.get("FT_DEPRIORITIZE_MIGRATED") == "1":
+                cached_request.arrival_time = time.time()
 
             # Propagate output tokens for sampling penalty restoration.
             prev_out = self._output_tokens.get(req_id)
