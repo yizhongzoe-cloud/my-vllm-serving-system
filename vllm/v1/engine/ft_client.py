@@ -1478,14 +1478,31 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
                         r_id,
                     )
             else:
-                # Rejected by solver — produce terminal ABORT output so
-                # the upper layer (AsyncLLM/output_processor) sees
-                # completion and doesn't hang waiting forever.
+                # Solver says "don't admit this request". Instead of
+                # aborting it (which causes empty_stream errors visible
+                # to the client), fall back to greedy dispatch. The
+                # solver's rejection is based on the decode_capacity
+                # profile which may be miscalibrated for the actual
+                # hardware (e.g. A6000 dp=1 profile on A5000 dp=2),
+                # so rejection is often wrong. Greedy dispatch at
+                # least gives the request a chance to run.
+                #
+                # Previous behavior: abort → EngineCoreOutput with
+                # finish_reason=ABORT → client sees empty stream.
+                # This caused 5-68% completion drops in non-Heavy
+                # cells where the solver occasionally converges.
                 logger.debug(
-                    "Centralized solver rejected %s", req_id
+                    "Centralized solver rejected %s; "
+                    "falling back to greedy dispatch", req_id
                 )
-                self._request_cache.pop(req_id, None)
-                rejected.append(req_id)
+                req.client_index = self.client_index
+                req.current_wave = self.current_wave
+                chosen_engine = self.get_core_engine_for_request(req)
+                await self._send_input(
+                    EngineCoreRequestType.ADD, req, chosen_engine
+                )
+                self.reqs_in_flight[req_id] = chosen_engine
+                dispatched += 1
 
         # Inject terminal ABORT outputs for rejected requests so the
         # upper layer doesn't hang waiting for them.
@@ -1844,6 +1861,38 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             )
             self.reqs_in_flight[req_id] = target
             rerouted += 1
+
+            # ── Incremental recovery (FT_RECOVERY_BATCH_SIZE env var) ──
+            # Instead of rerouting all displaced reqs in one burst
+            # (which inflates the surviving engine's batch from ~20 to
+            # ~26+), send them in batches of N with T-second gaps.
+            # During the gap the surviving engine processes the current
+            # batch + new arrivals at near-normal step rate. Un-rerouted
+            # reqs stay in ft_client memory — they DON'T exist in the
+            # engine at all (no KV, no batch slot, no scheduler entry).
+            #
+            # Key difference from Solution 4 (lazy reload, which failed):
+            # lazy reload sent ALL reqs to the engine and then tried to
+            # throttle inside the scheduler. Freed slots got filled by
+            # new arrivals → no net batch reduction. Incremental recovery
+            # keeps unrerouted reqs OUT of the engine entirely.
+            #
+            # Default: 0 = disabled (all at once, current behavior).
+            _batch_size = int(os.environ.get(
+                "FT_RECOVERY_BATCH_SIZE", "0"))
+            _batch_delay = float(os.environ.get(
+                "FT_RECOVERY_BATCH_DELAY", "5.0"))
+            if (
+                _batch_size > 0
+                and rerouted % _batch_size == 0
+                and rerouted < len(displaced_req_ids)
+            ):
+                logger.info(
+                    "FT_RECOVERY_BATCH: rerouted %d/%d, sleeping "
+                    "%.1fs before next batch",
+                    rerouted, len(displaced_req_ids), _batch_delay,
+                )
+                await asyncio.sleep(_batch_delay)
 
         logger.info(
             "Centralized FT Client: failover complete. "
