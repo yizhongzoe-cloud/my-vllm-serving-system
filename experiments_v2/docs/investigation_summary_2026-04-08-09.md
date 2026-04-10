@@ -59,20 +59,24 @@ Our-System（ft_benders_centralized + adaptive checkpoint + KV reload recovery�
 
 ### Framework overhead 优化（Phase 6-17）
 
-| Phase | 优化 | 结果 | 为什么 |
-|---|---|---|---|
-| 6 | FT_FAST_TMPFS_WRITE (skip fsync) | +5 tok/s | tmpfs 上 fsync 是空操作，省的少 |
-| **7** | **FT_CKPT_NONBLOCK** | **+130 tok/s** ⭐ | 消除 checkpoint pipeline 阻塞 |
-| **8** | **FT_FAST_CHUNK_FORMAT** | **+17 tok/s + 100% completion** ⭐ | 消除 torch.save pickle，NONBLOCK 不再 skip |
-| 9 | Pinned buffer pool | ❌ reverted | Data race: async GPU→host copy 未同步 |
-| 10 | Background publish (ThreadPool) | -28 tok/s | GIL contention |
-| 11 | Inline manifest (v2 chunk format) | within variance | 在 NONBLOCK 后 file ops 不再是 bottleneck |
-| 12 | API server cProfile | 🔍 profiling tool | 发现 cleanup hot spot |
-| 13 | Async cleanup (run_in_executor) | net zero | API server main thread 不是 bottleneck（13% CPU） |
-| 14 | Step timing | 🔍 profiling tool | 发现 section 2 (enqueue prep) 占 62% step time |
-| 15 | Dynamic post-fault batch cap | -49 tok/s | Throughput math: 减 batch = 减 tokens/sec |
-| 16 | Skip Benders solver | within variance | Solver 已经 98% 在 greedy fallback |
-| 17 | Deprioritize migrated reqs | -19 tok/s, -6% completion | Migrated reqs 排队太久 → timeout → 丢失 |
+**攻击目标 = Bug 3 (checkpoint pipeline 同步阻塞)** — goodput 从 120 → 320 的 200 tok/s gap，drop mode 证明不来自 recovery 路径，Our-System-NoCkpt 证明来自 checkpoint controller。cProfile 定位到 `_maybe_ft_checkpoint()` line 740 的 `.result()` 阻塞 + worker 端 `torch.save` + `fsync`。
+
+| Phase | 优化 | 攻击的 bottleneck | 结果 | 为什么 |
+|---|---|---|---|---|
+| 6 | FT_FAST_TMPFS_WRITE (skip fsync) | Worker: fsync on tmpfs (无意义 I/O) | +5 tok/s | fsync 只占 RPC 时间的 ~5%，大头是 torch.save |
+| **7** | **FT_CKPT_NONBLOCK** | **API server: `.result()` 阻塞等 RPC** | **+130 tok/s** ⭐ | 消除了 Bug 3 的阻塞。step rate 从 14/s → 30/s |
+| **8** | **FT_FAST_CHUNK_FORMAT** | **Worker: torch.save pickle 开销 (14ms/chunk)** | **+17 tok/s + 100% completion** ⭐ | raw bytes (8.6ms/chunk) 让 worker RPC 够快，NONBLOCK 不再 skip cycles |
+| 9 | Pinned buffer pool | Worker: pin_memory() syscall (~ms/call) | ❌ reverted | Data race: async GPU→host copy 未同步，buffer 被复用前旧 copy 未完成 |
+| 10 | Background publish (ThreadPool) | Worker: file write 阻塞 RPC return | -28 tok/s | GIL contention: bg thread 的 Python 工作跟 main thread 抢 GIL |
+| 11 | Inline manifest (v2 chunk format) | Worker: 3 file ops → 1 file op per save | within variance | Phase 8 后 file ops 不在 critical path（NONBLOCK 不等 RPC） |
+| 12 | API server cProfile | 🔍 **profiling** | 🔍 发现 cleanup hot spot | `_cleanup_shared_checkpoint` = 35% API server CPU (shutil.rmtree 9ms/unlink) |
+| 13 | Async cleanup (run_in_executor) | API server: rmtree 阻塞 event loop | net zero | API server main thread 只 13% CPU 利用率 — 不是 bottleneck |
+| 14 | Step timing (FT_STEP_TIMING) | 🔍 **profiling** | 🔍 发现 enqueue prep 占 62% | section 2 (schedule + exec launch) = 18.5ms, GPU wait 只 37% |
+| 15 | Dynamic post-fault batch cap | Scheduler: post-fault batch 膨胀 (20→26) | -49 tok/s | Throughput math 走不通: step_rate × batch = net 更低 tokens/sec |
+| 16 | Skip Benders solver | API server: solver bg thread CPU | within variance | Solver 已 98% greedy fallback，CPU 占用可忽略 |
+| 17 | Deprioritize migrated reqs | Scheduler: migrated 排在 new reqs 前面 | -19 tok/s, -6% comp | 推到队尾 → migrated 等太久 → timeout 丢失 28 reqs |
+
+**Phase 7+8 是唯一有效的两步**，对应 Bug 3 的两个组成部分（API server 阻塞 + worker serialize 慢）。Phase 9-17 攻击的都是 **Bug 3 修完后不再是 bottleneck 的位置** — API server idle (13% CPU), scheduler 只 0.6ms/step, file ops 已经 off critical path。
 
 ### Scheduling 策略优化（Phase 18-19）
 
@@ -93,7 +97,6 @@ Our-System（ft_benders_centralized + adaptive checkpoint + KV reload recovery�
 | NoFT-Restart | Re-prefill prompt | 无 | 290.1 | 29.4% | 100 | 337.3 |
 | NoFT-Reprefill | Extended prompt | 无 | 291.3 | 29.0% | 100 | 337.3 |
 | **Our-System** | **KV reload** | **Non-blocking** ⭐ | **299.1** | **25.3%** | **100** | **337.3** |
-| Our-System (bug) | KV reload | Blocking 🐛 | 120.4 | 66.5% | 100 | 337.3 |
 
 ### 关键发现
 
