@@ -91,14 +91,14 @@ Our-System（ft_benders_centralized + adaptive checkpoint + KV reload recovery�
 
 ### 单 seed (s42), W1_Chat / Heavy / F2_Mid
 
-| Strategy | Recovery | Ckpt save | Goodput | TTFT>2s | Comp% | Raw tok/s |
-|---|---|---|---|---|---|---|
-| **No-FT** | 丢弃 displaced | 无 | **319.5** | 18.8% | 98.5 | 330.9 |
-| NoFT-Restart | Re-prefill prompt | 无 | 290.1 | 29.4% | 100 | 337.3 |
-| NoFT-Reprefill | Extended prompt | 无 | 291.3 | 29.0% | 100 | 337.3 |
-| Our-System-Restart | Re-prefill prompt | Non-blocking | 47.9 | 87.4% | 98.9 | — |
-| Our-System-Reprefill | Extended prompt | Non-blocking | 39.5 | 88.5% | 99.6 | — |
-| **Our-System** | **KV reload** | **Non-blocking** ⭐ | **299.1** | **25.3%** | **100** | **337.3** |
+| Strategy | Recovery | Ckpt save | Goodput | TPOT p50 | TPOT p95 | TTFT>2s | Comp% | Raw tok/s |
+|---|---|---|---|---|---|---|---|---|
+| **No-FT** | 丢弃 displaced | 无 | **319.5** | 43.0 | 63.3 | 18.8% | 98.5 | 330.9 |
+| NoFT-Restart | Re-prefill prompt | 无 | 290.1 | 45.1 | 64.9 | 29.4% | 100 | 337.3 |
+| NoFT-Reprefill | Extended prompt | 无 | 291.3 | 45.0 | 64.6 | 29.0% | 100 | 337.3 |
+| Our-System-Restart | Re-prefill prompt | Non-blocking | 47.9 | 85.5 | 140.4 | 87.4% | 98.9 | — |
+| Our-System-Reprefill | Extended prompt | Non-blocking | 39.5 | 86.5 | 180.4 | 88.5% | 99.6 | — |
+| **Our-System** | **KV reload** | **Non-blocking** ⭐ | **299.1** | **47.5** | **65.2** | **25.3%** | **100** | **337.3** |
 
 ### 关键发现
 
