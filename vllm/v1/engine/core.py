@@ -458,6 +458,15 @@ class EngineCore:
         kv_cache_mgr = self.scheduler._base.kv_cache_manager
         still_pending: list[tuple[str, int]] = []
 
+        # FT_ASYNC_RESTORE: when set, all restore_kv_blocks RPCs in this
+        # step enqueue onto a shared worker-side CUDA stream without
+        # per-call sync. We flush the stream once at the end of the
+        # loop, before execute_model reads the restored KV. This turns
+        # N sequential (~5 ms each) syncs into 1, and lets the layer
+        # copies overlap across requests.
+        use_async_restore = os.environ.get("FT_ASYNC_RESTORE") == "1"
+        async_restore_triggered = False
+
         # Build a lookup for NewRequestData so we can patch it.
         new_req_data_by_id = {
             nrd.req_id: nrd
@@ -473,10 +482,17 @@ class EngineCore:
                     still_pending.append((req_id, num_ckpt_tokens))
                     continue
 
-                results = self.collective_rpc(
-                    "restore_kv_blocks",
-                    args=(req_id, target_block_ids),
-                )
+                if use_async_restore:
+                    results = self.collective_rpc(
+                        "restore_kv_blocks",
+                        args=(req_id, target_block_ids, False),
+                    )
+                    async_restore_triggered = True
+                else:
+                    results = self.collective_rpc(
+                        "restore_kv_blocks",
+                        args=(req_id, target_block_ids),
+                    )
 
                 if results and results[0] and results[0] > 0:
                     tokens_restored = results[0]
@@ -530,6 +546,18 @@ class EngineCore:
                 logger.debug(
                     "FT restore failed for request %s (will recompute)",
                     req_id,
+                )
+
+        # FT_ASYNC_RESTORE: flush the shared restore stream exactly once
+        # before execute_model consumes the restored KV. Skipped if no
+        # async restore was triggered (e.g. still_pending on every req).
+        if use_async_restore and async_restore_triggered:
+            try:
+                self.collective_rpc("flush_pending_restore")
+            except Exception:
+                logger.exception(
+                    "FT async restore flush failed — falling back to "
+                    "per-call sync on next step"
                 )
 
         self._ft_pending_restores = still_pending

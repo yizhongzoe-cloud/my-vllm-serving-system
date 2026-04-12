@@ -6858,6 +6858,7 @@ class GPUModelRunner(
         self,
         request_id: str,
         target_block_ids: list[int],
+        sync: bool = True,
     ) -> int:
         """Restore the latest published shared checkpoint generation.
 
@@ -6866,6 +6867,14 @@ class GPUModelRunner(
         falls back to scanning the request directory for chunk files
         and reading the embedded manifest from the highest-generation
         chunk.
+
+        Args:
+            sync: If True (default), sync the CUDA stream before
+                returning, guaranteeing the restored KV is visible on
+                the next kernel launch. If False + FT_ASYNC_RESTORE=1,
+                use the shared restore stream and skip sync — caller
+                must invoke flush_pending_restore() before any kernel
+                that consumes the restored KV (before execute_model).
         """
         latest_path = self._shared_latest_path(request_id)
         request_dir = self._shared_request_dir(request_id)
@@ -6955,7 +6964,25 @@ class GPUModelRunner(
                     )
 
             if torch.cuda.is_available():
-                stream = torch.cuda.Stream()
+                # FT_ASYNC_RESTORE=1: reuse a single shared restore stream
+                # across all restore_kv_blocks calls in a step, and skip
+                # the per-call sync. Caller must call flush_pending_restore()
+                # after the last restore in the batch, before reading the
+                # restored KV (i.e. before execute_model).
+                #
+                # Default OFF: each call creates its own stream and syncs,
+                # matching the original serial behavior.
+                use_async = (
+                    os.environ.get("FT_ASYNC_RESTORE") == "1" and not sync
+                )
+                if use_async:
+                    if getattr(self, "_ft_shared_restore_stream", None) is None:
+                        self._ft_shared_restore_stream = torch.cuda.Stream()
+                    stream = self._ft_shared_restore_stream
+                    self._ft_has_pending_restore = True
+                else:
+                    stream = torch.cuda.Stream()
+
                 with torch.cuda.stream(stream):
                     for chunk_filename, assignments in restore_plan_by_chunk.items():
                         chunk_data = loaded_chunks[chunk_filename]
@@ -6974,7 +7001,8 @@ class GPUModelRunner(
                                 device, non_blocking=True
                             )
                             gpu_tensor[:, target_indices, :, :, :] = src
-                stream.synchronize()
+                if not use_async:
+                    stream.synchronize()
             else:
                 for chunk_filename, assignments in restore_plan_by_chunk.items():
                     chunk_data = loaded_chunks[chunk_filename]
@@ -7171,6 +7199,7 @@ class GPUModelRunner(
         self,
         request_id: str,
         target_block_ids: list[int],
+        sync: bool = True,
     ) -> int:
         """Restore checkpointed KV cache from CPU to GPU.
 
@@ -7181,6 +7210,10 @@ class GPUModelRunner(
         Args:
             request_id: The request whose checkpoint to restore.
             target_block_ids: Block IDs on this GPU to write into.
+            sync: If True (default) sync stream before returning.
+                If False + FT_ASYNC_RESTORE=1, enqueue onto a shared
+                restore stream without syncing — caller must invoke
+                flush_pending_restore() before execute_model.
 
         Returns:
             Number of tokens restored, or 0 if no checkpoint found.
@@ -7189,6 +7222,9 @@ class GPUModelRunner(
             return 0
 
         # Try local pool first (same-engine restore).
+        # Note: local pool path is always synchronous (small same-engine
+        # restores; not worth pipelining). Only the shared /dev/shm
+        # cross-engine path honors `sync=False`.
         if hasattr(self, "_ft_checkpoint_pool"):
             tokens = self._ft_checkpoint_pool.restore_checkpoint(
                 request_id=request_id,
@@ -7199,7 +7235,22 @@ class GPUModelRunner(
                 return tokens
 
         self._ensure_shared_ckpt_dir()
-        return self._restore_shared_checkpoint(request_id, target_block_ids)
+        return self._restore_shared_checkpoint(
+            request_id, target_block_ids, sync=sync,
+        )
+
+    def flush_pending_restore(self) -> None:
+        """FT_ASYNC_RESTORE: sync the shared restore stream.
+
+        Called by EngineCore after a batch of restore_kv_blocks(sync=False)
+        calls in a single step, before execute_model consumes the
+        restored KV. No-op if no restore is pending or the shared stream
+        was never created.
+        """
+        stream = getattr(self, "_ft_shared_restore_stream", None)
+        if stream is not None and getattr(self, "_ft_has_pending_restore", False):
+            stream.synchronize()
+            self._ft_has_pending_restore = False
 
     def get_checkpoint_stats(self) -> dict:
         """Get checkpoint pool statistics."""
