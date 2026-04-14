@@ -1,0 +1,35 @@
+# Project FT-specific Python dependencies (fault-tolerant scheduler + experiments)
+#
+# These are dependencies USED BY this fork's fault-tolerant code (not in
+# upstream vLLM) but were missing from any official requirements file,
+# so a fresh `pip install -e .` would NOT install them.
+#
+# Discovered 2026-04-08 during P0-impl-3a investigation: ortools was missing
+# in the venv, causing the Benders solver in
+# vllm/v1/core/sched/benders/master.py:76 to silently fall back to greedy
+# admission on every Our-System experiment. All historical Our-System data
+# in results_v2/ before commit `<this commit>` may be affected.
+#
+# Install:
+#   pip install -r requirements/ft.txt
+#
+# Verify:
+#   python -c "from ortools.sat.python import cp_model; print('ortools OK')"
+
+# ── Required: Benders solver (ft_benders / ft_benders_centralized policies) ──
+# Used by:
+#   vllm/v1/core/sched/benders/master.py            (admission MIP)
+#   vllm/v1/core/sched/benders/recovery_checker.py  (recovery subproblem)
+# Without this, BendersFTSchedulerImpl silently falls back to greedy admission.
+ortools>=9.10
+
+# ── Required: experiments_v2/run.py (single-cell benchmark runner) ──
+# Already pulled in by requirements/cuda.txt, listed here for completeness.
+aiohttp>=3.0
+numpy>=1.20
+pyyaml>=6.0
+
+# ── Optional: experiments_v2/md_to_pdf.py (results.md → PDF report) ──
+# Used only by the post-experiment report generator. Skipped for headless
+# benchmark runs.
+weasyprint>=60.0
