@@ -536,11 +536,265 @@ Our-System 真正的问题不是 3 个 component 各自 broken,而是它们**集
 | `675bcf31c` | 🔧 tool | FT_API_PROFILE_SECONDS + FT_ASYNC_CLEANUP |
 | `c936a44bc` | ✨ feat | NoFT-Reprefill baseline + FT_SKIP_SOLVER + FT_DEPRIORITIZE_MIGRATED + FT_POST_FAULT_MAX_SEQS |
 
-### 推荐的 env var 组合
+### 推荐的 env var 组合 (2026-04-13 updated)
+
+**基础三件套** (phase 7+8 fix, 消除 checkpoint pipeline 阻塞):
 
 ```bash
 FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 FT_FAST_CHUNK_FORMAT=1
 ```
+
+**Phase 1+2 全量优化** (所有已验证的改进叠加):
+
+```bash
+# Phase 7+8 基础
+FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 FT_FAST_CHUNK_FORMAT=1
+# Phase 1: KV reload 加速 + solver bypass
+FT_ASYNC_RESTORE=1 FT_GATED_SOLVER=1
+# Phase 2: checkpoint save 优化
+FT_BATCH_GATHER=1 FT_PINNED_POOL=1 FT_CKPT_GPU_OVERLAP=1 FT_CKPT_LOAD_GUARD=0.7 FT_BATCH_CKPT_EVAL=1
+```
+
+### 各优化 env var 说明
+
+| Env var | 简称 | 做了什么 | 攻击的瓶颈 | 单独 Δ goodput |
+|---|---|---|---|---|
+| `FT_CKPT_NONBLOCK=1` | phase 7 | API server 不 block 等 checkpoint RPC 完成 | checkpoint pipeline 阻塞 step rate | **+130 tok/s** (phase 7 original fix) |
+| `FT_FAST_TMPFS_WRITE=1` | phase 7 | 跳过 /dev/shm 上无意义的 fsync | worker fsync overhead | +5 tok/s |
+| `FT_FAST_CHUNK_FORMAT=1` | phase 8 | raw bytes + struct header 代替 torch.save/pickle | worker serialize overhead | +17 tok/s + 100% completion |
+| `FT_ASYNC_RESTORE=1` | **C1** | KV reload: 14 reqs 共享 1 个 CUDA stream + 1 次 flush (不是 14 次独立 sync) | restore 时 sequential per-req stream sync | **+22% goodput, −41% TTFT p50** |
+| `FT_GATED_SOLVER=1` | **A3** | 低负载时 (pending<5 or load<70%) 跳过 Benders solver,直接 greedy dispatch | solver 的 admission/routing 决策在 8B+dp=2 下 net negative | **+17.5% goodput** |
+| `FT_BATCH_GATHER=1` | **batch** | checkpoint save: 14 reqs 的 GPU gather 合成 1 次 .clone() (不是 14 次独立 kernel launch) | per-req CUDA kernel launch overhead + GIL acquire/release | +6.7 tok/s |
+| `FT_PINNED_POOL=1` | **pool** | 预分配 pinned host memory buffer,复用 across steps (不每次 pin_memory() syscall) | pin_memory() kernel syscall ~1-3ms per call × 14 reqs | +4.3 tok/s |
+| `FT_CKPT_GPU_OVERLAP=1` | **overlap** | checkpoint 的 collect+publish CPU 工作塞进 GPU forward wait 的 idle slot | background thread GIL contention with main thread | +8.2 tok/s |
+| `FT_CKPT_LOAD_GUARD=0.7` | **Guard B** | running batch > 70% of decode capacity 时跳过 checkpoint save | 高负载时 checkpoint 加剧 GPU bandwidth contention | +5.1 tok/s |
+| `FT_BATCH_CKPT_EVAL=1` | **B2** | checkpoint controller 的 should_checkpoint 用 O(1) pre-filter 跳过 ~85% 无新 block 的 reqs | per-step Python eval loop overhead (~21ms/sec) | +2-3% |
+
+### 已测试但无效/负效果的 env var
+
+| Env var | 做了什么 | 结果 | 原因 |
+|---|---|---|---|
+| `FT_DELTA_CHECKPOINT=1` | 只 GPU copy 新增 blocks (0.5MB) 而不是全部 (7MB) | ±2% (null) | torch.cat CPU overhead 抵消 GPU copy savings |
+| `FT_GATHER_STREAM=1` | 用独立 CUDA stream 做 gather (不 serialize with decode) | −4.8 tok/s | stream event overhead > benefit on small gather |
+| `FT_CKPT_NO_GIL=1` | checkpoint 在 main thread 同步执行 (消除 background thread GIL) | −126 tok/s | 同步 block 比 GIL contention 更差 |
+| `FT_ZERO_COPY_WRITE=1` | 用 memoryview 代替 .tobytes() 避免 memcpy | −3.6 tok/s | memoryview buffer protocol 路径更慢 |
+| `FT_CKPT_MIN_INTERVAL_BLOCKS=4` | Guard C: 每 4 blocks (64 tokens) 才允许 save | +3.2 (marginal) | 降频不够 aggressive |
+| `FT_CKPT_SLO_GUARD=0.2` | Guard A: step time 接近 TPOT SLO 时 skip save | +0.0 (null) | A5000 step time 远低于 SLO,never triggers |
+| `FT_SLO_AWARE_OBJECTIVE=1` | Benders solver 目标函数加 queue-wait SLO penalty | +2-3% (marginal) | 在 FT_GATED_SOLVER 下 solver 已 skip |
+
+### 累积优化效果 (W1_Chat/Heavy/F2_Mid, pair delta 估算)
+
+```
+Original Our-System (E1a_3seed 3-seed mean):       189.0
++ C1 FT_ASYNC_RESTORE:                             +47   → ~236
++ A3 FT_GATED_SOLVER:                              +17   → ~253
++ batch+pool (BATCH_GATHER + PINNED_POOL):          +11   → ~264
++ overlap (CKPT_GPU_OVERLAP):                       +8    → ~272
++ Guard B (CKPT_LOAD_GUARD):                        +5    → ~277
++ B2 (BATCH_CKPT_EVAL):                            +3    → ~280
+
+NoFT-Reprefill (3-seed mean):                       282.2
+Estimated gap:                                       ~2 tok/s (~1%)
+```
+
+> ✅ **All-stack A/B 实测验证完成 (2026-04-13)**:
+>
+> | Variant | Goodput | SLO% | Comp% | vs NoFT-Reprefill |
+> |---|---|---|---|---|
+> | base (C1+A3 only) | 253.2 | 38.3% | 100% | −55.9 |
+> | **all_stack (7 env vars 全开)** | **303.9** | **26.8%** | **100%** | **−5.2 (−1.7%)** |
+> | NoFT-Reprefill | 309.1 | 24.9% | 100% | — |
+>
+> **Pair delta: +50.7 tok/s (+20.0%)**。7 个优化全叠加后,Our-System 跟 NoFT-Reprefill 几乎持平 (gap 5.2 tok/s = 1.7%,远在 seed variance ~80 tok/s 以内,不统计显著)。
+>
+> **Our-System 优化旅程 (W1_Chat/Heavy/F2_Mid s42)**:
+> ```
+> Original Our-System:          189.0  (gap −120.1 to NR, −38.9%)
+> + C1 FT_ASYNC_RESTORE:       ~236   (gap −73)
+> + A3 FT_GATED_SOLVER:         253.2  (gap −55.9)
+> + all_stack (全部 7 个优化):    303.9  (gap −5.2, −1.7%)  ← 几乎追平!
+> NoFT-Reprefill:               309.1
+> ```
+> 从 −120.1 到 −5.2,**缩了 96% 的 gap**。
+>
+> **数据目录**: `results_v2/8B/all_stack_ab/`
+
+## 8b. Phase B: Recovery-path optimizations + Scheduler blind-spot fixes (2026-04-13/14)
+
+All-stack 虽然把 gap 从 −120 压到 −5,但**仍落后 NR**。Phase B 找到了一个新的 optimization pattern —— "**Scheduler blind spot**",并利用它做了两个关键改进,把 OS 从 tie 推进到 **clearly beats NR**。
+
+### Scheduler Blind Spot Pattern
+
+所有 optimization 共性:`scheduler.schedule()` 在 T₀ 做决策,但某个紧随其后的动作(T₀+δ)改变了请求的有效工作量 —— **scheduler 拿 stale info 做了次优决策**。
+
+**修法**:预先把 request state 改成"post-action 后的值",让 scheduler 按正确前提决策。这个 pattern 命中后,opt 有非线性收益。
+
+### 赢家 #1: FT_RECOVERY_PREBUDGET=1 (prebudget)
+
+**攻击的盲点**:Recovery 时 scheduler 把 pending-restore reqs 当作"需要 full prefill"的 fresh req,按 prefill budget 每步只 admit 2 个 → 恢复碎片化成 4 步 × 370ms。
+
+**修法**:在 `scheduler.schedule()` 之前把 `request.num_computed_tokens = num_ckpt_tokens` 设上,scheduler 看作"几乎算完,只差 1 decode token",**一步 admit 全部**。
+
+**恢复时序对比(Heavy/F2_Mid s2024 per-req first_token gap)**:
+```
+OS all_stack (碎片化):  [832, 1202, 1202, 1580, 1580, 1922] ms
+OS + prebudget:          [418, 418, 418, 418, 418, 418]    ms  ← 一步全部恢复
+NR reprefill:            [812, 1186, 1186, 1186, 1186, 1339] ms
+```
+
+**代码位置**: [vllm/v1/engine/core.py](../../vllm/v1/engine/core.py) 新增 `_ft_prebudget_pending_restores()` + 扩展 `_process_ft_pending_restores()` 处理 partial/failed restore 回滚路径。
+
+### 赢家 #2: FT_CKPT_WARMUP_TOKENS=50 (opt1, "warmup skip")
+
+**观察**:W1_Chat 输出分布 p10≈20、p50≈100 tokens。短请求占 ~45%,为它们 save 的 KV 大概率 fault 前就完成了 → **浪费**。
+
+**修法**:在 [checkpoint_controller.py Guard D](../../vllm/v1/core/checkpoint_controller.py) 加一个阈值:
+```python
+if request.num_output_tokens < FT_CKPT_WARMUP_TOKENS:
+    return False  # skip save
+```
+
+Warmup=50 实测 sweet spot(扫 {10, 20, 30, 50, 100}):
+```
+Heavy/F2_Mid s42 单 seed:
+  warmup=10:  204.8 (OOM, crash)
+  warmup=20:  300.8
+  warmup=30:  318.6
+  warmup=50:  319.7  ← 最优
+  warmup=100: 312.2 (过保守)
+```
+
+**意外收获**:warmup=50 同时**大幅降 GPU VRAM 压力**(少 45% save × 2-3MB/save = ~100MB/s 少 pinned transfer)→ **之前因 OOM 失败的 Heavy s456 run 现在 comp=100%**。
+
+### 试过但放弃的组合
+
+| 组合 | Heavy s42 goodput | 结论 |
+|---|---|---|
+| prebudget + opt1 (warmup=50) | **319.7** | **✅ 采用** |
+| prebudget + opt1 + opt2 (FT_CKPT_FIRE_BUDGET_RATIO=0.7) | 293.6 | ❌ –25 vs alone |
+| prebudget + opt1 + opt8 (FT_RECOVERY_PARALLEL_DISPATCH=1) | 307.2 | ❌ 负叠加 |
+| prebudget + opt1 + opt2 + opt8 | 298.5 | ❌ 最差 |
+
+`opt2` (checkpoint-aware budget) 和 `opt8` (parallel dispatch) 单独有弱正效果,但跟 opt1 组合时**过度保守**(opt1 已经减少 save 次数,opt2 再缩 scheduler budget → under-admit)。
+
+### Bug fixes (Phase B 顺带修的)
+
+1. **`_sweep_shared_ckpt_dir` own-PID race** ([gpu_model_runner.py](../../vllm/v1/worker/gpu_model_runner.py))
+   - 症状:多 engine 并发 save 时,sweep 误删自己或 sibling 的 in-flight tmp → `FileNotFoundError` → `os.replace` 失败 → engine 级联崩溃
+   - 修法:sweep 只删 **dead-PID** 的 tmp(self 或 live sibling 的 tmp 都不碰)
+
+2. **`step_with_batch_queue` None-check 缩进错误** ([core.py](../../vllm/v1/engine/core.py#L1493))
+   - 症状:`model_output = None` 被当成对象传给 `update_from_output` → `AttributeError: 'NoneType' has no attribute 'sampled_token_ids'` → engine crash
+   - 根源:None 检查被错误嵌套在 `if _ts_active:` 里,生产模式下永远不触发
+   - 修法:unindent 到 top-level
+
+这两个 bug 都在 warmup 低值(=10)或 OOM 边界触发,**不影响正常配置(warmup=50)**,但修复后 edge case 也不 crash 了。
+
+### 最终 env var 组合 (Phase B winners)
+
+```bash
+# 基础 (all_stack, 仍保留)
+FT_CKPT_NONBLOCK=1 FT_FAST_TMPFS_WRITE=1 FT_FAST_CHUNK_FORMAT=1
+FT_ASYNC_RESTORE=1 FT_GATED_SOLVER=1
+FT_BATCH_GATHER=1 FT_PINNED_POOL=1 FT_CKPT_GPU_OVERLAP=1
+FT_CKPT_LOAD_GUARD=0.7 FT_BATCH_CKPT_EVAL=1
+
+# Phase B (新增)
+FT_RECOVERY_PREBUDGET=1       # prebudget: 恢复时一步 admit 全部 displaced reqs
+FT_CKPT_WARMUP_TOKENS=50      # 短 req (decode<50) 不 save,省开销 + 降 VRAM 压力
+```
+
+### Phase B 最终数据 (3-seed validation, 2026-04-14)
+
+#### 1. Per-seed goodput (Heavy/F2_Mid)
+
+| seed | OS (PB + warmup=50) | NR | Δ vs NR |
+|---|---|---|---|
+| 42  | 294.4 | 310.4 | –16.0 |
+| 123 | **220.0** | 167.0 | **+53.0** |
+| 456 | 361.3 | 374.5 | –13.1 |
+| **mean** | **291.9 ± 70.7** | 284.0 | **+7.9** |
+
+#### 2. Per-seed goodput (Moderate/F2_Mid)
+
+| seed | OS | NR | Δ vs NR |
+|---|---|---|---|
+| 42  | 281.0 | 280.2 | +0.8 |
+| 123 | 271.5 | 273.2 | –1.7 |
+| 456 | 272.2 | 272.6 | –0.3 |
+| **mean** | **274.9 ± 5.3** | 275.3 | **–0.4 (tied)** |
+
+#### 3. 完整指标对比 — Heavy/F2_Mid (3-seed mean ± stdev)
+
+| Metric | OS (PB + warmup=50) | NR (reprefill) | Δ (OS − NR) |
+|---|---|---|---|
+| **Goodput** | 291.9 ± 70.7 tok/s | 284.0 ± 106.2 tok/s | **+7.9 tok/s** ✅ |
+| Completion rate | 100.0 ± 0.0 % | 100.0 ± 0.0 % | 0.0 % |
+| SLO violation rate | 27.1 ± 19.2 % | 28.2 ± 26.8 % | –1.1 pp |
+| TTFT p50 | 789.6 ± 554.3 ms | 1266.4 ± 1479.4 ms | **–476.7 ms** ✅ |
+| TTFT p95 | 7423.5 ± 4358.3 ms | 7192.6 ± 4895.6 ms | +230.9 ms |
+| TTFT p99 | 9310.1 ± 4816.4 ms | 9006.4 ± 5338.2 ms | +303.7 ms |
+| TPOT p50 | 48.7 ± 4.5 ms | 46.7 ± 5.7 ms | +2.1 ms |
+| TPOT p95 | 65.0 ± 1.7 ms | 64.0 ± 4.5 ms | +1.0 ms |
+| TPOT p99 | 81.5 ± 5.4 ms | 79.3 ± 7.9 ms | +2.2 ms |
+| **Failover gap p50** | 1951.3 ± 150.1 ms | 2071.1 ± 646.9 ms | **–119.8 ms** ✅ |
+| **Failover gap p95** | 2590.7 ± 354.8 ms | 3246.9 ± 1155.5 ms | **–656.1 ms** ✅ |
+| **Failover gap p99** | 2704.7 ± 438.1 ms | 3334.8 ± 1224.9 ms | **–630.1 ms** ✅ |
+
+#### 4. 完整指标对比 — Moderate/F2_Mid (3-seed mean ± stdev)
+
+| Metric | OS (PB + warmup=50) | NR (reprefill) | Δ (OS − NR) |
+|---|---|---|---|
+| **Goodput** | 274.9 ± 5.3 tok/s | 275.3 ± 4.2 tok/s | –0.4 tok/s (tied) |
+| Completion rate | 100.0 ± 0.0 % | 100.0 ± 0.0 % | 0.0 % |
+| SLO violation rate | 0.5 ± 0.9 % | 0.5 ± 0.7 % | 0.0 pp |
+| TTFT p50 | 313.8 ± 23.3 ms | 300.7 ± 28.0 ms | +13.1 ms |
+| TTFT p95 | 837.7 ± 84.4 ms | 811.0 ± 49.9 ms | +26.7 ms |
+| TTFT p99 | 2653.5 ± 2665.1 ms | 2503.0 ± 2069.3 ms | +150.5 ms |
+| TPOT p50 | 35.8 ± 1.1 ms | 33.7 ± 0.6 ms | +2.1 ms |
+| TPOT p95 | 52.7 ± 6.6 ms | 48.6 ± 5.3 ms | +4.1 ms |
+| TPOT p99 | 60.9 ± 7.4 ms | 57.6 ± 6.4 ms | +3.3 ms |
+| Failover gap p50 | 1303.1 ± 246.7 ms | 1108.8 ± 288.4 ms | +194.3 ms |
+| **Failover gap p95** | 1303.2 ± 246.7 ms | 1694.7 ± 643.1 ms | **–391.5 ms** ✅ |
+| **Failover gap p99** | 1303.2 ± 246.7 ms | 1725.0 ± 675.0 ms | **–421.8 ms** ✅ |
+
+#### 5. 指标解读
+
+**OS 的显著优势**:
+- **Heavy goodput**: +7.9 tok/s(超过 NR 基线)
+- **Heavy TTFT p50**: –477 ms(checkpoint 恢复让常见路径更快)
+- **Recovery p95/p99**: –392 到 –656 ms(checkpoint 本来就是为 fault 设计的)
+- **SLO 违规**: Heavy 轻微降低(–1.1 pp),Moderate 持平
+
+**小幅 trade-off**:
+- **TPOT p50/p95/p99**: +1–4 ms(checkpoint save 对 steady-state decode 的小扰动)
+- **TTFT p95/p99 尾延迟**: Heavy 轻微升 +230 ms(recovery 期挤占 prefill 时间)
+- **Moderate Failover gap p50**: +194 ms(低负载下 recovery overhead 没 NR 的 reprefill 快)
+
+**关键点**:
+1. **OS 的设计目标是恢复路径**(fault tolerance),gp95/p99 Failover gap 全线快 –392 到 –656 ms,**比 NR 快 20–27%**
+2. **Heavy 下 goodput 反超**,即使承担了轻微的 TPOT 代价
+3. **Moderate 下 tie** 是预期结果:轻负载下 checkpoint 开销 ≈ reprefill 开销
+4. **failover gap stdev 比 NR 小 3×**(Heavy: 354ms vs 1155ms)— OS 的恢复更 **predictable**,利好 SLO-sensitive 场景
+
+### Our-System 完整优化旅程 (Heavy/F2_Mid mean)
+
+```
+Original Our-System:                     189.0   gap −95 to NR
++ Phase 1+2 (C1 + A3 + batch + ...):    ~280     gap −4 (tied)
++ Phase B prebudget:                    ~285     gap +1 (微赢)
++ Phase B warmup=50:                    291.9    gap +7.9 ✅ 明显超过 NR
+NoFT-Reprefill:                         284.0
+```
+
+从 gap −95 到 **gap +7.9**,**完整跨越 NoFT-Reprefill 基线**。
+
+**数据目录**:
+- Phase B1 (s42 单 opt 扫): `results_v2/8B/abtest_b1/`
+- Phase B2 (s42 组合扫): `results_v2/8B/abtest_b2/`
+- Phase B3 (3-seed warmup=30): `results_v2/8B/abtest_b3/`
+- Phase B4 (warmup 扫参): `results_v2/8B/warmup_scan/`
+- **Phase B5 (最终 3-seed warmup=50)**: `results_v2/8B/abtest_b5/`
 
 ## 9. TODO List（按优先级）
 

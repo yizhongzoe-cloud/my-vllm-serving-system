@@ -6193,10 +6193,45 @@ class GPUModelRunner(
                 continue
             rank_local_files = [name for name in filenames if rank_tag in name]
 
+            # Only remove tmp files owned by a DEAD process. Tmp naming
+            # scheme: "{final}.tmp.{pid}.{time_ns}".
+            #
+            # Earlier fix (2026-04-13) skipped other-live-PID tmps but still
+            # deleted own-PID tmps. Warmup-scan bug (2026-04-14) showed that
+            # warmup values create "save bursts" where many reqs queue their
+            # first save simultaneously — if sweep runs mid-burst, it can
+            # delete our OWN in-flight tmp (from another thread) and race
+            # our os.replace. Result: FileNotFoundError → subsequent OOM
+            # from leaked GPU buffers.
+            #
+            # Safe rule: a tmp file with a live owner (self OR sibling)
+            # should never be deleted here. Only dead-PID orphans are swept.
+            own_pid = os.getpid()
             for name in filenames:
                 if ".tmp" not in name:
                     continue
                 tmp_path = os.path.join(request_dir, name)
+                # Parse pid from "<final>.tmp.<pid>.<time_ns>".
+                tmp_pid = None
+                try:
+                    tail = name.rsplit(".tmp.", 1)[1]
+                    tmp_pid = int(tail.split(".", 1)[0])
+                except (IndexError, ValueError):
+                    pass
+                if tmp_pid is not None:
+                    if tmp_pid == own_pid:
+                        # Own in-flight write (another thread in same
+                        # process) — never delete.
+                        continue
+                    try:
+                        os.kill(tmp_pid, 0)  # signal 0 = check existence
+                        # Sibling worker in flight — skip.
+                        continue
+                    except ProcessLookupError:
+                        pass  # dead process, safe to remove
+                    except PermissionError:
+                        # Different user — not ours; leave it alone.
+                        continue
                 try:
                     os.remove(tmp_path)
                 except FileNotFoundError:
@@ -6445,24 +6480,80 @@ class GPUModelRunner(
 
         tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+        # FT_NOGIL_WRITE=1 (default OFF): use ctypes-based GIL-free
+        # write path. All file IO goes through libc write() via ctypes,
+        # which releases GIL during the syscall. The 32-layer for-loop
+        # and .tobytes() memcpy are eliminated — tensor data_ptr() is
+        # passed directly to write(). This removes ~2-3ms of GIL hold
+        # time per checkpoint cycle that causes main thread delays.
+        if os.environ.get("FT_NOGIL_WRITE") == "1":
+            from vllm.v1.worker.checkpoint_write_ext import fast_write_chunk
+
+            # Prepare manifest padded bytes
+            manifest_padded = b""
+            if manifest_payload:
+                pad = (-len(manifest_payload)) % 8
+                manifest_padded = manifest_payload + (b"\x00" * pad if pad else b"")
+
+            # Prepare layer tensors (contiguous, handle bf16)
+            tensors = []
+            for li in layer_indices:
+                t = chunk_tensors[li]
+                if not t.is_contiguous():
+                    t = t.contiguous()
+                if t.dtype == torch.bfloat16:
+                    t = t.view(torch.int16)
+                tensors.append(t)
+
+            fast_write_chunk(tmp_path, final_path, header, manifest_padded, tensors)
+            return
+
+        # FT_MERGE_LAYER_WRITE=1: concatenate all 32 layers into one
+        # tensor, then 1× tobytes + 1× write instead of 32× each.
+        # Reduces GIL acquire/release from 96 ops to ~35 ops per chunk.
+        if os.environ.get("FT_MERGE_LAYER_WRITE") == "1":
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(header)
+                    if manifest_payload:
+                        f.write(manifest_payload)
+                        pad = (-len(manifest_payload)) % 8
+                        if pad:
+                            f.write(b"\x00" * pad)
+                    # Prepare all layers (handle bf16 + contiguous)
+                    prepared = []
+                    for li in layer_indices:
+                        t = chunk_tensors[li]
+                        if not t.is_contiguous():
+                            t = t.contiguous()
+                        if t.dtype == torch.bfloat16:
+                            t = t.view(torch.int16)
+                        prepared.append(t.reshape(-1))
+                    # 1× cat + 1× tobytes + 1× write (vs 32× each)
+                    all_data = torch.cat(prepared)
+                    f.write(all_data.numpy().tobytes())
+                    if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                        f.flush()
+                        os.fsync(f.fileno())
+                os.replace(tmp_path, final_path)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+            return
+
+        # Original Python path (fallback)
         try:
             with open(tmp_path, "wb") as f:
                 f.write(header)
                 if manifest_payload:
                     f.write(manifest_payload)
-                    # Pad inlined manifest to 8-byte alignment so
-                    # tensor bytes start at a clean boundary.
                     pad = (-len(manifest_payload)) % 8
                     if pad:
                         f.write(b"\x00" * pad)
-                # Write each layer's contiguous bytes directly.
-                # numpy().tobytes() works for fp16/fp32 (~0.5ms per
-                # 200KB layer = ~16ms total per chunk). For bf16 we
-                # reinterpret as int16 first since numpy lacks bf16
-                # support but the byte layout is identical.
-                # NOTE: bytes(untyped_storage()) is ~900x slower
-                # because it iterates element-by-element through
-                # Python int conversion — DO NOT use it.
                 for li in layer_indices:
                     t = chunk_tensors[li]
                     if not t.is_contiguous():
@@ -6730,6 +6821,13 @@ class GPUModelRunner(
         entry: Any,
     ) -> tuple[int, int]:
         """Publish new stable full blocks to the shared checkpoint store."""
+        # FT_CKPT_SKIP_PUBLISH=1: skip /dev/shm file writes.
+        # Ablation: isolate GPU gather+copy cost from file IO cost.
+        if os.environ.get("FT_CKPT_SKIP_PUBLISH") == "1":
+            block_size = self.cache_config.block_size
+            size = self._estimate_kv_bytes_for_blocks(len(entry.block_ids))
+            return size, entry.num_tokens
+
         state = self._load_shared_ckpt_state(request_id)
         block_size = self.cache_config.block_size
         stable_full_blocks = min(
@@ -7041,6 +7139,182 @@ class GPUModelRunner(
             )
             return 0
 
+    def _batch_gather_checkpoint(
+        self,
+        request_block_map: list[tuple[str, list[int], int]],
+    ) -> list[tuple[str, "Any", int]]:
+        """FT_BATCH_GATHER: single GPU gather + single pinned alloc for all reqs.
+
+        Instead of N separate save_checkpoint() calls (N kernel launches +
+        N pin_memory syscalls), this method:
+          1. Concatenates all block_ids into one tensor
+          2. ONE .clone() gather on GPU (1 kernel launch for all reqs)
+          3. ONE pinned memory allocation (1 syscall)
+          4. ONE async copy GPU→host
+          5. Splits result back to per-req CheckpointEntry objects
+
+        Returns same format as the per-req path: list of (req_id, entry, num_tokens).
+        """
+        from vllm.v1.core.kv_checkpoint_pool import CheckpointEntry
+
+        if not request_block_map:
+            return []
+
+        device = self.kv_caches[0].device
+        sample = self.kv_caches[0]
+        num_layers = len(self.kv_caches)
+
+        # Step 1: concatenate all block_ids
+        all_block_ids: list[int] = []
+        req_slices: list[tuple[str, int, int, int]] = []  # (req_id, start, end, num_tokens)
+        for request_id, block_ids, num_tokens in request_block_map:
+            start = len(all_block_ids)
+            all_block_ids.extend(block_ids)
+            end = len(all_block_ids)
+            req_slices.append((request_id, start, end, num_tokens))
+
+        if not all_block_ids:
+            return []
+
+        total_blocks = len(all_block_ids)
+
+        # Fix Issue 4: filter out-of-range block_ids
+        num_kv_blocks = sample.shape[1]
+        valid_mask = [0 <= bid < num_kv_blocks for bid in all_block_ids]
+        if not all(valid_mask):
+            logger.warning(
+                "Batch gather: %d/%d block IDs out of range, filtering",
+                sum(1 for v in valid_mask if not v), total_blocks,
+            )
+            # Rebuild with valid only — but this changes per-req slices,
+            # so fall back to per-req path for safety
+            return []
+
+        all_indices_gpu = torch.tensor(
+            all_block_ids, dtype=torch.int64, device=device
+        )
+
+        # Step 2: ONE gather .clone()
+        # FT_GATHER_STREAM=1: use a dedicated CUDA stream for the gather,
+        # so it doesn't serialize with decode kernels on the default stream.
+        # The gather reads OLD KV blocks (already written by previous decode
+        # steps), while decode writes NEW blocks — no data hazard.
+        use_gather_stream = os.environ.get("FT_GATHER_STREAM") == "1"
+        if use_gather_stream:
+            if not hasattr(self, "_ft_gather_stream"):
+                self._ft_gather_stream = torch.cuda.Stream()
+            gather_ctx = torch.cuda.stream(self._ft_gather_stream)
+        else:
+            from contextlib import nullcontext
+            gather_ctx = nullcontext()
+
+        gpu_buffers: dict[int, torch.Tensor] = {}
+        with gather_ctx:
+            for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                gpu_buffers[layer_idx] = gpu_tensor[
+                    :, all_indices_gpu, :, :, :
+                ].clone()
+
+        # Step 3: ONE pinned allocation (1 syscall!) or reuse pool
+        out_shape = (sample.shape[0], total_blocks) + sample.shape[2:]
+        pinned_buffers: dict[int, torch.Tensor] = {}
+        using_pool = False
+
+        # FT_PINNED_POOL: reuse a pre-allocated pinned buffer.
+        # IMPORTANT: when using pool, per-req slices are VIEWS into the
+        # shared buffer. We must .clone() them before storing in entries,
+        # otherwise next step's gather overwrites the data. The clone
+        # happens on CPU (cheap, ~0.2ms for 7MB) and is the price for
+        # eliminating the pin_memory() syscall.
+        pool_key = "_ft_batch_pinned_pool"
+        reuse_pool = os.environ.get("FT_PINNED_POOL") == "1"
+
+        if reuse_pool:
+            existing = getattr(self, pool_key, None)
+            if existing is not None and existing[0].shape[1] >= total_blocks:
+                for layer_idx in range(num_layers):
+                    pinned_buffers[layer_idx] = existing[layer_idx][
+                        :, :total_blocks
+                    ]
+                using_pool = True
+            else:
+                pool_size = max(total_blocks, 128)
+                pool_shape = (sample.shape[0], pool_size) + sample.shape[2:]
+                new_pool = {}
+                for layer_idx in range(num_layers):
+                    new_pool[layer_idx] = torch.empty(
+                        pool_shape, dtype=sample.dtype, device="cpu"
+                    ).pin_memory()
+                    pinned_buffers[layer_idx] = new_pool[layer_idx][
+                        :, :total_blocks
+                    ]
+                setattr(self, pool_key, new_pool)
+                using_pool = True
+
+        if not using_pool:
+            for layer_idx in range(num_layers):
+                pinned_buffers[layer_idx] = torch.empty(
+                    out_shape, dtype=sample.dtype, device="cpu"
+                ).pin_memory()
+
+        # Step 4: ONE async copy (copy stream)
+        # Fix Issue 5: safe access to copy stream
+        pool = self._ft_checkpoint_pool
+        if hasattr(pool, "_get_copy_stream"):
+            copy_stream = pool._get_copy_stream()
+        else:
+            copy_stream = torch.cuda.Stream()
+
+        # Record event on the stream where gather happened, so copy
+        # stream waits for gather to complete before reading gpu_buffers.
+        if use_gather_stream:
+            event = self._ft_gather_stream.record_event()
+        else:
+            event = torch.cuda.current_stream(device).record_event()
+        with torch.cuda.stream(copy_stream):
+            copy_stream.wait_event(event)
+            for layer_idx in range(num_layers):
+                pinned_buffers[layer_idx].copy_(
+                    gpu_buffers[layer_idx], non_blocking=True
+                )
+
+        # Step 5: split back to per-req entries
+        # Fix Issue 1: when using pinned pool, .clone() per-req slice
+        # to avoid data race when pool buffer is overwritten next step.
+        # When NOT using pool, the pinned_buffers tensor is unique to
+        # this call and won't be overwritten, so view is safe.
+        entries: list[tuple[str, "Any", int]] = []
+        for request_id, start, end, num_tokens in req_slices:
+            entry = CheckpointEntry(
+                request_id=request_id,
+                block_ids=all_block_ids[start:end],
+                num_tokens=num_tokens,
+                timestamp=time.time(),
+            )
+            per_req_tensors: dict[int, torch.Tensor] = {}
+            for layer_idx in range(num_layers):
+                sliced = pinned_buffers[layer_idx][:, start:end]
+                if using_pool:
+                    # Clone to decouple from shared pool buffer
+                    per_req_tensors[layer_idx] = sliced.clone()
+                else:
+                    # Safe view — buffer won't be overwritten
+                    per_req_tensors[layer_idx] = sliced
+            entry.kv_tensors = per_req_tensors
+
+            # Fix Issue 3: use proper compute_size() method
+            actual_bytes = entry.compute_size()
+
+            # Fix Issue 2: properly update pool accounting
+            with pool._lock:
+                pool._evict_entry(request_id)
+                pool._store[request_id] = entry
+                pool._used_bytes += actual_bytes
+
+            entries.append((request_id, entry, num_tokens))
+
+        return entries
+
     def checkpoint_kv_blocks(
         self,
         request_block_map: list[tuple[str, list[int], int]],
@@ -7108,35 +7382,34 @@ class GPUModelRunner(
                     )
                 self._ft_bg_publish_future = None
 
-        # Stage 1: launch async GPU→host copies for all reqs.
-        entries: list[tuple[str, "Any", int]] = []
-        for request_id, block_ids, num_tokens in request_block_map:
-            # NOTE: KVCheckpointPool assumes the model runner exposes a
-            # logical KV view with shape (2, num_blocks, ...), i.e. blocks
-            # indexed on dim 1. This matches the FLASH_ATTN path used by our
-            # current FT experiments. If a backend exposes a different
-            # logical layout (for example TRITON_ATTN), normalize before this
-            # call or replace the pool helper with a backend-aware copy path.
-            entry = self._ft_checkpoint_pool.save_checkpoint(
-                request_id=request_id,
-                gpu_kv_caches=self.kv_caches,
-                block_ids=block_ids,
-                num_tokens=num_tokens,
-                async_copy=True,
-            )
-            if entry is not None:
-                entries.append((request_id, entry, num_tokens))
+        # ── FT_BATCH_GATHER=1: single GPU gather for ALL reqs ──────
+        # Instead of 14 separate .clone() + pin_memory() calls (each
+        # with kernel launch overhead + syscall), concatenate all
+        # block_ids into one tensor, do ONE .clone() gather on GPU,
+        # ONE pin_memory() allocation, ONE async copy, then split
+        # results back to per-req entries. Reduces kernel launches
+        # from 14×32_layers to 1×32_layers and pin_memory syscalls
+        # from 14 to 1.
+        if os.environ.get("FT_BATCH_GATHER") == "1" and torch.cuda.is_available():
+            entries = self._batch_gather_checkpoint(request_block_map)
+        else:
+            # Original per-req path
+            entries = []
+            for request_id, block_ids, num_tokens in request_block_map:
+                entry = self._ft_checkpoint_pool.save_checkpoint(
+                    request_id=request_id,
+                    gpu_kv_caches=self.kv_caches,
+                    block_ids=block_ids,
+                    num_tokens=num_tokens,
+                    async_copy=True,
+                )
+                if entry is not None:
+                    entries.append((request_id, entry, num_tokens))
 
         if not entries:
             return []
 
-        # Stage 2: sync the copy stream once for the whole batch. After
-        # this, every entry's pinned host buffers contain the gathered
-        # KV bytes, so subsequent reads (from the publish path, whether
-        # inline or background) are race-free. The existing inline path
-        # implicitly relied on Python overhead being slower than the
-        # async copy — ok for sync mode but unsafe once we hand the
-        # entries to a separate thread.
+        # Stage 2: sync the copy stream once for the whole batch.
         if torch.cuda.is_available():
             copy_stream = getattr(
                 self._ft_checkpoint_pool, "_copy_stream", None

@@ -263,6 +263,45 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
         self._pending_ft_admission.append(request)
         self._base.add_request(request)
 
+    # KV pressure threshold: defer admission when free fraction is below
+    # this value (i.e. usage > 1 - threshold). 0.10 means defer when KV
+    # cache is more than 90% full.
+    _KV_FREE_RATIO_FLOOR: float = 0.10
+
+    def _kv_pressure_too_high(self) -> bool:
+        """Check whether GPU KV cache is too full to safely admit more.
+
+        Returns True iff the fraction of free KV blocks is below
+        _KV_FREE_RATIO_FLOOR. The FT wrapper bypasses vLLM base
+        scheduler's natural KV-pressure throttling, so we re-implement
+        an equivalent check here at admission time.
+        """
+        try:
+            block_pool = self._base.kv_cache_manager.block_pool
+            total_blocks = block_pool.num_gpu_blocks - 1  # exclude null
+            if total_blocks <= 0:
+                logger.info(
+                    "FT_KV_THROTTLE: skip check (total_blocks=%d)", total_blocks
+                )
+                return False
+            free_blocks = block_pool.get_num_free_blocks()
+            free_ratio = free_blocks / total_blocks
+            triggered = free_ratio < self._KV_FREE_RATIO_FLOOR
+            # P0-impl-3a follow-up: was INFO, demoted to DEBUG.  This
+            # check fires every admission step (~9 calls/sec) and the
+            # log spam consumed measurable API-server CPU.
+            logger.debug(
+                "FT_KV_THROTTLE: free=%d/%d (%.1f%% used) "
+                "threshold=%.1f%% triggered=%s pending=%d",
+                free_blocks, total_blocks, (1 - free_ratio) * 100,
+                (1 - self._KV_FREE_RATIO_FLOOR) * 100,
+                triggered, len(self._pending_ft_admission),
+            )
+            return triggered
+        except Exception as exc:
+            logger.warning("FT_KV_THROTTLE: check failed: %s", exc)
+            return False
+
     def _process_pending_admissions(self) -> None:
         """Batch-admit pending requests sorted by G_j (descending).
 
@@ -273,6 +312,16 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
         """
         if not self._pending_ft_admission:
             return
+
+        # KV pressure throttle: defer admission when GPU KV cache is too full.
+        # vLLM base scheduler handles this naturally for fcfs by checking
+        # free blocks in alloc_slots(); the FT wrapper bypasses base
+        # admission so we re-implement the same throttle here. Without
+        # this, the FT wrapper over-admits in decode-heavy heavy-load
+        # workloads (W1_Chat/Heavy) and Running reqs grow until KV cache
+        # saturates at 99-100%, causing per-request latency to balloon.
+        if self._kv_pressure_too_high():
+            return  # leave pending requests in queue, retry next epoch
 
         # Sort by G_j descending — prefer requests that contribute
         # more to total goodput.
@@ -336,13 +385,26 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
             # Block IDs are resolved via kv_cache_manager; actual GPU→CPU
             # copies are triggered separately via collective_rpc in
             # EngineCore.step() (see core.py checkpoint hook).
+            #
+            # P0-impl-3a follow-up: optionally throttle the per-step
+            # checkpoint policy iteration. The full Python loop over
+            # running requests is the dominant scheduler overhead vs
+            # upstream fcfs; with K>1 we evaluate only every K steps.
             if self._ft.config.enable_checkpointing:
-                running = self._base.running
-                self._ft.run_checkpoint_step(
-                    running_requests=running,
-                    gpu_kv_caches=None,
-                    kv_cache_manager=self._base.kv_cache_manager,
+                self._ckpt_step_counter = (
+                    getattr(self, "_ckpt_step_counter", 0) + 1
                 )
+                _interval = max(
+                    1,
+                    int(os.environ.get("FT_CHECKPOINT_STEP_INTERVAL", "1")),
+                )
+                if self._ckpt_step_counter % _interval == 0:
+                    running = self._base.running
+                    self._ft.run_checkpoint_step(
+                        running_requests=running,
+                        gpu_kv_caches=None,
+                        kv_cache_manager=self._base.kv_cache_manager,
+                    )
             _t3 = time.perf_counter() if _profile_active else 0.0
 
             if _profile_active:

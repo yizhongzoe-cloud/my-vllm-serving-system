@@ -197,9 +197,24 @@ class MasterProblem:
             if cut_vars:
                 model.add(sum(cut_vars) <= len(cut_vars) - 1)
 
+        # Phase 2 A1: SLO-aware objective. Each request's contribution to
+        # the MIP goodput objective is scaled by its slo_weight (∈ (0, 1]).
+        # slo_weight < 1 means the request has been queued long enough that
+        # admitting it now is unlikely to meet its TTFT SLO — the solver
+        # discounts its value accordingly. When FT_SLO_AWARE_OBJECTIVE is
+        # not set, slo_weight stays at 1.0 and this is identical to the
+        # previous "maximize ∑ G_j · y_j" objective.
+        #
+        # CP-SAT needs integer coefficients, so we multiply by SLO_WEIGHT_SCALE
+        # (default 1000) and floor. The ratio between req j and k is
+        # preserved up to 1/SLO_WEIGHT_SCALE precision.
+        SLO_WEIGHT_SCALE = 1000
         obj_terms = []
         for req_id, costs in self._costs.items():
-            obj_terms.append(costs.G_j * y[req_id])
+            weighted = int(round(costs.G_j * costs.slo_weight * SLO_WEIGHT_SCALE))
+            if weighted <= 0:
+                weighted = 1  # keep the variable in the objective
+            obj_terms.append(weighted * y[req_id])
 
         model.maximize(sum(obj_terms))
 

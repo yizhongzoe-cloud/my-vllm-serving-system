@@ -1060,7 +1060,28 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         max_gpu_failures = sched_cfg.max_gpu_failures
 
         # Planning horizon from FT scheduler config defaults.
+        # FT_PLANNING_HORIZON_SEC env var override (Phase 1 improvement A2):
+        # Shortens the Benders solver's lookahead window. The default 1.0s
+        # horizon means the solver plans admission for the next 10 solver
+        # ticks (100ms solver interval), but arrival rate variance over 1s
+        # is high enough to make G_j predictions noisy and the capacity
+        # feasibility check unreliable. Setting 0.3 gives the solver a
+        # ~3-tick lookahead — fresher decisions, less queue accumulation.
         planning_horizon = sched_cfg.ft_planning_horizon or 1.0
+        _ft_horizon_override = os.environ.get("FT_PLANNING_HORIZON_SEC")
+        if _ft_horizon_override:
+            try:
+                planning_horizon = float(_ft_horizon_override)
+                logger.info(
+                    "FT_PLANNING_HORIZON_SEC override: planning_horizon=%.2fs",
+                    planning_horizon,
+                )
+            except ValueError:
+                logger.warning(
+                    "FT_PLANNING_HORIZON_SEC=%r is not a valid float; "
+                    "falling back to config value %.2fs",
+                    _ft_horizon_override, planning_horizon,
+                )
 
         self._cost_builder = CostTableBuilder(
             planning_horizon=planning_horizon,
@@ -1351,6 +1372,63 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         if os.environ.get("FT_SKIP_SOLVER") == "1":
             await self._greedy_dispatch_pending()
             return
+
+        # FT_GATED_SOLVER=1: more nuanced version of FT_SKIP_SOLVER
+        # (Phase 1 improvement A3). Only run the Benders solver when
+        # the system is actually under load — pending queue large AND
+        # running batch near capacity. In low-utilization regimes the
+        # solver's admission decisions add noise (delaying admit to
+        # accumulate "optimal batch") without producing meaningful
+        # routing improvements, yielding the -3% overall goodput
+        # observed in Phase 1 ablation. Skipping the solver in those
+        # regimes lets greedy FIFO dispatch handle admission at
+        # minimal latency.
+        #
+        # Thresholds (env tunable):
+        #   FT_GATED_SOLVER_MIN_PENDING  (default 5)
+        #   FT_GATED_SOLVER_MIN_LOAD     (default 0.7 → 70%)
+        #   FT_GATED_SOLVER_CAPACITY     (default 26, per-engine decode cap)
+        if os.environ.get("FT_GATED_SOLVER") == "1":
+            pending_count = len(self._pending_solver_requests)
+            try:
+                min_pending = int(
+                    os.environ.get("FT_GATED_SOLVER_MIN_PENDING", "5")
+                )
+            except ValueError:
+                min_pending = 5
+            try:
+                min_load = float(
+                    os.environ.get("FT_GATED_SOLVER_MIN_LOAD", "0.7")
+                )
+            except ValueError:
+                min_load = 0.7
+            try:
+                per_engine_cap = int(
+                    os.environ.get("FT_GATED_SOLVER_CAPACITY", "26")
+                )
+            except ValueError:
+                per_engine_cap = 26
+
+            running_count = sum(
+                len(snaps)
+                for snaps in self._engine_request_snapshots.values()
+            )
+            num_engines = len(self._engine_request_snapshots) or 1
+            total_capacity = num_engines * per_engine_cap
+            load_pct = (
+                running_count / total_capacity
+                if total_capacity > 0 else 0.0
+            )
+
+            if pending_count < min_pending or load_pct < min_load:
+                logger.debug(
+                    "FT_GATED_SOLVER: greedy dispatch "
+                    "(pending=%d<%d or load=%.1f%%<%.1f%%)",
+                    pending_count, min_pending,
+                    load_pct * 100, min_load * 100,
+                )
+                await self._greedy_dispatch_pending()
+                return
 
         # Cold start: no snapshots yet → greedy bootstrap.
         if not self._engine_request_snapshots:
@@ -1702,6 +1780,22 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             engine_index,
         )
 
+        # FT_RECOVERY_PARALLEL_DISPATCH=1: send ADD messages to surviving
+        # engines concurrently via asyncio.gather instead of serial await.
+        # Serial IPC adds ~5-10ms latency per displaced req (6 reqs → 30-60ms
+        # cumulative); parallel collapses to ~single-send time (~10ms).
+        # Mutually exclusive with FT_RECOVERY_BATCH_SIZE>0 (which intentionally
+        # paces sends via asyncio.sleep).
+        _parallel_dispatch = (
+            os.environ.get("FT_RECOVERY_PARALLEL_DISPATCH") == "1"
+            and int(os.environ.get("FT_RECOVERY_BATCH_SIZE", "0") or "0") == 0
+        )
+        # _send_input returns an Awaitable (zmq.Future from send_multipart),
+        # not a coroutine. asyncio.create_task rejects Futures directly, so
+        # we store them as Awaitables and let asyncio.gather wrap each via
+        # ensure_future at the end.
+        _pending_dispatch_tasks: list = []
+
         rerouted = 0
         for req_id in displaced_req_ids:
             cached_request = self._request_cache.get(req_id)
@@ -1828,9 +1922,19 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
                 )
 
             reroute_wall = time.time()
-            await self._send_input(
-                EngineCoreRequestType.ADD, cached_request, target
-            )
+            if _parallel_dispatch:
+                # _send_input returns an Awaitable (zmq Future). Collect
+                # them; asyncio.gather below will schedule them concurrently
+                # and await completion in a single yield.
+                _pending_dispatch_tasks.append(
+                    self._send_input(
+                        EngineCoreRequestType.ADD, cached_request, target
+                    )
+                )
+            else:
+                await self._send_input(
+                    EngineCoreRequestType.ADD, cached_request, target
+                )
             target_idx = self._engine_to_index.get(target, -1)
             self._rerouted_request_ids.add(req_id)
             if _FT_RECOVERY_MODE == "reload":
@@ -1893,6 +1997,15 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
                     rerouted, len(displaced_req_ids), _batch_delay,
                 )
                 await asyncio.sleep(_batch_delay)
+
+        # FT_RECOVERY_PARALLEL_DISPATCH: wait for all concurrent sends
+        # to actually land on the surviving engines before declaring
+        # failover_complete. This preserves the ordering invariant
+        # "surviving engine has all reqs by failover_complete emit".
+        if _pending_dispatch_tasks:
+            await asyncio.gather(
+                *_pending_dispatch_tasks, return_exceptions=True
+            )
 
         logger.info(
             "Centralized FT Client: failover complete. "

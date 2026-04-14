@@ -161,7 +161,7 @@ experiments:
   E0_Smoke:
   # 4
     description: "Pipeline validation"
-    baselines: ["No-FT", "Our-System"]
+    baselines: ["NoFT-Reprefill", "Our-System"]
     workloads: ["W1_Chat"]
     load_levels: ["Moderate"]
     faults: ["none", "F2_Mid"]
@@ -169,7 +169,7 @@ experiments:
   E1a_Quick:
   # 48 — 精简版，先看趋势。完整版用 E1a_Main
     description: "End-to-end quick (4 baselines × 2 workloads × 3 loads × 2 faults)"
-    baselines: ["No-FT", "Periodic-Low", "Periodic-High", "Our-System"]
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High", "Our-System"]
     workloads: ["W1_Chat", "W4_Mixed"]
     load_levels: ["Light", "Moderate", "Heavy"]
     faults: ["none", "F2_Mid"]
@@ -206,7 +206,7 @@ experiments:
   E1a_Main:
   # 288
     description: "End-to-end (8B full sweep)"
-    baselines: ["No-FT", "Periodic-Low", "Periodic-High",
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High",
                  "Benders-Only", "Adaptive-Only", "Our-System"]
     workloads: ["W1_Chat", "W2_Summary", "W3_Instruct", "W4_Mixed"]
     load_levels: ["Light", "Moderate", "Heavy"]
@@ -215,7 +215,7 @@ experiments:
   E2_Recovery:
   # 8
     description: "Recovery breakdown"
-    baselines: ["No-FT", "Periodic-Low", "Periodic-High", "Our-System"]
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High", "Our-System"]
     workloads: ["W1_Chat", "W2_Summary"]
     load_levels: ["Moderate"]
     faults: ["F2_Mid"]
@@ -232,7 +232,7 @@ experiments:
   E4_Checkpoint_Tradeoff:
   # 16
     description: "Checkpoint overhead vs recovery benefit"
-    baselines: ["No-FT", "Periodic-Low", "Periodic-High", "Our-System"]
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High", "Our-System"]
     workloads: ["W1_Chat"]
     load_levels: ["Moderate", "Heavy"]
     faults: ["none", "F2_Mid"]
@@ -248,7 +248,7 @@ experiments:
   E6_SLO_Sensitivity:
   # 4
     description: "SLO sensitivity"
-    baselines: ["No-FT", "Our-System"]
+    baselines: ["NoFT-Reprefill", "Our-System"]
     workloads: ["W1_Chat", "W4_Mixed"]
     load_levels: ["Moderate"]
     faults: ["F2_Mid"]

@@ -76,6 +76,34 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+# ── Solution-4 lazy KV reload (FT_LAZY_RELOAD env var, default off) ──────────
+# When enabled, rerouted requests arriving from a failed engine are NOT
+# immediately admitted to the scheduler.  Instead they sit in an in-engine
+# holding deque (`_ft_lazy_pending`) and are drained into the scheduler in
+# small batches as previously-admitted rerouted requests finish.  This caps
+# how much KV cache the surviving engine devotes to migrated state at any
+# moment, freeing slots for new arrivals and preventing the post-fault
+# queue blowup observed in W1_Chat/Heavy/F2_Mid (see
+# experiments_v2/docs/e1a_quick_diagnosis.md Follow-up finding #5).
+#
+# Trade-off: drains the migrated set serially, so the per-request
+# failover_gap for the *last* drained request grows. The reload mode's
+# failover_gap is already well above the W1_Chat 3 s gap_slo, so this
+# trade is favourable for total goodput.
+_FT_LAZY_RELOAD_ENABLED = os.environ.get("FT_LAZY_RELOAD", "0") == "1"
+try:
+    _FT_LAZY_MAX_CONCURRENT = int(os.environ.get("FT_LAZY_MAX_CONCURRENT", "6"))
+except ValueError:
+    _FT_LAZY_MAX_CONCURRENT = 6
+if _FT_LAZY_MAX_CONCURRENT < 1:
+    _FT_LAZY_MAX_CONCURRENT = 1
+if _FT_LAZY_RELOAD_ENABLED:
+    logger.info(
+        "FT_LAZY_RELOAD enabled: rerouted requests will be drained "
+        "with max %d concurrent in scheduler",
+        _FT_LAZY_MAX_CONCURRENT,
+    )
+
 # ─────────────────────────────────────────────────────────────────────────────
 # P0-impl-3a: per-section wall timing for EngineCore.step().
 # Disabled by default. Enable with FT_STEP_TIMING_MAX_CALLS=N (e.g. 500).
@@ -403,6 +431,34 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
 
+        # ── Solution 4: lazy KV reload gate ───────────────────────────
+        # If lazy reload is enabled and this is a rerouted request from
+        # a failed engine, defer admission. The drain hook in step()
+        # will promote it later when the surviving engine has capacity.
+        if (
+            _FT_LAZY_RELOAD_ENABLED
+            and getattr(request, "is_rerouted", False)
+        ):
+            if not hasattr(self, "_ft_lazy_pending"):
+                self._ft_lazy_pending: deque[Request] = deque()
+            self._ft_lazy_pending.append(request)
+            logger.info(
+                "FT_LAZY_RELOAD: deferred rerouted req=%s "
+                "(lazy queue depth=%d, cap=%d)",
+                request.request_id,
+                len(self._ft_lazy_pending),
+                _FT_LAZY_MAX_CONCURRENT,
+            )
+            return
+
+        self._admit_to_scheduler(request)
+
+    def _admit_to_scheduler(self, request: Request) -> None:
+        """Actually push the request into the scheduler queue + register
+        it for FT KV restore. Extracted from add_request() so the
+        Solution-4 lazy drain path can call it directly without going
+        back through the gate.
+        """
         self.scheduler.add_request(request)
 
         # FT: if the request carries checkpoint info from a failed engine,
@@ -425,6 +481,153 @@ class EngineCore:
             self._ft_pending_restores.append(
                 (request.request_id, request.num_checkpointed_tokens)
             )
+
+        # Solution 4: prepend rerouted requests to the front of the
+        # base waiting queue so they are scheduled before any new
+        # arrivals that queued up after the fault. For FCFS this is a
+        # real prepend; for priority queues prepend_request() falls
+        # back to add (no-op since priority field on the request will
+        # already place it ahead of new arrivals).
+        if getattr(request, "is_rerouted", False):
+            base = getattr(self.scheduler, "_base", self.scheduler)
+            waiting = getattr(base, "waiting", None)
+            if waiting is not None and hasattr(
+                waiting, "prepend_request"
+            ):
+                try:
+                    waiting.remove_request(request)
+                    waiting.prepend_request(request)
+                except (ValueError, KeyError, IndexError):
+                    # remove may fail if the scheduler chose to admit
+                    # the request directly to running (rare). In that
+                    # case there is nothing to prepend.
+                    pass
+
+    def _drain_ft_lazy_pending(self) -> None:
+        """Solution 4 drain hook. Promotes rerouted requests from the
+        lazy holding deque into the scheduler when the count of
+        currently-running rerouted requests is below the cap. Called
+        from step() / step_with_batch_queue() before schedule().
+        """
+        pending = getattr(self, "_ft_lazy_pending", None)
+        if not pending:
+            return
+        base = getattr(self.scheduler, "_base", self.scheduler)
+        running_iter = getattr(base, "running", None)
+        if running_iter is None:
+            return
+        rerouted_running = sum(
+            1 for r in running_iter
+            if getattr(r, "is_rerouted", False)
+        )
+        drained = 0
+        while pending and rerouted_running < _FT_LAZY_MAX_CONCURRENT:
+            request = pending.popleft()
+            self._admit_to_scheduler(request)
+            rerouted_running += 1
+            drained += 1
+        if drained > 0:
+            logger.info(
+                "FT_LAZY_RELOAD: drained %d reqs "
+                "(rerouted_running=%d/%d, lazy_queued=%d)",
+                drained,
+                rerouted_running,
+                _FT_LAZY_MAX_CONCURRENT,
+                len(pending),
+            )
+
+    def _ft_prebudget_pending_restores(self) -> None:
+        """Pre-set num_computed_tokens for pending-restore reqs BEFORE
+        scheduler.schedule() runs. This tricks the scheduler into thinking
+        these reqs are mostly-computed (just need 1 more decode token),
+        so it admits ALL of them in a single step instead of 1-2 per step
+        (prefill budget limit). Recovery finishes in one big step instead
+        of fragmenting into many 370ms steps.
+
+        Enabled via FT_RECOVERY_PREBUDGET=1. Partial/failed restores are
+        repaired by _process_ft_pending_restores (it bumps num_scheduled_tokens
+        back up to cover any replay gap).
+        """
+        if os.environ.get("FT_RECOVERY_PREBUDGET") != "1":
+            return
+        if not hasattr(self, "_ft_pending_restores") or not self._ft_pending_restores:
+            return
+        if not hasattr(self.scheduler, "ft_scheduler"):
+            return
+        for req_id, num_ckpt_tokens in self._ft_pending_restores:
+            if num_ckpt_tokens <= 0:
+                continue
+            try:
+                request = self.scheduler._base.requests.get(req_id)
+            except (AttributeError, KeyError):
+                continue
+            if request is None:
+                continue
+            # Lie to scheduler — mark as mostly computed.
+            request.num_computed_tokens = num_ckpt_tokens
+
+    def _ft_will_checkpoint_fire_next_step(self) -> bool:
+        """Predict whether the next step will trigger a checkpoint save.
+
+        Used by FT_CKPT_FIRE_BUDGET_RATIO to pre-shrink scheduler budget
+        before the step that will be heavier.
+
+        Implementation: step-counter based ONLY. Requires
+        FT_CKPT_STEP_INTERVAL > 1 (the counter mechanism throttles fire
+        to every K-th step, so prediction is exact).
+
+        When FT_CKPT_STEP_INTERVAL is unset or ≤ 1, every step may fire
+        based on per-req block-boundary state — we cannot predict that
+        cheaply without side-effects (calling get_requests_to_checkpoint
+        mutates _last_evaluated_stable_tokens / _step_time_ema). In that
+        regime the feature is disabled (returns False → no budget
+        reduction → no harm).
+        """
+        if os.environ.get("FT_CKPT_FIRE_BUDGET_RATIO") is None:
+            return False
+        try:
+            interval = int(os.environ.get("FT_CKPT_STEP_INTERVAL", "0"))
+        except ValueError:
+            interval = 0
+        if interval <= 1:
+            # Cannot cheaply predict without side-effects. Disabled.
+            return False
+        # Reuse the real fire counter (incremented in _ft_post_process).
+        # Next step count = current + 1; fires when divisible by interval.
+        step_ct = getattr(self, "_ft_ckpt_step_counter", 0) + 1
+        return (step_ct % interval) == 0
+
+    def _ft_apply_ckpt_aware_budget(self) -> int | None:
+        """Temporarily shrink scheduler token budget if checkpoint will
+        fire this step. Returns the original budget for later restore,
+        or None if no override was applied.
+        """
+        ratio_str = os.environ.get("FT_CKPT_FIRE_BUDGET_RATIO")
+        if not ratio_str:
+            return None
+        try:
+            ratio = float(ratio_str)
+        except ValueError:
+            return None
+        if not (0.0 < ratio < 1.0):
+            return None
+        if not self._ft_will_checkpoint_fire_next_step():
+            return None
+        sched = getattr(self.scheduler, "_base", self.scheduler)
+        saved = getattr(sched, "max_num_scheduled_tokens", None)
+        if saved is None:
+            return None
+        sched.max_num_scheduled_tokens = max(1, int(saved * ratio))
+        return saved
+
+    def _ft_restore_ckpt_aware_budget(self, saved: int | None) -> None:
+        """Restore scheduler budget after schedule() runs. No-op if no
+        override was applied.
+        """
+        if saved is None:
+            return
+        sched = getattr(self.scheduler, "_base", self.scheduler)
+        sched.max_num_scheduled_tokens = saved
 
     def _process_ft_pending_restores(
         self,
@@ -466,6 +669,10 @@ class EngineCore:
         # copies overlap across requests.
         use_async_restore = os.environ.get("FT_ASYNC_RESTORE") == "1"
         async_restore_triggered = False
+        # FT_RECOVERY_PREBUDGET: whether num_computed_tokens was pre-set
+        # (lied to scheduler) so this method must handle partial/failed
+        # restores by bumping num_scheduled_tokens back up.
+        prebudget_active = os.environ.get("FT_RECOVERY_PREBUDGET") == "1"
 
         # Build a lookup for NewRequestData so we can patch it.
         new_req_data_by_id = {
@@ -509,6 +716,9 @@ class EngineCore:
                         req_id
                     )
                     if old_scheduled is not None and old_scheduled > tokens_restored:
+                        # Normal path (no pre-budget, or pre-budget with
+                        # full restore): scheduler allocated full prefill,
+                        # we now subtract the restored prefix.
                         new_scheduled = old_scheduled - tokens_restored
                         scheduler_output.num_scheduled_tokens[req_id] = (
                             new_scheduled
@@ -520,6 +730,26 @@ class EngineCore:
                         # Also patch NewRequestData.num_computed_tokens
                         # so the model runner positions start from the
                         # restored offset.
+                        nrd = new_req_data_by_id.get(req_id)
+                        if nrd is not None:
+                            nrd.num_computed_tokens = tokens_restored
+                    elif (
+                        prebudget_active
+                        and old_scheduled is not None
+                        and tokens_restored < num_ckpt_tokens
+                    ):
+                        # Pre-budget + partial restore: scheduler thought
+                        # req only needed 1 decode token, but actual
+                        # restore returned fewer tokens than expected, so
+                        # we need to replay the gap. Bump num_scheduled
+                        # back up to cover (num_ckpt_tokens - tokens_restored)
+                        # replay tokens + the original decode.
+                        gap = num_ckpt_tokens - tokens_restored
+                        new_scheduled = old_scheduled + gap
+                        scheduler_output.num_scheduled_tokens[req_id] = (
+                            new_scheduled
+                        )
+                        scheduler_output.total_num_scheduled_tokens += gap
                         nrd = new_req_data_by_id.get(req_id)
                         if nrd is not None:
                             nrd.num_computed_tokens = tokens_restored
@@ -536,6 +766,33 @@ class EngineCore:
                         ),
                     )
                 else:
+                    # Restore failed (returned 0 or None). If pre-budget
+                    # was active, num_computed_tokens was set to num_ckpt
+                    # but no KV was actually restored → must roll back to
+                    # full prefill or model will produce garbage.
+                    if prebudget_active:
+                        request = self.scheduler._base.requests.get(req_id)
+                        if request is not None:
+                            request.num_computed_tokens = 0
+                        nrd = new_req_data_by_id.get(req_id)
+                        old_scheduled = (
+                            scheduler_output.num_scheduled_tokens.get(
+                                req_id, 0
+                            )
+                        )
+                        if (
+                            nrd is not None
+                            and nrd.prompt_token_ids is not None
+                        ):
+                            prompt_len = len(nrd.prompt_token_ids)
+                            delta = prompt_len - old_scheduled
+                            scheduler_output.num_scheduled_tokens[req_id] = (
+                                prompt_len
+                            )
+                            scheduler_output.total_num_scheduled_tokens += (
+                                delta
+                            )
+                            nrd.num_computed_tokens = 0
                     logger.info(
                         "FT restore: request %s checkpoint not found "
                         "or empty, will recompute fully",
@@ -645,6 +902,11 @@ class EngineCore:
         was executed.
         """
 
+        # Solution 4: drain pending rerouted requests into the scheduler
+        # if there is capacity. No-op when FT_LAZY_RELOAD is off.
+        if _FT_LAZY_RELOAD_ENABLED:
+            self._drain_ft_lazy_pending()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -660,9 +922,30 @@ class EngineCore:
             import time as _time
             _t0 = _time.perf_counter()
 
+        # FT_RECOVERY_PREBUDGET: lie to scheduler about pending-restore
+        # reqs' num_computed_tokens BEFORE schedule() runs. Normally the
+        # scheduler treats these as fresh (full prefill) reqs and only
+        # admits 1-2 per step (prefill budget limit), fragmenting
+        # recovery into multiple 370ms steps. By pre-setting
+        # num_computed_tokens = num_ckpt_tokens, scheduler sees them as
+        # "mostly-computed, just need 1 decode", admits all in one step.
+        # _process_ft_pending_restores will patch num_computed_tokens +
+        # num_scheduled_tokens back if the actual restore was partial.
+        self._ft_prebudget_pending_restores()
+
+        # FT_CKPT_FIRE_BUDGET_RATIO: when a checkpoint fire is predicted
+        # this step, temporarily shrink scheduler's token budget so it
+        # under-admits (leaving headroom for the ~5-10ms extra step cost
+        # of gather+publish+copy). Restored after schedule() so next
+        # step's budget is unaffected.
+        _saved_budget = self._ft_apply_ckpt_aware_budget()
+
         scheduler_output = self.scheduler.schedule()
         if _ts_active:
             _t1 = _time.perf_counter()
+
+        # Restore original budget (idempotent — no-op if not overridden).
+        self._ft_restore_ckpt_aware_budget(_saved_budget)
 
         # FT restore: schedule() has allocated KV blocks.  Restore
         # checkpoint KV into those blocks and patch scheduler_output
@@ -678,6 +961,23 @@ class EngineCore:
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         if _ts_active:
             _t4 = _time.perf_counter()
+
+        # FT_CKPT_GPU_OVERLAP=1: do checkpoint publish work here, while
+        # GPU is busy with forward pass. The key insight:
+        #
+        #   future.result() below waits ~11ms for GPU forward to finish.
+        #   During that wait, CPU is IDLE.
+        #   Checkpoint publish needs ~2-3ms of CPU work.
+        #   By doing publish BEFORE future.result(), we overlap CPU work
+        #   with GPU compute → net 0 extra latency, no background thread
+        #   needed, 0 GIL contention.
+        #
+        # This collects the PREVIOUS step's checkpoint RPC result
+        # (GPU gather already completed by now) and does the publish.
+        # The current step's checkpoint will be fired in _ft_post_process
+        # after update_from_output, and collected next step here.
+        if os.environ.get("FT_CKPT_GPU_OVERLAP") == "1":
+            self._ft_collect_and_publish_checkpoint()
 
         with (
             self.log_error_detail(scheduler_output),
@@ -764,31 +1064,41 @@ class EngineCore:
         ft = self.scheduler.ft_scheduler
         ckpt_updates: dict[str, int] = {}
 
+        # FT_CKPT_GPU_OVERLAP=1: collection is done in
+        # _ft_collect_and_publish_checkpoint (called during GPU wait
+        # slot, before future.result()). Skip collection here — only
+        # fire new RPC.
+        if os.environ.get("FT_CKPT_GPU_OVERLAP") == "1":
+            # Still need back-pressure: don't fire if previous not done
+            if hasattr(self, "_ft_ckpt_future") and self._ft_ckpt_future is not None:
+                if not self._ft_ckpt_future.done():
+                    return ckpt_updates if ckpt_updates else None
+                # Done but not collected yet → will be collected in GPU wait slot
+                # For now just clear it so we can fire a new one
+                # (collect already happened or will happen next step)
+                self._ft_ckpt_future = None
+            # Skip to Step 2 (fire new RPC)
+        else:
+            pass  # Fall through to original Step 1 below
+
         # Step 1: Collect results from previous async RPC.
         #
-        # FT_CKPT_NONBLOCK env var: when "1", use a NON-BLOCKING
-        # collection (only process the previous future if it is
-        # already done). Otherwise the API server's step T blocks
-        # waiting on step T-1's checkpoint RPC, which under
-        # W1_Chat/Heavy fault load takes ~70 ms (vs ~30 ms step
-        # time), causing a ~60 % goodput drop. The blocking is the
-        # actual root cause of the framework overhead measured by
-        # the 2026-04-09 overnight investigation (drop mode showed
-        # the recovery path itself isn't the cost; phase 7 confirmed
-        # this fix recovers ~+130 tok/s on W1_Chat/Heavy/F2_Mid).
+        # FT_CKPT_NONBLOCK env var: when set to "1", use a NON-BLOCKING
+        # collection (only process the previous future if it's already
+        # done). Otherwise the API server's step T blocks waiting on
+        # step T-1's checkpoint RPC, which under W1_Chat/Heavy fault
+        # load takes ~70 ms (vs ~30 ms step time), causing a 60 %
+        # goodput drop. See overnight_2026-04-09.md follow-up
+        # "stream blocking root cause".
         #
-        # Trade-off when enabled: if the RPC is slower than step
-        # time, we skip firing a new checkpoint RPC for that step
-        # (the `_ft_ckpt_future is None` check at submit time
-        # below). The checkpoint controller policy already handles
-        # missed cycles gracefully — the next save just covers a
-        # larger delta — but the in-flight requests at fault time
-        # may have less recent checkpoint state, increasing the
-        # number lost during recovery (phase 7 measured a 5-10 pp
-        # completion drop vs the synchronous baseline).
+        # Trade-off when enabled: if the RPC is slower than step time,
+        # we skip firing a new checkpoint RPC for that step (the
+        # `_ft_ckpt_future is None` check at submit time below). The
+        # checkpoint controller's policy already handles missed cycles
+        # gracefully — the next save just covers a larger delta.
         #
-        # Default OFF (no behavior change). See
-        # experiments_v2/docs/overnight_2026-04-09.md "Phase 7".
+        # Default OFF (no behavior change). Validated in phase 7 of
+        # the 2026-04-09 overnight investigation.
         ckpt_nonblock = os.environ.get("FT_CKPT_NONBLOCK") == "1"
         if hasattr(self, "_ft_ckpt_future") and self._ft_ckpt_future is not None:
             future_done = (
@@ -827,10 +1137,22 @@ class EngineCore:
         # Step 2: Fire new checkpoint RPC (async, don't wait).
         #
         # In ckpt_nonblock mode, don't fire a new RPC if the previous
-        # one hasn't returned yet — that's the back-pressure that
-        # keeps the in-flight queue bounded at depth 1.
+        # one hasn't returned yet — that's the back-pressure that keeps
+        # the in-flight queue bounded at depth 1.
         if ckpt_nonblock and getattr(self, "_ft_ckpt_future", None) is not None:
             return ckpt_updates if ckpt_updates else None
+
+        # FT_CKPT_STEP_INTERVAL: fire checkpoint RPC every K steps
+        # instead of every step. Reduces GIL acquire/release frequency
+        # by K× without changing checkpoint controller logic.
+        # Default 1 = every step (original behavior).
+        _ckpt_interval = int(os.environ.get("FT_CKPT_STEP_INTERVAL", "1") or "1")
+        if _ckpt_interval > 1:
+            self._ft_ckpt_step_counter = getattr(
+                self, "_ft_ckpt_step_counter", 0
+            ) + 1
+            if self._ft_ckpt_step_counter % _ckpt_interval != 0:
+                return ckpt_updates if ckpt_updates else None
 
         request_block_map: list[tuple[str, list[int], int]] = []
         if checkpoint_plan is None:
@@ -858,17 +1180,56 @@ class EngineCore:
                     # correct block-aligned value. Don't override.
                     ckpt_updates[req_id] = request.num_checkpointed_tokens
 
-            # Fire checkpoint RPC in background thread (don't block step).
-            if not hasattr(self, "_ft_ckpt_executor"):
-                from concurrent.futures import ThreadPoolExecutor
-                self._ft_ckpt_executor = ThreadPoolExecutor(max_workers=1)
+            # FT_CKPT_NO_GIL=1: run checkpoint RPC synchronously on
+            # main thread but use a dedicated CUDA stream for the GPU
+            # gather. The key insight: the GIL contention that causes
+            # the +8.4ms per-step overhead comes from the background
+            # ThreadPoolExecutor thread holding GIL while doing Python
+            # work (CUDA launches, publish file IO). By running on the
+            # main thread instead, we eliminate all GIL contention —
+            # the main thread does checkpoint work at a predictable
+            # point (between update_from_output and next schedule()),
+            # instead of racing with schedule() unpredictably.
+            #
+            # Trade-off: checkpoint work blocks the main thread for
+            # ~2-3ms (publish IO), but this is LESS than the 8.4ms
+            # average GIL delay from the background thread approach.
+            #
+            # FT_BATCH_GATHER + FT_GATHER_STREAM should also be set
+            # to ensure GPU gather is on a non-default stream and
+            # doesn't serialize with decode.
+            if os.environ.get("FT_CKPT_NO_GIL") == "1":
+                # Synchronous on main thread — no background thread
+                try:
+                    results = self.collective_rpc(
+                        "checkpoint_kv_blocks",
+                        None,
+                        (request_block_map,),
+                    )
+                    if results and results[0]:
+                        for result in results[0]:
+                            if len(result) == 3:
+                                req_id, size_bytes, covered_tokens = result
+                            else:
+                                req_id, size_bytes = result
+                                covered_tokens = 0
+                            request = ft.request_pool.get_request(req_id)
+                            if request is not None:
+                                request.last_checkpoint_size_bytes = size_bytes
+                except Exception as e:
+                    logger.warning("FT checkpoint RPC failed: %s", e)
+            else:
+                # Original: fire in background thread (GIL contention)
+                if not hasattr(self, "_ft_ckpt_executor"):
+                    from concurrent.futures import ThreadPoolExecutor
+                    self._ft_ckpt_executor = ThreadPoolExecutor(max_workers=1)
 
-            self._ft_ckpt_future = self._ft_ckpt_executor.submit(
-                self.collective_rpc,
-                "checkpoint_kv_blocks",
-                None,  # timeout
-                (request_block_map,),
-            )
+                self._ft_ckpt_future = self._ft_ckpt_executor.submit(
+                    self.collective_rpc,
+                    "checkpoint_kv_blocks",
+                    None,  # timeout
+                    (request_block_map,),
+                )
 
         return ckpt_updates if ckpt_updates else None
 
@@ -910,15 +1271,13 @@ class EngineCore:
         Only active when policy is ft_benders_centralized and the
         scheduler has an ft_scheduler with a request pool.
 
-        FT_DISABLE_SNAPSHOTS env-var bypass: when set to "1", skip
-        snapshot construction entirely. Snapshots are only consumed by
+        Solution-? snapshot bypass: when FT_DISABLE_SNAPSHOTS=1 is set,
+        skip snapshot construction entirely. Snapshots are only used by
         the centralized Benders solver, which on W1_Chat/Heavy is in
-        greedy fallback ~98% of the time because the cost model is
-        configured for A6000 dp=1 (see e1a_quick_diagnosis.md follow-up
-        #6 — Benders profile mismatch). When that holds, the snapshots
-        are wasted CPU + msgpack + ZMQ traffic. Default is OFF (no
-        behavior change). Used to measure how much per-step overhead
-        the snapshot path actually consumes.
+        greedy fallback ~98% of the time (the cost model is for A6000
+        dp=1; see e1a_quick_diagnosis.md follow-up #6). When that's
+        true, the snapshots are wasted CPU + msgpack + ZMQ traffic.
+        Default is OFF (no behavior change). Set the env var to test.
         """
         if not hasattr(self.scheduler, "ft_scheduler"):
             return None
@@ -1008,6 +1367,11 @@ class EngineCore:
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
+        # Solution 4: drain pending rerouted requests into the scheduler
+        # if there is capacity. No-op when FT_LAZY_RELOAD is off.
+        if _FT_LAZY_RELOAD_ENABLED:
+            self._drain_ft_lazy_pending()
+
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
@@ -1027,7 +1391,14 @@ class EngineCore:
         deferred_scheduler_output = None
         deferred_checkpoint_plan: list[tuple[str, list[int]]] | None = None
         if self.scheduler.has_requests():
+            # FT_RECOVERY_PREBUDGET: see step() for rationale. Also
+            # applied on the batch-queue path.
+            self._ft_prebudget_pending_restores()
+            _saved_budget = self._ft_apply_ckpt_aware_budget()
+
             scheduler_output = self.scheduler.schedule()
+
+            self._ft_restore_ckpt_aware_budget(_saved_budget)
 
             # FT restore: schedule() has allocated KV blocks. Restore
             # checkpoint KV into those blocks before execute_model().
@@ -1110,11 +1481,17 @@ class EngineCore:
             model_output = future.result()
         if _ts_active:
             _t_post_wait = _time.perf_counter()
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
+        # Bug fix 2026-04-13: this None check was previously nested inside
+        # `if _ts_active:` so it never ran in production (_ts_active is
+        # False by default). A None model_output then propagated into
+        # scheduler.update_from_output() → AttributeError: 'NoneType' has
+        # no attribute 'sampled_token_ids' → engine crash. Must run
+        # unconditionally so we re-surface the original exec_model failure.
+        if model_output is None:
+            # None from sample_tokens() implies that the original execute_model()
+            # call failed - raise that exception.
+            exec_model_fut.result()
+            raise RuntimeError("unexpected error")
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -1179,6 +1556,49 @@ class EngineCore:
                 _ft_dump_step_timing()
 
         return engine_core_outputs, model_executed
+
+    def _ft_collect_and_publish_checkpoint(self) -> None:
+        """FT_CKPT_GPU_OVERLAP: collect previous step's checkpoint result
+        and do publish, overlapping with GPU forward compute.
+
+        Called BEFORE future.result() so CPU work overlaps with GPU.
+        No background thread needed → 0 GIL contention.
+
+        This replaces the "Step 1: collect" part of _ft_maybe_checkpoint.
+        When FT_CKPT_GPU_OVERLAP=1, _ft_maybe_checkpoint only fires
+        the RPC (no collect), and this method does the collect+publish.
+        """
+        if not hasattr(self, "_ft_ckpt_future") or self._ft_ckpt_future is None:
+            return
+
+        # Non-blocking check: is the RPC done?
+        if not self._ft_ckpt_future.done():
+            return  # GPU gather still running, skip — will retry next step
+
+        # Collect result (RPC done → no blocking)
+        ft = getattr(self.scheduler, "ft_scheduler", None)
+        if ft is None:
+            self._ft_ckpt_future = None
+            return
+
+        try:
+            results = self._ft_ckpt_future.result()
+            if results and results[0]:
+                for result in results[0]:
+                    if len(result) == 3:
+                        req_id, size_bytes, covered_tokens = result
+                    else:
+                        req_id, size_bytes = result
+                        covered_tokens = 0
+                    request = ft.request_pool.get_request(req_id)
+                    if request is not None:
+                        request.last_checkpoint_size_bytes = size_bytes
+                        metadata = {req_id: (covered_tokens, size_bytes)}
+                        ft.update_checkpoint_metadata(metadata)
+        except Exception as e:
+            logger.warning("FT checkpoint collect failed: %s", e)
+
+        self._ft_ckpt_future = None
 
     def _ft_post_process(
         self,
@@ -1599,6 +2019,23 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+
+        # FT_GIL_INTERVAL: tune Python GIL switch interval for this
+        # EngineCore process. Default 5ms → shorter values reduce the
+        # compound GIL delay from checkpoint background thread.
+        # Must be set in the EngineCore process (not parent) because
+        # setswitchinterval is per-process.
+        import sys as _sys
+        _gil_interval = os.environ.get("FT_GIL_INTERVAL")
+        if _gil_interval:
+            try:
+                _sys.setswitchinterval(float(_gil_interval))
+                logger.info(
+                    "FT_GIL_INTERVAL: set GIL switch interval to %.4fs",
+                    float(_gil_interval),
+                )
+            except (ValueError, TypeError):
+                pass
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker

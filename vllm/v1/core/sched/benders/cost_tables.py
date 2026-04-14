@@ -19,6 +19,9 @@ only the real published checkpoint state visible in the current snapshot:
 
 from __future__ import annotations
 
+import math
+import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,6 +34,47 @@ from vllm.v1.request import Request
 if TYPE_CHECKING:
     from vllm.v1.core.checkpoint_cost_model import CheckpointCostModel
     from vllm.v1.engine import EngineCoreRequest, RequestSnapshot
+
+
+# Phase 2 A1: SLO-aware objective helper.
+#
+# Returns a value in (0, 1] representing how much the solver should still
+# "value" this pending request relative to its admitted goodput G_j.
+# Rationale: the solver's default objective is maximize ∑ G_j · y_j, which
+# prefers admitting a long req (high G_j) over two short reqs even when
+# the short reqs are on the verge of TTFT violation. Discounting the long
+# req whose queue_wait exceeds ttft_slo forces the solver to admit
+# latency-sensitive reqs first, aligning the objective with the paper's
+# SLO-satisfied goodput metric.
+#
+# Formula: exp(-max(0, queue_wait - margin * ttft_slo) / ttft_slo)
+#   - queue_wait < margin*ttft_slo: weight = 1.0   (no discount, solver unchanged)
+#   - queue_wait == ttft_slo:       weight ≈ 0.37  (big discount, past margin)
+#   - queue_wait == 2*ttft_slo:     weight ≈ 0.14  (drop to ~1/7)
+# The margin parameter (default 0.2 = 20% of the SLO) acts as a dead zone
+# so reqs admitted immediately aren't penalized at all.
+#
+# Enabled via FT_SLO_AWARE_OBJECTIVE=1, default OFF (preserves existing
+# data baselines).
+def _compute_slo_weight(queue_wait: float, ttft_slo: float) -> float:
+    """Return an objective-scale weight in (0, 1] for a pending request.
+
+    If FT_SLO_AWARE_OBJECTIVE is not set, returns 1.0 (no discount).
+    """
+    if os.environ.get("FT_SLO_AWARE_OBJECTIVE") != "1":
+        return 1.0
+    if ttft_slo <= 0:
+        return 1.0
+    try:
+        margin = float(os.environ.get("FT_SLO_WEIGHT_MARGIN", "0.2"))
+    except ValueError:
+        margin = 0.2
+    excess_wait = max(0.0, queue_wait - margin * ttft_slo)
+    if excess_wait <= 0:
+        return 1.0
+    # exp decay; clamp to avoid integer-coefficient collapse in MIP
+    weight = math.exp(-excess_wait / ttft_slo)
+    return max(0.05, weight)  # never drop below 5% — still admit-eligible
 
 
 @dataclass
@@ -73,6 +117,13 @@ class RequestCosts:
     ttft_slo_sec: float | None = None  # D_j^{ttft}
     tpot_slo_sec: float | None = None  # D_j^{tpot}
     gap_slo_sec: float | None = None  # D_j^{gap}
+
+    # Phase 2 A1: SLO-aware objective weight. 1.0 = no discount (default).
+    # < 1.0 means "this request has been waiting too long; its value to the
+    # solver's MIP objective is discounted because it is likely to miss its
+    # TTFT SLO even if we admit it now". Computed from queue_wait / ttft_slo
+    # in _compute_slo_weight(). Only active when FT_SLO_AWARE_OBJECTIVE=1.
+    slo_weight: float = 1.0
 
 
 class CostTableBuilder:
@@ -173,7 +224,7 @@ class CostTableBuilder:
             len(request.prompt_token_ids) if request.prompt_token_ids else 0
         )
         generation_len = request.expected_output_len or 0
-        return self._compute_costs_raw(
+        costs = self._compute_costs_raw(
             request_id=request.request_id,
             prompt_len=prompt_len,
             generation_len=generation_len,
@@ -187,6 +238,14 @@ class CostTableBuilder:
             tpot_slo_ms=request.tpot_slo_ms,
             failure_gap_slo_ms=request.failure_gap_slo_ms,
         )
+        # Phase 2 A1: compute SLO-aware weight from arrival_time if enabled
+        arrival = getattr(request, "arrival_time", None)
+        if arrival is not None and costs.ttft_slo_sec is not None:
+            queue_wait = max(0.0, time.time() - arrival)
+            costs.slo_weight = _compute_slo_weight(
+                queue_wait, costs.ttft_slo_sec
+            )
+        return costs
 
     def _compute_costs_raw(
         self,

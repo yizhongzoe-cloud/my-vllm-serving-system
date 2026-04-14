@@ -245,6 +245,9 @@ class Request:
         req.num_checkpointed_tokens = getattr(
             request, "num_checkpointed_tokens", 0
         )
+        # FT: propagate rerouted flag so engine + scheduler can apply
+        # post-fault-specific behavior (lazy KV reload, priority drain).
+        req.is_rerouted = getattr(request, "is_rerouted", False)
         # FT: restore previous output tokens into the scheduler-side
         # sequence state (_all_token_ids / _output_token_ids) so that
         # num_tokens, KV block allocation, and max_tokens accounting

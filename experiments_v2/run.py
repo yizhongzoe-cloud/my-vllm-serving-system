@@ -957,6 +957,13 @@ def _build_server_cmd(config: dict, baseline_name: str, port: int) -> list[str]:
     if config.get("enforce_eager"):
         cmd.append("--enforce-eager")
 
+    # Solution 3: Optional max-num-seqs cap for admission throttling
+    # experiments. Passed via env var so it can be toggled per-run
+    # without touching the config file.
+    _max_num_seqs = os.environ.get("VLLM_MAX_NUM_SEQS")
+    if _max_num_seqs:
+        cmd.extend(["--max-num-seqs", _max_num_seqs])
+
     policy = baseline.get("scheduling_policy", "fcfs")
     cmd.extend(["--scheduling-policy", policy])
 

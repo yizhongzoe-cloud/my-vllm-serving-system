@@ -10,6 +10,7 @@ instead of full recomputation.
 """
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -113,27 +114,53 @@ class KVCheckpointPool:
     ) -> CheckpointEntry | None:
         """Save a request's KV cache blocks from GPU to host pinned memory.
 
+        FT_DELTA_CHECKPOINT=1 (default OFF): only copy blocks that are NEW
+        since the last checkpoint for this request, then append them to the
+        existing entry's host tensors (torch.cat on dim 1). This reduces
+        the per-save GPU→host copy from O(all_blocks) to O(new_blocks),
+        which is typically 1-4 blocks (~128-512 KB) instead of 20-60
+        blocks (2.5-7.5 MB) — a 10-15× reduction in copy volume.
+
+        The entry's kv_tensors remain cumulative (blocks 0..N), so
+        _publish_shared_checkpoint's delta slice [delta_start:delta_end]
+        continues to work unchanged.
+
+        When FT_DELTA_CHECKPOINT is off, behavior is identical to before:
+        evict old entry, copy all blocks fresh.
+
         Args:
             request_id: The request identifier.
-            gpu_kv_caches: Per-layer GPU KV cache tensors. Each tensor has
-                shape (2, num_blocks, block_size, num_kv_heads, head_size)
-                where dimension 1 is indexed by block_id.
-                NOTE: this FT checkpoint helper currently assumes that
-                EngineCore/model-runner exposes KV tensors in that logical
-                layout. That assumption holds for the FLASH_ATTN path we
-                validate in experiments. Backends whose logical KV view is
-                different (for example TRITON_ATTN with blocks on dim 0)
-                must normalize the view before calling into this helper, or
-                move block-level copy into a backend-aware implementation.
-            block_ids: List of block IDs allocated to this request.
+            gpu_kv_caches: Per-layer GPU KV cache tensors.
+            block_ids: List of block IDs allocated to this request
+                (ALL stable blocks, not just new ones).
             num_tokens: Number of tokens covered by these blocks.
             async_copy: If True, use a separate CUDA stream for the copy.
 
         Returns:
-            The created CheckpointEntry, or None if insufficient memory.
+            The created/updated CheckpointEntry, or None if insufficient memory.
         """
         if not block_ids:
             return None
+
+        # FT_CKPT_NOOP=1: return a fake entry without any GPU work.
+        # Used for ablation study to isolate Python/RPC overhead vs
+        # actual GPU gather + copy cost.
+        if os.environ.get("FT_CKPT_NOOP") == "1":
+            entry = CheckpointEntry(
+                request_id=request_id,
+                block_ids=list(block_ids),
+                num_tokens=num_tokens,
+                timestamp=time.time(),
+            )
+            # Fake empty tensors so publish path doesn't crash
+            sample = gpu_kv_caches[0]
+            n = len(block_ids)
+            shape = (sample.shape[0], n) + sample.shape[2:]
+            for layer_idx in range(len(gpu_kv_caches)):
+                entry.kv_tensors[layer_idx] = torch.zeros(
+                    shape, dtype=sample.dtype, device="cpu"
+                )
+            return entry
 
         # Filter out block IDs that exceed the KV cache capacity.
         num_kv_blocks = gpu_kv_caches[0].shape[1]
@@ -153,9 +180,34 @@ class KVCheckpointPool:
             if not block_ids:
                 return None
 
-        block_indices = torch.tensor(block_ids, dtype=torch.int64)
+        # ── Delta checkpoint: only copy NEW blocks ──────────────────
+        use_delta = os.environ.get("FT_DELTA_CHECKPOINT") == "1"
+        existing_entry: CheckpointEntry | None = None
+        delta_block_ids = block_ids  # default: copy all
 
-        # Estimate size before copying.
+        if use_delta:
+            with self._lock:
+                existing_entry = self._store.get(request_id)
+
+            if existing_entry is not None:
+                prev_n_blocks = len(existing_entry.block_ids)
+                if len(block_ids) > prev_n_blocks:
+                    # Only copy the new blocks (index prev_n_blocks onwards)
+                    delta_block_ids = block_ids[prev_n_blocks:]
+                elif len(block_ids) == prev_n_blocks:
+                    # Nothing new to copy — update metadata and return
+                    existing_entry.num_tokens = num_tokens
+                    existing_entry.block_ids = list(block_ids)
+                    existing_entry.timestamp = time.time()
+                    return existing_entry
+                else:
+                    # Regression (blocks shrunk) — fall back to full copy
+                    existing_entry = None
+                    delta_block_ids = block_ids
+
+        block_indices = torch.tensor(delta_block_ids, dtype=torch.int64)
+
+        # Estimate size of the NEW data to copy.
         sample = gpu_kv_caches[0]
         per_block_bytes = (
             2  # K and V
@@ -164,14 +216,14 @@ class KVCheckpointPool:
             * sample.shape[4]  # head_size
             * sample.element_size()
         )
-        estimated_bytes = per_block_bytes * len(block_ids) * len(gpu_kv_caches)
+        estimated_bytes = per_block_bytes * len(delta_block_ids) * len(gpu_kv_caches)
 
         with self._lock:
-            # Evict old checkpoint for this request if exists.
-            self._evict_entry(request_id)
+            if not use_delta or existing_entry is None:
+                # Full save: evict old entry first
+                self._evict_entry(request_id)
 
             if estimated_bytes > self.available_bytes:
-                # Try to free space by evicting oldest checkpoints.
                 if not self._evict_to_free(estimated_bytes):
                     logger.warning(
                         "KV Checkpoint Pool: insufficient memory for "
@@ -182,74 +234,101 @@ class KVCheckpointPool:
                     )
                     return None
 
-            # Reserve space before releasing lock for GPU→CPU copy.
             self._reserved_bytes += estimated_bytes
 
-        # Perform the GPU→CPU copy (outside lock to avoid blocking others).
-        entry = CheckpointEntry(
-            request_id=request_id,
-            block_ids=list(block_ids),
-            num_tokens=num_tokens,
-            timestamp=time.time(),
-        )
-
+        # ── GPU→CPU copy (only delta blocks) ────────────────────────
         device = gpu_kv_caches[0].device
-        # Transfer block indices to GPU (on default stream).
         block_indices_gpu = block_indices.to(device)
 
         if async_copy and torch.cuda.is_available():
             stream = self._get_copy_stream()
 
-            # Pre-allocate pinned memory.
-            pinned_tensors: dict[int, torch.Tensor] = {}
-            n_sel = len(block_ids)
-            sample = gpu_kv_caches[0]
+            n_sel = len(delta_block_ids)
             out_shape = (sample.shape[0], n_sel) + sample.shape[2:]
+            delta_pinned: dict[int, torch.Tensor] = {}
             for layer_idx in range(len(gpu_kv_caches)):
-                pinned_tensors[layer_idx] = torch.empty(
-                    out_shape,
-                    dtype=sample.dtype,
-                    device="cpu",
+                delta_pinned[layer_idx] = torch.empty(
+                    out_shape, dtype=sample.dtype, device="cpu",
                 ).pin_memory()
 
-            # Stage 1 (default stream): gather the KV blocks into contiguous
-            # GPU buffers. This runs on the same stream as decode, so it
-            # naturally waits for the latest decode step to finish writing.
             gpu_buffers: dict[int, torch.Tensor] = {}
             for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
-                gpu_buffers[layer_idx] = gpu_tensor[:, block_indices_gpu, :, :, :].clone()
+                gpu_buffers[layer_idx] = gpu_tensor[
+                    :, block_indices_gpu, :, :, :
+                ].clone()
 
-            # Stage 2 (copy stream): async copy from GPU buffers to pinned
-            # host memory. The event ensures copy stream waits for the
-            # gather above (on default stream) to complete. CPU does NOT
-            # block — decode continues on the default stream.
             event = torch.cuda.current_stream(device).record_event()
             with torch.cuda.stream(stream):
                 stream.wait_event(event)
                 for layer_idx in range(len(gpu_kv_caches)):
-                    pinned_tensors[layer_idx].copy_(
-                        gpu_buffers[layer_idx], non_blocking=True)
-
-            entry.kv_tensors = pinned_tensors
+                    delta_pinned[layer_idx].copy_(
+                        gpu_buffers[layer_idx], non_blocking=True
+                    )
         else:
+            delta_pinned = {}
             for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
-                subset = gpu_tensor[:, block_indices_gpu, :, :, :].clone()
-                entry.kv_tensors[layer_idx] = subset.cpu()
+                subset = gpu_tensor[
+                    :, block_indices_gpu, :, :, :
+                ].clone()
+                delta_pinned[layer_idx] = subset.cpu()
 
-        actual_bytes = entry.compute_size()
-        with self._lock:
-            # Release reservation and account actual usage.
-            self._reserved_bytes -= estimated_bytes
-            self._store[request_id] = entry
-            self._used_bytes += actual_bytes
+        # ── Build / update entry ────────────────────────────────────
+        if use_delta and existing_entry is not None:
+            # Append delta to existing entry's host tensors (cat on dim 1)
+            for layer_idx in range(len(gpu_kv_caches)):
+                existing_entry.kv_tensors[layer_idx] = torch.cat(
+                    [existing_entry.kv_tensors[layer_idx],
+                     delta_pinned[layer_idx]],
+                    dim=1,
+                )
+            existing_entry.block_ids = list(block_ids)
+            existing_entry.num_tokens = num_tokens
+            existing_entry.timestamp = time.time()
+            entry = existing_entry
 
-        logger.debug(
-            "Checkpointed request %s: %d tokens, %d blocks, %.2f MB",
-            request_id,
-            num_tokens,
-            len(block_ids),
-            actual_bytes / (1024 * 1024),
-        )
+            actual_bytes = entry.compute_size()
+            with self._lock:
+                self._reserved_bytes -= estimated_bytes
+                # Update used_bytes: old size was already counted, add delta
+                old_size = sum(
+                    t.nelement() * t.element_size()
+                    for t in delta_pinned.values()
+                )
+                self._used_bytes += old_size
+
+            logger.debug(
+                "Delta checkpoint %s: appended %d new blocks "
+                "(total %d blocks, %d tokens, %.2f MB)",
+                request_id,
+                len(delta_block_ids),
+                len(block_ids),
+                num_tokens,
+                actual_bytes / (1024 * 1024),
+            )
+        else:
+            # Full save (first checkpoint or delta disabled)
+            entry = CheckpointEntry(
+                request_id=request_id,
+                block_ids=list(block_ids),
+                num_tokens=num_tokens,
+                timestamp=time.time(),
+            )
+            entry.kv_tensors = delta_pinned
+
+            actual_bytes = entry.compute_size()
+            with self._lock:
+                self._reserved_bytes -= estimated_bytes
+                self._store[request_id] = entry
+                self._used_bytes += actual_bytes
+
+            logger.debug(
+                "Checkpointed request %s: %d tokens, %d blocks, %.2f MB",
+                request_id,
+                num_tokens,
+                len(block_ids),
+                actual_bytes / (1024 * 1024),
+            )
+
         return entry
 
     def restore_checkpoint(

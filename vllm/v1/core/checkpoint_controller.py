@@ -17,6 +17,7 @@ This keeps checkpointing runtime-local while aligning the trigger with
 incremental block-granular checkpoint publication.
 """
 
+import os
 import time
 from dataclasses import dataclass
 
@@ -307,7 +308,102 @@ class CheckpointController:
         return self._get_reporting_level(request)
 
     def should_checkpoint(self, request: Request) -> bool:
-        """Decide whether this request should publish a checkpoint now."""
+        """Decide whether this request should publish a checkpoint now.
+
+        Three optional runtime guards (A/B/C) can suppress checkpointing
+        when the system is too busy, preventing the economic policy from
+        degenerating into per-block save (every 16 tokens). Each guard
+        is gated by its own env var (default OFF) and checked in order
+        before the existing policy. If ANY guard fires, we skip this
+        checkpoint opportunity — the request will be re-evaluated next
+        step when a new stable block is produced.
+
+        Guard C (FT_CKPT_MIN_INTERVAL_BLOCKS): Minimum block interval
+          between consecutive saves for the same request. Fixed
+          frequency cap. E.g. =4 means save at most once per 64 tokens.
+
+        Guard B (FT_CKPT_LOAD_GUARD): N_running / max_batch threshold.
+          Skip checkpoint when running batch is above a fraction of
+          decode capacity. E.g. =0.7 means skip if batch > 70% full.
+
+        Guard A (FT_CKPT_SLO_GUARD): Step-time headroom vs TPOT SLO.
+          Skip checkpoint when the observed step time leaves less than
+          X% headroom before violating the request's TPOT SLO. This is
+          the most principled guard — it implicitly captures N_running,
+          GPU contention, and decode interference from checkpoint copies
+          (all of which inflate step_time). E.g. =0.2 means skip when
+          step_time > 80% of tpot_slo.
+        """
+        # ── Guard D: warm-up tokens (skip short reqs before they prove ──
+        # they're worth saving). Short chat requests (< WARMUP decoded
+        # tokens) are likely to complete before the next fault, so any
+        # checkpoint for them is wasted work. Delay the first save until
+        # the request has proven itself "long enough". If the request
+        # completes before this threshold, it never gets saved (win);
+        # if it decodes past the threshold, normal save cadence kicks
+        # in (at most WARMUP tokens of lost progress on fault, which is
+        # well within failure_gap_slo).
+        _warmup_str = os.environ.get("FT_CKPT_WARMUP_TOKENS")
+        if _warmup_str:
+            try:
+                warmup_tokens = int(_warmup_str)
+            except ValueError:
+                warmup_tokens = 0
+            if warmup_tokens > 0:
+                num_output = getattr(request, "num_output_tokens", 0)
+                if num_output < warmup_tokens:
+                    return False
+
+        # ── Guard C: minimum block interval ──────────────────────────
+        _min_blocks_str = os.environ.get("FT_CKPT_MIN_INTERVAL_BLOCKS")
+        if _min_blocks_str:
+            try:
+                min_blocks = int(_min_blocks_str)
+            except ValueError:
+                min_blocks = 0
+            if min_blocks > 0:
+                stable = (
+                    (request.num_computed_tokens // self._block_size)
+                    * self._block_size
+                )
+                published = request.num_checkpointed_tokens
+                if (stable - published) < min_blocks * self._block_size:
+                    return False
+
+        # ── Guard B: running batch load threshold ────────────────────
+        _load_guard_str = os.environ.get("FT_CKPT_LOAD_GUARD")
+        if _load_guard_str:
+            try:
+                load_threshold = float(_load_guard_str)
+            except ValueError:
+                load_threshold = 0.0
+            if load_threshold > 0:
+                n_running = getattr(self, "_n_running", 0)
+                try:
+                    max_batch = int(
+                        os.environ.get("FT_CKPT_LOAD_GUARD_CAPACITY", "26")
+                    )
+                except ValueError:
+                    max_batch = 26
+                if max_batch > 0 and n_running > load_threshold * max_batch:
+                    return False
+
+        # ── Guard A: step-time SLO headroom ──────────────────────────
+        _headroom_str = os.environ.get("FT_CKPT_SLO_GUARD")
+        if _headroom_str:
+            try:
+                min_headroom = float(_headroom_str)
+            except ValueError:
+                min_headroom = 0.0
+            if min_headroom > 0:
+                step_ema = getattr(self, "_step_time_ema", 0.0)
+                tpot_slo = getattr(request, "tpot_slo_ms", 0.0)
+                if step_ema > 0 and tpot_slo > 0:
+                    headroom = 1.0 - (step_ema / tpot_slo)
+                    if headroom < min_headroom:
+                        return False
+
+        # ── Existing policy (unchanged) ──────────────────────────────
         level = self.get_checkpoint_level(request)
         request.checkpoint_level = level
 
@@ -349,12 +445,94 @@ class CheckpointController:
 
         This is the main entry point called by the scheduler each step.
 
+        Phase 2 improvement B2 (FT_BATCH_CKPT_EVAL=1, default OFF):
+        Most requests in a decode step only produce 1 token, so the
+        expensive should_checkpoint() cost-model evaluation almost
+        always hits the "no new full block" early return. We skip the
+        full should_checkpoint() call for requests that provably
+        cannot checkpoint this step (no new full block since last
+        eval), using a cheap arithmetic predicate instead. This
+        bypasses the level lookup + attribute access overhead for the
+        ~85-90% of (req, step) pairs that would early-return anyway.
+
+        For the remaining candidates (those with a new full block),
+        we still call should_checkpoint() unchanged — preserving the
+        exact economic policy semantics.
+
         Args:
             requests: List of currently running requests.
 
         Returns:
             Subset of requests that should be checkpointed this step.
         """
+        if not requests:
+            return []
+
+        # ── Runtime context tracking (for guards B + A) ──────────────
+        # Track N_running for the load guard (方案 B).
+        self._n_running = len(requests)
+
+        # Track step time EMA for the SLO headroom guard (方案 A).
+        # Approximate step_time as wall-clock interval between
+        # consecutive get_requests_to_checkpoint() calls. This avoids
+        # changing caller signatures — the interval naturally measures
+        # schedule() + execute_model() + checkpoint cycle time.
+        now = time.time()
+        prev = getattr(self, "_last_ckpt_eval_time", 0.0)
+        if prev > 0:
+            step_ms = (now - prev) * 1000.0
+            if 1.0 < step_ms < 500.0:  # filter warmup / outliers
+                ema = getattr(self, "_step_time_ema", step_ms)
+                self._step_time_ema = 0.1 * step_ms + 0.9 * ema
+        self._last_ckpt_eval_time = now
+
+        # Phase 2 B2: fast predicate pre-filter. Default OFF — set
+        # FT_BATCH_CKPT_EVAL=1 to enable.
+        if os.environ.get("FT_BATCH_CKPT_EVAL") == "1":
+            block_size = self._block_size
+            last_eval = self._last_evaluated_stable_tokens
+            # Pre-compute warmup gate once per batch (Guard D fast path).
+            try:
+                warmup_tokens = int(os.environ.get(
+                    "FT_CKPT_WARMUP_TOKENS", "0"
+                ))
+            except ValueError:
+                warmup_tokens = 0
+            candidates: list[Request] = []
+            for req in requests:
+                # Guard D fast skip: short req below warmup threshold.
+                if (
+                    warmup_tokens > 0
+                    and getattr(req, "num_output_tokens", 0) < warmup_tokens
+                ):
+                    continue
+                stable_full_tokens = (
+                    (req.num_computed_tokens // block_size) * block_size
+                )
+                published_tokens = req.num_checkpointed_tokens
+                if stable_full_tokens <= published_tokens:
+                    # No new full block since last publish — update
+                    # tracker to match should_checkpoint's invariant
+                    # and skip.
+                    last_eval[req.request_id] = stable_full_tokens
+                    continue
+                # Also honor the "same stable tokens already evaluated
+                # this step" guard the inner _should_checkpoint_by_*
+                # methods use.
+                last_evaluated = last_eval.get(
+                    req.request_id, published_tokens
+                )
+                if stable_full_tokens <= last_evaluated:
+                    continue
+                candidates.append(req)
+
+            to_checkpoint = []
+            for req in candidates:
+                if self.should_checkpoint(req):
+                    to_checkpoint.append(req)
+            return to_checkpoint
+
+        # Default path: per-request should_checkpoint() call (unchanged).
         to_checkpoint = []
         for req in requests:
             if self.should_checkpoint(req):
