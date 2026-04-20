@@ -218,6 +218,69 @@ def download_cnndm(
 
 
 # ---------------------------------------------------------------------------
+# ArXiv summarization (long-context: ~6-7k input, used in DistServe/Sarathi-Serve)
+# ---------------------------------------------------------------------------
+
+def download_arxiv(
+    output_path: str,
+    max_samples: int = 2000,
+    min_prompt_tokens: int = 4000,
+    max_total_tokens: int = 7500,
+    seed: int = 42,
+) -> None:
+    """Download and preprocess ArXiv summarization (ccdv/arxiv-summarization).
+
+    Filters to prompts in [min_prompt_tokens, max_total_tokens - expected_output_tokens]
+    so they fit within max_model_len=8192 budget with generation headroom.
+    """
+    logger.info("=== ArXiv (long-context) ===")
+
+    from datasets import load_dataset
+
+    logger.info("Downloading ccdv/arxiv-summarization...")
+    ds = load_dataset("ccdv/arxiv-summarization", "document", split="test", trust_remote_code=True)
+
+    tokenizer = _get_tokenizer()
+    rng = np.random.RandomState(seed)
+    indices = rng.permutation(len(ds))
+
+    records: list[dict] = []
+    examined = 0
+    for idx in indices:
+        if len(records) >= max_samples:
+            break
+        examined += 1
+        if examined > 10000:
+            break
+
+        row = ds[int(idx)]
+        article = row["article"]
+        abstract = row["abstract"]
+
+        prompt = article + "\n\nWrite the abstract for the above paper."
+        prompt_tokens = _count_tokens(prompt, tokenizer)
+        output_tokens = _count_tokens(abstract, tokenizer)
+
+        if prompt_tokens < min_prompt_tokens:
+            continue
+        if prompt_tokens + output_tokens > max_total_tokens:
+            continue
+        if output_tokens < 50:
+            continue
+
+        records.append({
+            "id": f"arxiv-{len(records):05d}",
+            "dataset": "arxiv",
+            "prompt": prompt,
+            "prompt_tokens": prompt_tokens,
+            "expected_output_tokens": output_tokens,
+        })
+
+    _save_jsonl(records, output_path)
+    _print_stats("ArXiv", records)
+
+
+# ---------------------------------------------------------------------------
 # Alpaca
 # ---------------------------------------------------------------------------
 
@@ -351,6 +414,12 @@ def main():
         download_alpaca(
             os.path.join(out, "alpaca_full.jsonl"),
             seed=args.seed,
+        )
+
+    if args.only == "arxiv":
+        download_arxiv(
+            os.path.join(out, "arxiv_2000.jsonl"),
+            max_samples=2000, seed=args.seed,
         )
 
     logger.info("Done.")

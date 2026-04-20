@@ -65,6 +65,8 @@ class BendersSolveLoop:
         self._master_time_limit = master_time_limit_sec
         self._recovery_time_limit = recovery_time_limit_sec
         self._max_gpu_failures = max_gpu_failures
+        # FIX #2: keep last epoch's master solution for warm-start hints.
+        self._last_master_solution = None
 
     def solve_epoch(
         self,
@@ -205,9 +207,10 @@ class BendersSolveLoop:
                 decode_capacity=decode_cap,
                 residual_prefill_capacity=residual_prefill,
                 use_decode_first=use_df,
-            ).solve()
+            ).solve(prev_solution=self._last_master_solution)
             if solution is None:
                 return None
+            self._last_master_solution = solution
             return BendersSolveResult(
                 master_solution=solution,
                 num_iterations=1,
@@ -269,7 +272,10 @@ class BendersSolveLoop:
 
         for iteration in range(self._max_iterations):
             # Step 4: Solve master.
-            solution = master.solve()
+            # FIX #2: warm-start only on first iteration (later iterations
+            # have new cuts that may invalidate hints).
+            hint = self._last_master_solution if iteration == 0 else None
+            solution = master.solve(prev_solution=hint)
             if solution is None:
                 logger.debug(
                     "Benders iteration %d: master infeasible", iteration
@@ -304,6 +310,7 @@ class BendersSolveLoop:
             # Step 6: If all feasible, return.
             if all_feasible:
                 elapsed = time.monotonic() - start_time
+                self._last_master_solution = solution  # FIX #2 cache
                 result = BendersSolveResult(
                     master_solution=solution,
                     recovery_plans=recovery_plans,

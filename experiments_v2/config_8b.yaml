@@ -22,7 +22,7 @@ ft_checkpoint_cost_profile: "experiments_v2/checkpoint_cost_profile_8b.json"
 ft_decode_capacity_profile: "experiments_v2/decode_capacity_profile_8b.json"
 failure_detection_time_ms: 100.0
 failure_timeout_sec: 5.0
-checkpoint_pool_bytes: 34359738368  # 32 GB
+checkpoint_pool_bytes: 8589934592  # 8 GB — matches vLLM default. Was 32GB (4× oversized). For 8B/max_model_len=8192 this covers ~8 active reqs checkpointed fully. Large pool wastes memory and slows pinned-memory operations.
 
 force_output_len: true
 
@@ -56,6 +56,20 @@ workloads:
       - {workload: "W2_Summary", weight: 0.30}
     arrival: "poisson"
     description: "Production mix, per-request SLO differentiation"
+
+  W5_LongDoc:
+    dataset: "arxiv"
+    dataset_path: "experiments_v2/datasets/cached/arxiv_filtered.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "Long-context summarization (ArXiv papers, prompt_tokens <= 5500)"
+
+  W7_Saturated:
+    dataset: "sharegpt"
+    dataset_path: "experiments_v2/datasets/cached/sharegpt_5000.jsonl"
+    tpot_slo_ms: 100.0
+    arrival: "poisson"
+    description: "Queue-saturation stress: sharegpt @ high RPS + tight SLO"
 
 # ---- Load levels ----
 # Manual estimates for 8B dp=2 on A6000. Run calibrate.py for precise values.

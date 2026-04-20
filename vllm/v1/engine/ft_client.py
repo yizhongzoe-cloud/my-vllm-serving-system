@@ -407,6 +407,111 @@ class FTDPAsyncMPClient(DPLBAsyncMPClient):
 
     # ---- Override output processing: handle ENGINE_CORE_DEAD ----
 
+    def _install_fast_fault_detector(self) -> None:
+        """Register an asyncio SIGCHLD handler that detects a dead engine
+        within ~5ms (vs ~1000ms for the existing GIL-bound monitor thread).
+
+        The handler runs in the main asyncio loop on signal delivery
+        (which is propagated at GIL switch boundaries, default 5ms).
+        It iterates engine processes, finds dead ones, and synchronously
+        kicks off the failover coroutine — avoiding the
+        multiprocessing.connection.wait → Python GIL race that delays
+        detection in the existing monitor thread.
+
+        No-op if the resources/engine_manager isn't set up yet (e.g. on
+        worker processes or test paths). Idempotent.
+        """
+        if getattr(self, "_fast_fault_detector_installed", False):
+            return
+        engine_manager = self.resources.engine_manager
+        if (
+            engine_manager is None
+            or not hasattr(engine_manager, "processes")
+            or not engine_manager.processes
+        ):
+            return
+        engine_processes = list(engine_manager.processes)
+        self._fast_fault_engine_processes = engine_processes
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop, can't install
+
+        self_ref = weakref.ref(self)
+
+        def _on_sigchld() -> None:
+            _self = self_ref()
+            if _self is None:
+                return
+            for i, proc in enumerate(engine_processes):
+                if proc.is_alive():
+                    continue
+                eng_id = _self._index_to_engine.get(i)
+                if eng_id is None:
+                    continue
+                if not _self._engine_alive.get(eng_id, True):
+                    # Already handled.
+                    continue
+                # Mark dead immediately so duplicate fires (from the
+                # multiprocessing.connection.wait monitor) become no-ops.
+                _self._engine_alive[eng_id] = False
+                logger.warning(
+                    "FAULT_EVENT monitor_observed engine=%d "
+                    "wall_time=%.6f source=sigchld_fast",
+                    i, time.time(),
+                )
+                logger.warning(
+                    "FAULT_EVENT failure_declared replica=%d wall_time=%.6f",
+                    i, time.time(),
+                )
+                # Schedule failover in the current loop (we're already in it).
+                asyncio.create_task(_self._handle_engine_failure(i))
+                if _self._all_engines_dead():
+                    logger.error(
+                        "FT fast detect: all engines dead, shutting down."
+                    )
+                    _self.resources.engine_dead = True
+
+        # asyncio reserves SIGCHLD for its own subprocess tracking, so
+        # loop.add_signal_handler refuses. Use signal.signal() directly
+        # and chain to the previous handler (asyncio's child reaper).
+        try:
+            import signal
+            prev_handler = signal.getsignal(signal.SIGCHLD)
+
+            def _on_sigchld_sync(signum, frame):
+                # Runs in main thread at next bytecode boundary (~5ms
+                # GIL switch). Schedule the actual work into the loop
+                # to avoid doing too much in signal handler context.
+                try:
+                    loop.call_soon_threadsafe(_on_sigchld)
+                except Exception:
+                    pass
+                # Chain to asyncio's child reaper so subprocess tracking
+                # still works.
+                if callable(prev_handler) and prev_handler not in (
+                    signal.SIG_IGN, signal.SIG_DFL,
+                ):
+                    try:
+                        prev_handler(signum, frame)
+                    except Exception:
+                        pass
+
+            signal.signal(signal.SIGCHLD, _on_sigchld_sync)
+            self._fast_fault_detector_installed = True
+            self._fast_fault_prev_handler = prev_handler  # keep refcount
+            logger.info(
+                "FT_FAST_FAULT_DETECT: SIGCHLD signal handler installed "
+                "(monitors %d engine processes)",
+                len(engine_processes),
+            )
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "FT_FAST_FAULT_DETECT: failed to install SIGCHLD handler: %s",
+                e,
+            )
+
     def _ensure_output_queue_task(self):
         """Override to intercept ENGINE_CORE_DEAD with engine_index and
         trigger immediate failover.
@@ -419,6 +524,17 @@ class FTDPAsyncMPClient(DPLBAsyncMPClient):
         resources = self.resources
         if resources.output_queue_task is not None:
             return
+
+        # FT_FAST_FAULT_DETECT=1 (default OFF): install SIGCHLD asyncio
+        # signal handler for sub-10ms fault detection. Without this, the
+        # ft_monitor_engine_cores thread (using multiprocessing.connection.wait)
+        # is event-driven at OS level but its post-wait Python work blocks
+        # on GIL contention with the asyncio main thread (~1100ms observed
+        # in Heavy on s42, see investigation log 2026-04-14). The asyncio
+        # signal handler runs in the main loop within one GIL switch
+        # interval (~5ms).
+        if os.environ.get("FT_FAST_FAULT_DETECT") == "1":
+            self._install_fast_fault_detector()
 
         decoder = self.decoder
         utility_results = self.utility_results
@@ -790,8 +906,35 @@ class FTDPAsyncMPClient(DPLBAsyncMPClient):
 
         # Re-route each displaced request.  Use per-request routing to
         # spread load across multiple surviving engines (if available).
+        #
+        # FT_FAILOVER_BATCH_SIZE + FT_FAILOVER_BATCH_DELAY_MS: rate-limit
+        # how many displaced reqs we dispatch to the survivor per batch,
+        # with a small delay between batches. Without this, 13-19 reqs
+        # land on the survivor in the same scheduler step, causing the
+        # restore path to allocate 13-19 × ~250 MB GPU temp src tensors
+        # simultaneously (OOM on A5000 24 GB). By spreading dispatch
+        # across steps, each scheduler step only sees ~BATCH_SIZE new
+        # reqs, keeping GPU temp bounded.
+        try:
+            failover_batch = int(
+                os.environ.get("FT_FAILOVER_BATCH_SIZE", "0")
+            )
+        except ValueError:
+            failover_batch = 0
+        try:
+            failover_delay_ms = float(
+                os.environ.get("FT_FAILOVER_BATCH_DELAY_MS", "300")
+            )
+        except ValueError:
+            failover_delay_ms = 300.0
         rerouted = 0
         for req_id in displaced_req_ids:
+            if (
+                failover_batch > 0
+                and rerouted > 0
+                and rerouted % failover_batch == 0
+            ):
+                await asyncio.sleep(failover_delay_ms / 1000.0)
             cached_request = self._request_cache.get(req_id)
             if cached_request is None:
                 logger.warning(
@@ -1140,6 +1283,15 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         self._epoch_interval_sec: float = getattr(
             sched_cfg, "benders_epoch_interval_sec", 0.02
         ) or 0.02
+        # Optional env override for A/B tuning. Does NOT skip solver calls —
+        # only adjusts poll frequency. Solver still fires every epoch when
+        # pending queue has requests.
+        env_epoch_ms = os.environ.get("FT_EPOCH_INTERVAL_MS")
+        if env_epoch_ms:
+            try:
+                self._epoch_interval_sec = float(env_epoch_ms) / 1000.0
+            except ValueError:
+                pass
         self._solve_epoch_task: asyncio.Task | None = None
         # Async solver state: solver runs in background, results dispatched
         # when ready. Each epoch fires a new solve if pending requests exist
@@ -1372,6 +1524,21 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         if os.environ.get("FT_SKIP_SOLVER") == "1":
             await self._greedy_dispatch_pending()
             return
+
+        # FT_FAST_FAILOVER=1: during recovery window (any engine recently
+        # failed), bypass solver entirely and use greedy dispatch for ALL
+        # pending admissions — not just displaced reqs. The solver adds
+        # 8-300ms per call; during recovery this latency delays new
+        # request scheduling, inflating fg_p95. On dp=2 the solver's
+        # routing decision is trivial anyway (single survivor).
+        if os.environ.get("FT_FAST_FAILOVER") == "1":
+            if getattr(self, "_ft_recovery_active", False):
+                logger.debug(
+                    "FT_FAST_FAILOVER: recovery active, greedy dispatch "
+                    "for %d pending", len(self._pending_solver_requests),
+                )
+                await self._greedy_dispatch_pending()
+                return
 
         # FT_GATED_SOLVER=1: more nuanced version of FT_SKIP_SOLVER
         # (Phase 1 improvement A3). Only run the Benders solver when
@@ -1749,6 +1916,10 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             engine_index, time.time(),
         )
 
+        # FT_FAST_FAILOVER: mark recovery window active so solver
+        # admission path can fast-track to greedy dispatch.
+        self._ft_recovery_active = True
+
         # Remove dead engine's snapshots.
         self._engine_request_snapshots.pop(engine_index, None)
         self._replica_snapshots.pop(engine_index, None)
@@ -2018,3 +2189,8 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
             "rerouted=%d total=%d",
             engine_index, time.time(), rerouted, len(displaced_req_ids),
         )
+
+        # FT_FAST_FAILOVER: clear recovery window. New admissions go
+        # back through solver. We keep it active only during failover
+        # dispatch so all concurrent admissions skip the solver overhead.
+        self._ft_recovery_active = False
