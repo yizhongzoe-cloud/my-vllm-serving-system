@@ -21,6 +21,7 @@ At each decision epoch:
 from __future__ import annotations
 
 import itertools
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -197,6 +198,25 @@ class BendersSolveLoop:
         if not scenarios:
             # No relevant failure scenarios (e.g. single replica).
             # Return master solution without recovery checking.
+            # FIX #7 (R7): optional greedy seed (env-gated) overrides
+            # prev-epoch cached solution as warm-start hint.
+            no_scen_hint = self._last_master_solution
+            try:
+                from vllm.v1.core.sched.benders.greedy_seed import (
+                    compute_greedy_seed, is_enabled as greedy_seed_enabled,
+                )
+                if greedy_seed_enabled():
+                    try:
+                        running_cap = int(os.environ.get(
+                            "FT_SOLVER_RUNNING_CAP", "0"))
+                    except ValueError:
+                        running_cap = 0
+                    gs = compute_greedy_seed(cost_table, replica_ids,
+                                               running_cap=running_cap)
+                    if gs is not None:
+                        no_scen_hint = gs
+            except Exception:
+                pass  # silent fallback
             solution = MasterProblem(
                 request_costs=cost_table,
                 replica_ids=replica_ids,
@@ -207,7 +227,7 @@ class BendersSolveLoop:
                 decode_capacity=decode_cap,
                 residual_prefill_capacity=residual_prefill,
                 use_decode_first=use_df,
-            ).solve(prev_solution=self._last_master_solution)
+            ).solve(prev_solution=no_scen_hint)
             if solution is None:
                 return None
             self._last_master_solution = solution
@@ -285,9 +305,8 @@ class BendersSolveLoop:
                         compute_greedy_seed, is_enabled as greedy_seed_enabled,
                     )
                     if greedy_seed_enabled():
-                        import os as _os
                         try:
-                            running_cap = int(_os.environ.get(
+                            running_cap = int(os.environ.get(
                                 "FT_SOLVER_RUNNING_CAP", "0"))
                         except ValueError:
                             running_cap = 0
