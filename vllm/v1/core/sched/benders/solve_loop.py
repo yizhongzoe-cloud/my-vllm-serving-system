@@ -274,7 +274,33 @@ class BendersSolveLoop:
             # Step 4: Solve master.
             # FIX #2: warm-start only on first iteration (later iterations
             # have new cuts that may invalidate hints).
-            hint = self._last_master_solution if iteration == 0 else None
+            # FIX #7 (R7): if FT_SOLVER_GREEDY_SEED=1, synthesize a fresh
+            # greedy hint from the current cost_table, which may be more
+            # accurate than the cached prev-epoch solution on high-churn
+            # workloads. Master MIP still solves; this is only a warm-start.
+            if iteration == 0:
+                hint = self._last_master_solution
+                try:
+                    from vllm.v1.core.sched.benders.greedy_seed import (
+                        compute_greedy_seed, is_enabled as greedy_seed_enabled,
+                    )
+                    if greedy_seed_enabled():
+                        import os as _os
+                        try:
+                            running_cap = int(_os.environ.get(
+                                "FT_SOLVER_RUNNING_CAP", "0"))
+                        except ValueError:
+                            running_cap = 0
+                        greedy_hint = compute_greedy_seed(
+                            cost_table, replica_ids, running_cap=running_cap,
+                        )
+                        if greedy_hint is not None:
+                            hint = greedy_hint
+                except Exception:
+                    logger.debug("greedy seed unavailable, fallback to prev",
+                                 exc_info=True)
+            else:
+                hint = None
             solution = master.solve(prev_solution=hint)
             if solution is None:
                 logger.debug(
