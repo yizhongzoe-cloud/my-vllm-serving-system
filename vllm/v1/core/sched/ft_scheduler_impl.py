@@ -398,7 +398,23 @@ class FaultTolerantSchedulerImpl(SchedulerInterface):
                     1,
                     int(os.environ.get("FT_CHECKPOINT_STEP_INTERVAL", "1")),
                 )
-                if self._ckpt_step_counter % _interval == 0:
+                # FT_SKIP_CKPT_DURING_RECOVERY: skip checkpoint evaluation
+                # while rerouted (displaced) reqs are still in running.
+                # Checkpoint controller adds ~1-2ms per step iterating
+                # running reqs; during recovery this is wasted overhead
+                # because displaced reqs don't have meaningful KV to
+                # checkpoint yet. Reduces fg_p95 by cutting per-step
+                # latency during the recovery window.
+                _skip_ckpt_recovery = (
+                    os.environ.get("FT_SKIP_CKPT_DURING_RECOVERY") == "1"
+                )
+                _has_rerouted = False
+                if _skip_ckpt_recovery:
+                    _has_rerouted = any(
+                        getattr(r, "is_rerouted", False)
+                        for r in self._base.running
+                    )
+                if self._ckpt_step_counter % _interval == 0 and not _has_rerouted:
                     running = self._base.running
                     self._ft.run_checkpoint_step(
                         running_requests=running,

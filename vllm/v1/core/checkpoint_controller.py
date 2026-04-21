@@ -334,6 +334,27 @@ class CheckpointController:
           (all of which inflate step_time). E.g. =0.2 means skip when
           step_time > 80% of tpot_slo.
         """
+        # ── Guard E: tail-skip (skip save for req close to EOS) ─────
+        # Mirror of warmup (Guard D): skip saves for the LAST N% of a
+        # request's expected output. If the request is almost finished,
+        # checkpointing buys little (fault before EOS is increasingly
+        # unlikely as we approach EOS; remaining replay cost is small
+        # anyway). Typical threshold 0.1 = skip final 10% of tokens.
+        # Combined with warmup, can reduce total saves by another
+        # 10-15%.
+        _tail_frac_str = os.environ.get("FT_CKPT_TAIL_SKIP_FRAC")
+        if _tail_frac_str:
+            try:
+                tail_frac = float(_tail_frac_str)
+            except ValueError:
+                tail_frac = 0.0
+            if 0.0 < tail_frac < 1.0:
+                sp = getattr(request, "sampling_params", None)
+                mt = getattr(sp, "max_tokens", None) if sp else None
+                num_output = getattr(request, "num_output_tokens", 0)
+                if mt and mt > 0 and (num_output / mt) > (1 - tail_frac):
+                    return False
+
         # ── Guard D: warm-up tokens (skip short reqs before they prove ──
         # they're worth saving). Short chat requests (< WARMUP decoded
         # tokens) are likely to complete before the next fault, so any

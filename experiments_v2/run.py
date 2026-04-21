@@ -25,6 +25,7 @@ import csv
 import json
 import logging
 import os
+import random
 import re
 import signal
 import subprocess
@@ -1148,16 +1149,26 @@ def _inject_fault_at(
     server_proc: subprocess.Popen,
     metadata: ExperimentMetadata,
     request_results: list[RequestResult],
+    seed: int = 0,
 ) -> None:
-    """Kill one engine worker process to simulate a GPU failure."""
+    """Kill one engine worker process to simulate a GPU failure.
+
+    Engine selection is seeded: for dp≥2 we use random.Random(seed) to
+    pick which engine to kill. This diversifies fault coverage across
+    seeds rather than always killing engine 0.
+    """
     engines = _find_engine_pids(server_proc.pid)
     if not engines:
         logger.error("No engine processes found for fault injection")
         return
 
-    # Kill the first engine (engine index 0).
-    killed_engine_idx, killed_pid = engines[0]
-    logger.info("Injecting fault: killing engine %d (pid %d)", killed_engine_idx, killed_pid)
+    # Seed-randomized choice across engines (was always engines[0]).
+    rng = random.Random(seed)
+    killed_engine_idx, killed_pid = rng.choice(engines)
+    logger.info(
+        "Injecting fault: killing engine %d (pid %d) [seed=%d, choice among %d engines]",
+        killed_engine_idx, killed_pid, seed, len(engines),
+    )
 
     try:
         os.kill(killed_pid, signal.SIGKILL)
@@ -1634,15 +1645,22 @@ def main():
                     metadata.in_flight_at_fault = list(in_flight)
                     metadata.fault_injection_time = time.time()
 
-                    # Kill first engine process.
+                    # Seed-randomized engine choice across replicas (was
+                    # always engines[0]). Gives paper experiments broader
+                    # fault coverage instead of always killing engine 0.
                     engines = _find_engine_pids(server_proc.pid)
                     if engines:
-                        killed_idx, killed_pid = engines[0]
+                        rng = random.Random(args.seed)
+                        killed_idx, killed_pid = rng.choice(engines)
                         try:
                             os.kill(killed_pid, signal.SIGKILL)
                             metadata.failed_gpu_id = killed_idx
-                            logger.info("Fault injected: engine=%d, pid=%d, in_flight=%d",
-                                      killed_idx, killed_pid, len(metadata.in_flight_at_fault))
+                            logger.info(
+                                "Fault injected: engine=%d, pid=%d, in_flight=%d [seed=%d, choice among %d]",
+                                killed_idx, killed_pid,
+                                len(metadata.in_flight_at_fault),
+                                args.seed, len(engines),
+                            )
                         except OSError:
                             pass
 

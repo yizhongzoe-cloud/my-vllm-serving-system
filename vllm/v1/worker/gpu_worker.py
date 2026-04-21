@@ -562,14 +562,43 @@ class Worker(WorkerBase):
         self,
         request_id: str,
         target_block_ids: list[int],
+        sync: bool = True,
     ) -> int:
-        """Delegate FT KV restore RPCs to the model runner."""
+        """Delegate FT KV restore RPCs to the model runner.
+
+        Bug fix 2026-04-14: signature was missing the `sync` parameter
+        even though core.py always called with 3 args (sync=False) under
+        FT_ASYNC_RESTORE=1. The 3rd-arg call raised TypeError which the
+        outer try/except in _process_ft_pending_restores silently
+        swallowed (logger.debug only). Result: all of Phase B winner
+        results were measured WITHOUT actual KV restore — the +7.9
+        goodput vs NR was within noise (Heavy std=70).
+        """
         restore_fn = getattr(self.model_runner, "restore_kv_blocks", None)
         if not callable(restore_fn):
             raise NotImplementedError(
                 "restore_kv_blocks is not supported by this model runner"
             )
-        return restore_fn(request_id, target_block_ids)
+        return restore_fn(request_id, target_block_ids, sync)
+
+    def restore_kv_blocks_batch(
+        self,
+        specs: list,
+        sync: bool = True,
+    ) -> list[int]:
+        """Delegate batched FT KV restore RPC to the model runner."""
+        fn = getattr(self.model_runner, "restore_kv_blocks_batch", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                "restore_kv_blocks_batch is not supported by this model runner"
+            )
+        return fn(specs, sync)
+
+    def flush_pending_restore(self) -> None:
+        """Delegate the post-batch restore stream flush to the model runner."""
+        fn = getattr(self.model_runner, "flush_pending_restore", None)
+        if callable(fn):
+            fn()
 
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish

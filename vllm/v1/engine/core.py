@@ -680,16 +680,58 @@ class EngineCore:
             for nrd in scheduler_output.scheduled_new_reqs
         }
 
+        # FT_RESTORE_BATCH_RPC=1: combine N per-request restore_kv_blocks
+        # RPCs into a single batched RPC. Saves N-1 collective_rpc round
+        # trips (~50-100us each) and reduces Python orchestration overhead
+        # in the worker. All restores share the async stream when
+        # FT_ASYNC_RESTORE=1, so the single flush at the end synchronizes
+        # everything (same semantics as per-req loop, fewer cross-process
+        # round-trips).
+        batched_rpc = (
+            os.environ.get("FT_RESTORE_BATCH_RPC") == "1"
+            and use_async_restore
+        )
+
+        # First pass: collect specs for reqs that have target blocks
+        # allocated; defer those still in waiting queue.
+        restore_specs: list[tuple[str, list[int], int]] = []
         for req_id, num_ckpt_tokens in self._ft_pending_restores:
             try:
                 target_block_ids = self._get_ft_target_block_ids(
                     req_id, kv_cache_mgr
                 )
-                if not target_block_ids:
-                    still_pending.append((req_id, num_ckpt_tokens))
-                    continue
+            except Exception:
+                target_block_ids = []
+            if not target_block_ids:
+                still_pending.append((req_id, num_ckpt_tokens))
+                continue
+            restore_specs.append((req_id, target_block_ids, num_ckpt_tokens))
 
-                if use_async_restore:
+        # Fire restores. Batched path = one RPC for all reqs.
+        per_req_results: dict[str, int] = {}
+        if batched_rpc and restore_specs:
+            specs_only = [(rid, tbids) for rid, tbids, _ in restore_specs]
+            try:
+                rpc_results = self.collective_rpc(
+                    "restore_kv_blocks_batch",
+                    args=(specs_only, False),
+                )
+                async_restore_triggered = True
+                if rpc_results and rpc_results[0]:
+                    counts = rpc_results[0]
+                    for (rid, _, _), tokens in zip(restore_specs, counts):
+                        per_req_results[rid] = tokens
+            except Exception:
+                logger.exception("Batched restore RPC failed; falling back to per-request")
+                batched_rpc = False  # fall through to per-req path
+
+        for req_id, target_block_ids, num_ckpt_tokens in restore_specs:
+            try:
+                # Get the restore result (from batch or per-req call)
+                if batched_rpc:
+                    tokens_restored = per_req_results.get(req_id, 0)
+                    results = [tokens_restored]
+                elif use_async_restore:
                     results = self.collective_rpc(
                         "restore_kv_blocks",
                         args=(req_id, target_block_ids, False),
@@ -738,18 +780,19 @@ class EngineCore:
                         and old_scheduled is not None
                         and tokens_restored < num_ckpt_tokens
                     ):
-                        # Pre-budget + partial restore: scheduler thought
-                        # req only needed 1 decode token, but actual
-                        # restore returned fewer tokens than expected, so
-                        # we need to replay the gap. Bump num_scheduled
-                        # back up to cover (num_ckpt_tokens - tokens_restored)
-                        # replay tokens + the original decode.
-                        gap = num_ckpt_tokens - tokens_restored
-                        new_scheduled = old_scheduled + gap
-                        scheduler_output.num_scheduled_tokens[req_id] = (
-                            new_scheduled
-                        )
-                        scheduler_output.total_num_scheduled_tokens += gap
+                        # Pre-budget + partial restore: restore returned
+                        # FEWER tokens than promised. Set num_computed to
+                        # the actual restored value so subsequent steps
+                        # see the correct state. DO NOT bump
+                        # num_scheduled_tokens for this step — that would
+                        # exceed max_num_batched_tokens (scheduler had
+                        # already filled the budget assuming this req
+                        # only needed 1 token). Crashed with
+                        # ValueError: shapes (X,) (X,) (max_budget,) in
+                        # gpu_model_runner._prepare_inputs (2026-04-14).
+                        # The req decodes 1 token from the restored
+                        # prefix this step; subsequent steps will pick
+                        # up the gap normally via standard scheduling.
                         nrd = new_req_data_by_id.get(req_id)
                         if nrd is not None:
                             nrd.num_computed_tokens = tokens_restored
@@ -768,8 +811,16 @@ class EngineCore:
                 else:
                     # Restore failed (returned 0 or None). If pre-budget
                     # was active, num_computed_tokens was set to num_ckpt
-                    # but no KV was actually restored → must roll back to
-                    # full prefill or model will produce garbage.
+                    # but no KV was actually restored → must NOT let the
+                    # model decode at the lying position with garbage KV.
+                    #
+                    # Safer rollback: reset num_computed_tokens=0 so the
+                    # next scheduler step does fresh prefill from scratch.
+                    # DO NOT bump scheduled_tokens this step — that
+                    # exceeds max_num_batched_tokens and crashes
+                    # _prepare_inputs (see partial-restore comment above).
+                    # Set num_scheduled_tokens=0 to skip the req this
+                    # step entirely.
                     if prebudget_active:
                         request = self.scheduler._base.requests.get(req_id)
                         if request is not None:
@@ -780,19 +831,14 @@ class EngineCore:
                                 req_id, 0
                             )
                         )
-                        if (
-                            nrd is not None
-                            and nrd.prompt_token_ids is not None
-                        ):
-                            prompt_len = len(nrd.prompt_token_ids)
-                            delta = prompt_len - old_scheduled
-                            scheduler_output.num_scheduled_tokens[req_id] = (
-                                prompt_len
-                            )
-                            scheduler_output.total_num_scheduled_tokens += (
-                                delta
-                            )
+                        if nrd is not None:
                             nrd.num_computed_tokens = 0
+                        # Skip this step; total -= old_scheduled (give
+                        # the slot back to the budget).
+                        scheduler_output.num_scheduled_tokens[req_id] = 0
+                        scheduler_output.total_num_scheduled_tokens -= (
+                            old_scheduled
+                        )
                     logger.info(
                         "FT restore: request %s checkpoint not found "
                         "or empty, will recompute fully",
