@@ -1,0 +1,62 @@
+model: meta-llama/Llama-3.1-8B-Instruct
+model_tag: 8B
+max_model_len: 8192
+gpu_memory_utilization: 0.8
+dtype: float16
+enforce_eager: true
+dp_size: 2
+ft_prefill_throughput: 4000.0
+ft_decode_throughput: 2000.0
+ft_load_bandwidth: 10.0e9
+ft_planning_horizon: 1.0
+ft_checkpoint_cost_profile: experiments_v2/checkpoint_cost_profile_8b.json
+ft_decode_capacity_profile: experiments_v2/decode_capacity_profile_8b.json
+failure_detection_time_ms: 100.0
+failure_timeout_sec: 5.0
+checkpoint_pool_bytes: 34359738368
+force_output_len: true
+workloads:
+  W1_Chat:
+    dataset: sharegpt
+    dataset_path: experiments_v2/datasets/cached/sharegpt_5000.jsonl
+    tpot_slo_ms: 100.0
+    arrival: poisson
+    description: Chatbot, decode-heavy
+load_levels:
+  Light:
+    pct: 0.25
+    rps: 0.5
+  Moderate:
+    pct: 0.4
+    rps: 1.0
+  Heavy:
+    pct: 0.55
+    rps: 1.5
+slo:
+  ttft_ms: 2000.0
+  failure_gap_ms: 3000.0
+  ttft_base_ms: 200.0
+  gap_base_ms: 1000.0
+fault_timing:
+  none: null
+  F1_Early: 60.0
+  F2_Mid: 150.0
+  F3_Late: 240.0
+run_duration_sec: 300.0
+warmup_sec: 30.0
+seeds:
+- 42
+request_timeout_sec: 120.0
+server_startup_timeout: 300.0
+baselines:
+  Our-System:
+    scheduling_policy: ft_benders_centralized
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+  NoFT-Reprefill:
+    scheduling_policy: fault_tolerant
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+results_dir: results_v2
