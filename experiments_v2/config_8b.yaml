@@ -71,12 +71,20 @@ workloads:
     arrival: "poisson"
     description: "Queue-saturation stress: sharegpt @ high RPS + tight SLO"
 
+  W5b_LongFull:
+    dataset: "arxiv"
+    dataset_path: "experiments_v2/datasets/cached/arxiv_2000.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "Long-context summarization (unfiltered ArXiv, p95=7108)"
+
 # ---- Load levels ----
 # Manual estimates for 8B dp=2 on A6000. Run calibrate.py for precise values.
 load_levels:
   Light:    {pct: 0.25, rps: 0.5}
   Moderate: {pct: 0.40, rps: 1.0}
   Heavy:    {pct: 0.55, rps: 1.5}
+  Saturated: {pct: 0.85, rps: 2.5}
 
 # ---- SLO ----
 # Manual estimates based on 8B profile (prefill ~35ms, TPOT ~30-50ms).
@@ -166,6 +174,15 @@ baselines:
   # (faster recovery but has checkpoint overhead).
   NoFT-Reprefill:
     scheduling_policy: "fault_tolerant"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+  # Our-System but with checkpointing disabled. Used with
+  # FT_RECOVERY_MODE=reprefill to measure solver-only value
+  # (no ckpt overhead, no reload).
+  Our-System-NoCkpt:
+    scheduling_policy: "ft_benders_centralized"
     enable_checkpointing: false
     max_gpu_failures: 1
     fixed_checkpoint_blocks: 0
