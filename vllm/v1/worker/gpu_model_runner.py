@@ -7081,33 +7081,119 @@ class GPUModelRunner(
                 else:
                     stream = torch.cuda.Stream()
 
-                with torch.cuda.stream(stream):
-                    for chunk_filename, assignments in restore_plan_by_chunk.items():
-                        chunk_data = loaded_chunks[chunk_filename]
-                        kv_tensors: dict[int, torch.Tensor] = chunk_data["kv_tensors"]
-                        slot_indices = [slot_idx for _, slot_idx in assignments]
-                        target_indices = torch.tensor(
-                            [target_block_ids[logical_idx] for logical_idx, _ in assignments],
-                            dtype=torch.int64,
-                            device=device,
-                        )
-                        for layer_idx, gpu_tensor in enumerate(self.kv_caches):
-                            host_tensor = kv_tensors.get(layer_idx)
-                            if host_tensor is None:
-                                continue
-                            src = host_tensor[:, slot_indices].to(
-                                device, non_blocking=True
+                # Parallel-restore safety: restore_kv_blocks_batch may
+                # invoke this method from multiple threads. CUDA enqueue
+                # (stream context, scatter writes, async H2D) is NOT
+                # thread-safe in PyTorch — concurrent enqueues on a
+                # shared stream triggered device-side asserts in
+                # flash_attn (KV cache corruption). Serialize the CUDA
+                # section via a per-runner lock. The CPU-heavy portion
+                # (file read + _fast_load_chunk / torch.load) already
+                # ran in parallel above, which is where the dominant
+                # cost lives.
+                cuda_lock = getattr(self, "_ft_restore_cuda_lock", None)
+                if cuda_lock is not None:
+                    cuda_lock.acquire()
+                try:
+                    with torch.cuda.stream(stream):
+                        for chunk_filename, assignments in restore_plan_by_chunk.items():
+                            chunk_data = loaded_chunks[chunk_filename]
+                            kv_tensors: dict[int, torch.Tensor] = chunk_data["kv_tensors"]
+                            slot_indices = [slot_idx for _, slot_idx in assignments]
+                            tgt_block_list = [
+                                target_block_ids[logical_idx]
+                                for logical_idx, _ in assignments
+                            ]
+                            # BOUNDS CHECK (fix for cuda_assert seen in
+                            # W5_reload_w16/42 and phase8 cuda_assert seeds).
+                            # Root cause: vectorized_gather_kernel fires
+                            # "index out of bounds" when either the src
+                            # slot_indices or dest target_block_ids
+                            # exceed the respective tensor's dim-1 size.
+                            # Once device-side assert fires, CUDA ctx is
+                            # corrupt and engine must die.
+                            # Preempt the crash by falling back to full
+                            # recompute (return 0) when any index is OOB.
+                            sample_host = next(iter(kv_tensors.values()), None)
+                            if sample_host is not None:
+                                max_slot = sample_host.shape[1]
+                                if any(si < 0 or si >= max_slot for si in slot_indices):
+                                    logger.warning(
+                                        "Restore %s: slot_indices OOB (max=%d, "
+                                        "slots=%s) — skip chunk, fall back",
+                                        request_id, max_slot, slot_indices[:8],
+                                    )
+                                    return 0
+                            max_tgt = self.kv_caches[0].shape[1]
+                            if any(t < 0 or t >= max_tgt for t in tgt_block_list):
+                                logger.warning(
+                                    "Restore %s: target_block_ids OOB (max=%d, "
+                                    "blocks=%s) — skip chunk, fall back",
+                                    request_id, max_tgt, tgt_block_list[:8],
+                                )
+                                return 0
+                            target_indices = torch.tensor(
+                                tgt_block_list,
+                                dtype=torch.int64,
+                                device=device,
                             )
-                            gpu_tensor[:, target_indices, :, :, :] = src
-                if not use_async:
-                    stream.synchronize()
+                            for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                                host_tensor = kv_tensors.get(layer_idx)
+                                if host_tensor is None:
+                                    continue
+                                src = host_tensor[:, slot_indices].to(
+                                    device, non_blocking=True
+                                )
+                                gpu_tensor[:, target_indices, :, :, :] = src
+                    if not use_async:
+                        stream.synchronize()
+                    elif cuda_lock is not None and os.environ.get(
+                        "FT_RESTORE_PER_REQ_SYNC", "1"
+                    ) == "1":
+                        # Parallel batch restore: each req allocates
+                        # ~224 MB of temp src GPU tensors (32 layers ×
+                        # ~7 MB for 8B at 121 blocks). Under
+                        # FT_ASYNC_RESTORE these aren't freed until
+                        # flush_pending_restore; with 7-13 reqs that's
+                        # 1.5-3 GB, exceeding the ~2.5 GB headroom
+                        # after gpu_memory_utilization=0.9. Sync per
+                        # req so temp src tensors are released before
+                        # the next thread enters. Still overlaps CPU
+                        # chunk loads (the dominant cost). Disable via
+                        # FT_RESTORE_PER_REQ_SYNC=0 when headroom is
+                        # widened (gpu_util<=0.85 or concurrency<=2).
+                        stream.synchronize()
+                finally:
+                    if cuda_lock is not None:
+                        cuda_lock.release()
             else:
                 for chunk_filename, assignments in restore_plan_by_chunk.items():
                     chunk_data = loaded_chunks[chunk_filename]
                     kv_tensors = chunk_data["kv_tensors"]
                     slot_indices = [slot_idx for _, slot_idx in assignments]
+                    tgt_block_list = [
+                        target_block_ids[logical_idx]
+                        for logical_idx, _ in assignments
+                    ]
+                    # Same OOB guard as async path above.
+                    sample_host = next(iter(kv_tensors.values()), None)
+                    if sample_host is not None:
+                        max_slot = sample_host.shape[1]
+                        if any(si < 0 or si >= max_slot for si in slot_indices):
+                            logger.warning(
+                                "Restore %s: slot_indices OOB — fall back",
+                                request_id,
+                            )
+                            return 0
+                    max_tgt = self.kv_caches[0].shape[1]
+                    if any(t < 0 or t >= max_tgt for t in tgt_block_list):
+                        logger.warning(
+                            "Restore %s: target_block_ids OOB — fall back",
+                            request_id,
+                        )
+                        return 0
                     target_indices = torch.tensor(
-                        [target_block_ids[logical_idx] for logical_idx, _ in assignments],
+                        tgt_block_list,
                         dtype=torch.int64,
                         device=device,
                     )
@@ -7512,6 +7598,309 @@ class GPUModelRunner(
             request_id, target_block_ids, sync=sync,
         )
 
+    def restore_kv_blocks_batch(
+        self,
+        specs: list[tuple[str, list[int]]],
+        sync: bool = True,
+    ) -> list[int]:
+        """Restore KV for multiple requests in parallel.
+
+        FT_RESTORE_PARALLEL_LOAD (default 1): load chunks + enqueue H2D
+        in a ThreadPoolExecutor. Per-req dominant cost is chunk file
+        read + deserialize (100-500ms each). Serializing across 7-9 reqs
+        previously added ~1.4-2s Stage1 latency before execute_model.
+        Threadpool overlaps file I/O (GIL-released) and async H2D
+        enqueues (also GIL-released) across reqs; kv_caches access is
+        read-only and target_block_ids are disjoint per req, so no locks
+        needed. All enqueues land on the shared FT_ASYNC_RESTORE stream
+        and are synchronized by a single flush at the end.
+
+        FT_BATCHED_RELOAD=1 (NEW, default OFF): use per-layer aggregated
+        scatter. Instead of N_reqs × 32 layers scatter kernel launches,
+        do 32 launches total (one per layer, aggregating all reqs'
+        slot data). Target is to make OS reload path faster than
+        reprefill by bulking up kernel work.
+        """
+        mode = os.environ.get("FT_BATCHED_RELOAD", "0")
+        if mode == "1":
+            try:
+                return self._restore_batched_v2(specs, sync=sync)
+            except Exception:
+                logger.exception(
+                    "FT_BATCHED_RELOAD=1: batched_v2 failed, falling back"
+                )
+                # fall through to legacy
+        elif mode == "2":
+            try:
+                return self._restore_batched_v3_pinned(specs, sync=sync)
+            except Exception:
+                logger.exception(
+                    "FT_BATCHED_RELOAD=2: batched_v3_pinned failed, falling back"
+                )
+                # fall through to legacy
+
+        n = len(specs)
+        results: list[int] = [0] * n
+        parallel = os.environ.get("FT_RESTORE_PARALLEL_LOAD", "1") == "1"
+        # Pre-create the shared async stream and CUDA-section lock so
+        # worker threads don't race on lazy init. The lock serializes
+        # the CUDA enqueue block inside _restore_shared_checkpoint —
+        # concurrent CUDA stream context + scatter writes were causing
+        # device-side asserts in flash_attn (KV corruption). CPU file
+        # loads still run in parallel (that's the dominant cost).
+        if parallel and n > 1:
+            if (
+                torch.cuda.is_available()
+                and os.environ.get("FT_ASYNC_RESTORE") == "1"
+                and getattr(self, "_ft_shared_restore_stream", None) is None
+            ):
+                self._ft_shared_restore_stream = torch.cuda.Stream()
+            if getattr(self, "_ft_restore_cuda_lock", None) is None:
+                import threading
+                self._ft_restore_cuda_lock = threading.Lock()
+        if not parallel or n <= 1:
+            for i, (req_id, target_blocks) in enumerate(specs):
+                results[i] = self.restore_kv_blocks(
+                    req_id, target_blocks, sync=False
+                )
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            try:
+                cap = int(os.environ.get("FT_RESTORE_MAX_WORKERS", "8"))
+            except ValueError:
+                cap = 8
+            max_workers = min(n, max(1, cap))
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="ft_restore",
+            ) as ex:
+                futs = [
+                    ex.submit(self.restore_kv_blocks, rid, tb, False)
+                    for rid, tb in specs
+                ]
+                for i, f in enumerate(futs):
+                    try:
+                        results[i] = f.result()
+                    except Exception:
+                        logger.exception(
+                            "Parallel restore failed for spec %d", i
+                        )
+                        results[i] = 0
+        if sync:
+            self.flush_pending_restore()
+        return results
+
+    def _restore_batched_v3_pinned(
+        self,
+        specs: list[tuple[str, list[int]]],
+        sync: bool = True,
+    ) -> list[int]:
+        """Batched KV restore v3: pinned staging buffer, no fancy-index.
+
+        v2's bottleneck was CPU-side fancy-index + cat. v3 avoids both:
+          1. CPU load: same ThreadPool path as v2 (parallel chunk load).
+          2. Per-layer scatter: instead of fancy-indexing into host_tensor
+             then cat-ing, directly copy per-block slices into a
+             pre-allocated pinned buffer at their target offset. Then
+             single async H2D + single index_copy_ per layer.
+
+        The pinned buffer is lazily allocated once (sized for max blocks)
+        and reused across restores.
+        """
+        if not self.kv_caches or not specs:
+            return [0] * len(specs)
+
+        device = self.kv_caches[0].device
+        num_kv_blocks = self.kv_caches[0].shape[1]
+        num_layers = len(self.kv_caches)
+        n = len(specs)
+        results: list[int] = [0] * n
+
+        # Phase A: CPU-parallel load (identical to v2).
+        per_req_data: list[Any] = [None] * n
+
+        def load_one(i: int) -> None:
+            req_id, target_block_ids = specs[i]
+            if hasattr(self, "_ft_checkpoint_pool"):
+                local_tokens = self._ft_checkpoint_pool.restore_checkpoint(
+                    request_id=req_id,
+                    gpu_kv_caches=self.kv_caches,
+                    target_block_ids=target_block_ids,
+                )
+                if local_tokens > 0:
+                    results[i] = local_tokens
+                    return
+            latest_path = self._shared_latest_path(req_id)
+            request_dir = self._shared_request_dir(req_id)
+            manifest: Optional[SharedCheckpointManifest] = None
+            if os.path.exists(latest_path):
+                try:
+                    with open(latest_path, encoding="utf-8") as f:
+                        mf = f.read().strip()
+                    if mf:
+                        manifest = self._load_shared_manifest(req_id, mf)
+                except Exception:
+                    pass
+            if manifest is None:
+                manifest = self._scan_latest_inline_manifest(req_id)
+            if manifest is None:
+                return
+            expected = list(range(manifest.num_blocks))
+            if sorted(manifest.block_map) != expected:
+                return
+            num_ckpt = min(manifest.num_blocks, len(target_block_ids))
+            if num_ckpt <= 0:
+                return
+            plan: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            for li in range(num_ckpt):
+                tbid = target_block_ids[li]
+                if not 0 <= tbid < num_kv_blocks:
+                    return
+                cfn, sidx = manifest.block_map[li]
+                plan[cfn].append((li, sidx))
+            loaded: dict[str, Any] = {}
+            for cfn in plan:
+                cp = os.path.join(request_dir, cfn)
+                if not os.path.exists(cp):
+                    return
+                if self._is_fast_chunk(cp):
+                    loaded[cfn] = self._fast_load_chunk(cp)
+                else:
+                    loaded[cfn] = torch.load(cp, weights_only=False)
+            per_req_data[i] = (
+                req_id, target_block_ids, loaded, manifest, plan, num_ckpt,
+            )
+
+        try:
+            cap = int(os.environ.get("FT_RESTORE_MAX_WORKERS", "8"))
+        except ValueError:
+            cap = 8
+        max_workers = min(n, max(1, cap))
+        if max_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="ft_v3_load",
+            ) as ex:
+                list(ex.map(load_one, range(n)))
+        else:
+            for i in range(n):
+                load_one(i)
+
+        valid = [d for d in per_req_data if d is not None]
+        if not valid:
+            return results
+
+        # Phase B: per-layer pinned-buffer scatter.
+        # Compute total blocks needed across all reqs + layers.
+        total_blocks = 0
+        for (_, tbids, _, _, plan, n_ckpt) in valid:
+            for cfn, assignments in plan.items():
+                total_blocks += len(assignments)
+
+        if total_blocks == 0:
+            return results
+
+        # Get tensor shape from first kv_cache: [2, num_blocks, block_size, heads, head_dim]
+        sample = self.kv_caches[0]
+        # Staging must match kv_cache dim order: dim0=2(KV), dim1=blocks, dim2+=per-block
+        # sample.shape = (2, num_blocks, block_size, heads, head_dim)
+        staging_key = "_ft_restore_pinned_staging"
+        gpu_staging_key = "_ft_restore_gpu_staging"
+        needed_shape = (sample.shape[0], total_blocks) + sample.shape[2:]
+
+        pinned_buf = getattr(self, staging_key, None)
+        if pinned_buf is None or pinned_buf.shape[0] < total_blocks:
+            pinned_buf = torch.empty(
+                needed_shape, dtype=sample.dtype
+            ).pin_memory()
+            setattr(self, staging_key, pinned_buf)
+
+        gpu_buf = getattr(self, gpu_staging_key, None)
+        if gpu_buf is None or gpu_buf.shape[0] < total_blocks:
+            gpu_buf = torch.empty(
+                needed_shape, dtype=sample.dtype, device=device,
+            )
+            setattr(self, gpu_staging_key, gpu_buf)
+
+        # Setup stream.
+        use_async = (
+            torch.cuda.is_available()
+            and os.environ.get("FT_ASYNC_RESTORE") == "1"
+            and not sync
+        )
+        if use_async:
+            if getattr(self, "_ft_shared_restore_stream", None) is None:
+                self._ft_shared_restore_stream = torch.cuda.Stream()
+            stream = self._ft_shared_restore_stream
+            self._ft_has_pending_restore = True
+        elif torch.cuda.is_available():
+            stream = torch.cuda.Stream()
+        else:
+            stream = None
+
+        if stream is not None:
+            ctx = torch.cuda.stream(stream)
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            for layer_idx in range(num_layers):
+                # Fill pinned buffer: direct per-block copy (no fancy index).
+                offset = 0
+                target_ids_flat: list[int] = []
+                for (
+                    req_id, tbids, loaded_chunks, manifest, plan, n_ckpt,
+                ) in valid:
+                    for cfn, assignments in plan.items():
+                        kv_t = loaded_chunks[cfn]["kv_tensors"]
+                        host_layer = kv_t.get(layer_idx)
+                        if host_layer is None:
+                            continue
+                        for logical_idx, slot_idx in assignments:
+                            # Direct copy one block along dim=1 (blocks axis).
+                            pinned_buf[:, offset].copy_(
+                                host_layer[:, slot_idx]
+                            )
+                            target_ids_flat.append(tbids[logical_idx])
+                            offset += 1
+
+                if offset == 0:
+                    continue
+
+                # Single async H2D: pinned → GPU staging (dim1 = blocks).
+                gpu_buf[:, :offset].copy_(
+                    pinned_buf[:, :offset], non_blocking=True
+                )
+                target_tensor = torch.tensor(
+                    target_ids_flat, dtype=torch.int64, device=device,
+                )
+                # Single scatter per layer along dim=1 (blocks).
+                self.kv_caches[layer_idx].index_copy_(
+                    1, target_tensor, gpu_buf[:, :offset],
+                )
+
+        # Phase C: sync.
+        if sync and stream is not None:
+            stream.synchronize()
+
+        # Fill results.
+        block_size = self.cache_config.block_size
+        for i, d in enumerate(per_req_data):
+            if d is None or results[i] > 0:
+                continue
+            req_id, _, _, manifest, _, n_ckpt = d
+            actual_tokens = min(n_ckpt * block_size, manifest.covered_tokens)
+            results[i] = actual_tokens
+            logger.info(
+                "FAULT_EVENT kv_restore_done request=%s wall_time=%.6f "
+                "tokens=%d blocks=%d path=batched_v3_pinned",
+                req_id, time.time(), actual_tokens, n_ckpt,
+            )
+
+        return results
+
     def flush_pending_restore(self) -> None:
         """FT_ASYNC_RESTORE: sync the shared restore stream.
 
@@ -7524,6 +7913,217 @@ class GPUModelRunner(
         if stream is not None and getattr(self, "_ft_has_pending_restore", False):
             stream.synchronize()
             self._ft_has_pending_restore = False
+
+    def _restore_batched_v2(
+        self,
+        specs: list[tuple[str, list[int]]],
+        sync: bool = True,
+    ) -> list[int]:
+        """Batched KV restore: per-layer aggregated scatter across all reqs.
+
+        Key differences from the legacy per-req path:
+          - Phase A (CPU): parallel-load all reqs' manifests + chunks via
+            ThreadPool, no CUDA. Each worker returns a per-req "plan"
+            (dict of layer_idx → host_tensor slice).
+          - Phase B (GPU): for each of the ~32 layers, concat all reqs'
+            slot slices into one contiguous CPU tensor, do ONE H2D copy
+            to GPU, do ONE `index_copy_` scatter into that layer's KV
+            cache. Reduces kernel launches from N_reqs×N_layers to just
+            N_layers.
+          - Phase C: single torch.cuda.synchronize() at end.
+
+        Returns list of tokens_restored per spec, in order.
+        Raises on any unrecoverable error (caller falls back to legacy).
+        """
+        if not self.kv_caches or not specs:
+            return [0] * len(specs)
+
+        device = self.kv_caches[0].device
+        num_kv_blocks = self.kv_caches[0].shape[1]
+        num_layers = len(self.kv_caches)
+        n = len(specs)
+        results: list[int] = [0] * n
+
+        # Phase A: CPU-side parallel load.
+        # Per-req data: (req_id, target_block_ids, loaded_chunks, manifest, plan)
+        # plan = list of (chunk_filename, [(logical_idx, chunk_slot_idx)])
+        per_req_data: list[Any] = [None] * n
+
+        def load_one(i: int) -> None:
+            req_id, target_block_ids = specs[i]
+            # Try local pool first (same-engine; still sync path).
+            if hasattr(self, "_ft_checkpoint_pool"):
+                local_tokens = self._ft_checkpoint_pool.restore_checkpoint(
+                    request_id=req_id,
+                    gpu_kv_caches=self.kv_caches,
+                    target_block_ids=target_block_ids,
+                )
+                if local_tokens > 0:
+                    results[i] = local_tokens
+                    return  # skip shared path
+
+            # Shared /dev/shm path. Load manifest.
+            latest_path = self._shared_latest_path(req_id)
+            request_dir = self._shared_request_dir(req_id)
+            manifest: Optional[SharedCheckpointManifest] = None
+            if os.path.exists(latest_path):
+                try:
+                    with open(latest_path, encoding="utf-8") as f:
+                        manifest_filename = f.read().strip()
+                    if manifest_filename:
+                        manifest = self._load_shared_manifest(
+                            req_id, manifest_filename,
+                        )
+                except Exception:
+                    pass
+            if manifest is None:
+                manifest = self._scan_latest_inline_manifest(req_id)
+            if manifest is None:
+                return
+            expected = list(range(manifest.num_blocks))
+            if sorted(manifest.block_map) != expected:
+                return
+            num_checkpoint_blocks = min(
+                manifest.num_blocks, len(target_block_ids)
+            )
+            if num_checkpoint_blocks <= 0:
+                return
+            # Build plan + validate block IDs
+            plan: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            for logical_idx in range(num_checkpoint_blocks):
+                tbid = target_block_ids[logical_idx]
+                if not 0 <= tbid < num_kv_blocks:
+                    return
+                chunk_fn, slot_idx = manifest.block_map[logical_idx]
+                plan[chunk_fn].append((logical_idx, slot_idx))
+            # Load all chunks for this req.
+            loaded_chunks: dict[str, Any] = {}
+            for chunk_fn in plan:
+                chunk_path = os.path.join(request_dir, chunk_fn)
+                if not os.path.exists(chunk_path):
+                    return
+                if self._is_fast_chunk(chunk_path):
+                    loaded_chunks[chunk_fn] = self._fast_load_chunk(chunk_path)
+                else:
+                    loaded_chunks[chunk_fn] = torch.load(
+                        chunk_path, weights_only=False
+                    )
+            per_req_data[i] = (
+                req_id, target_block_ids, loaded_chunks, manifest, plan,
+                num_checkpoint_blocks,
+            )
+
+        # Parallel CPU load (reusing same thread-count cap as legacy path).
+        try:
+            cap = int(os.environ.get("FT_RESTORE_MAX_WORKERS", "8"))
+        except ValueError:
+            cap = 8
+        max_workers = min(n, max(1, cap))
+        if max_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="ft_batch_load",
+            ) as ex:
+                list(ex.map(load_one, range(n)))
+        else:
+            for i in range(n):
+                load_one(i)
+
+        # Phase B: per-layer aggregated scatter.
+        # Ensure shared restore stream exists.
+        use_async = (
+            torch.cuda.is_available()
+            and os.environ.get("FT_ASYNC_RESTORE") == "1"
+            and not sync
+        )
+        if use_async:
+            if getattr(self, "_ft_shared_restore_stream", None) is None:
+                self._ft_shared_restore_stream = torch.cuda.Stream()
+            stream = self._ft_shared_restore_stream
+            self._ft_has_pending_restore = True
+        elif torch.cuda.is_available():
+            stream = torch.cuda.Stream()
+        else:
+            stream = None
+
+        valid_per_req = [
+            d for d in per_req_data if d is not None
+        ]
+
+        if not valid_per_req:
+            # All local-pool or all failed; nothing to do in Phase B.
+            if sync and stream is not None:
+                stream.synchronize()
+            return results
+
+        if stream is not None:
+            ctx = torch.cuda.stream(stream)
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            for layer_idx in range(num_layers):
+                src_slices_cpu: list[torch.Tensor] = []
+                target_ids_flat: list[int] = []
+                for (
+                    req_id, tbids, loaded_chunks, manifest, plan,
+                    n_ckpt_blocks,
+                ) in valid_per_req:
+                    for chunk_fn, assignments in plan.items():
+                        chunk_data = loaded_chunks[chunk_fn]
+                        kv_tensors = chunk_data["kv_tensors"]
+                        host_tensor = kv_tensors.get(layer_idx)
+                        if host_tensor is None:
+                            continue
+                        slot_indices = [s for _, s in assignments]
+                        # host_tensor[:, slot_indices] — fancy index, allocates
+                        src_slice = host_tensor[:, slot_indices]
+                        src_slices_cpu.append(src_slice)
+                        target_ids_flat.extend(
+                            tbids[l] for l, _ in assignments
+                        )
+                if not src_slices_cpu:
+                    continue
+                # Concat all slices along block axis (dim=1).
+                if len(src_slices_cpu) == 1:
+                    cat_cpu = src_slices_cpu[0]
+                else:
+                    cat_cpu = torch.cat(src_slices_cpu, dim=1)
+                # Push to GPU (single H2D copy per layer).
+                cat_gpu = cat_cpu.to(device, non_blocking=True)
+                target_tensor = torch.tensor(
+                    target_ids_flat, dtype=torch.int64, device=device,
+                )
+                # Single scatter kernel per layer.
+                self.kv_caches[layer_idx].index_copy_(
+                    1, target_tensor, cat_gpu,
+                )
+
+        # Phase C: single sync (if synchronous mode).
+        if sync and stream is not None:
+            stream.synchronize()
+
+        # Fill in results for reqs that loaded successfully.
+        block_size = self.cache_config.block_size
+        for i, d in enumerate(per_req_data):
+            if d is None:
+                continue
+            if results[i] > 0:
+                continue  # already filled by local pool
+            req_id, _, _, manifest, _, n_ckpt_blocks = d
+            actual_tokens = min(
+                n_ckpt_blocks * block_size, manifest.covered_tokens
+            )
+            results[i] = actual_tokens
+            logger.info(
+                "FAULT_EVENT kv_restore_done request=%s wall_time=%.6f "
+                "tokens=%d blocks=%d path=batched_v2",
+                req_id, time.time(), actual_tokens, n_ckpt_blocks,
+            )
+
+        return results
 
     def get_checkpoint_stats(self) -> dict:
         """Get checkpoint pool statistics."""
