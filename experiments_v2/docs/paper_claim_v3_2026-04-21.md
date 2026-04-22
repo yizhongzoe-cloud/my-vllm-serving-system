@@ -1,5 +1,12 @@
 # Paper Claim v3 — Honest assessment (2026-04-21, 15:56)
 
+> **Status note (18:00)**: `gpu47_expansion.sh` is still running (ETA
+> ~19:10). It expands W5 Moderate to 12 seeds, W7 Saturated to 9 seeds,
+> and tests **W4_Mixed** (production mix with per-request SLOs —
+> solver's natural strength). This doc will be re-revised after gpu47
+> completes. See `overnight_2026-04-21_summary.md` for the current
+> investigation trail and decision tree.
+
 ## TL;DR
 
 After 9-seed paired testing, **V2-NoCkpt does NOT reliably strict-beat
