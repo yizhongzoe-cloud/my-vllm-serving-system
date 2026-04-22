@@ -1,0 +1,15 @@
+FT_STEP_TIMING: captured 500 step_with_batch_queue() calls (pid=1807533)
+  enqueue path (no GPU wait): 1
+  dequeue path (GPU wait):    499
+
+=== Enqueue path: total call time ===
+  avg=248.291ms  p50=248.291ms  p95=248.291ms
+
+=== Dequeue path: per-section breakdown ===
+Section                                                 avg        p50        p95
+1. total call                                       43.841ms    28.237ms   170.206ms
+2. enqueue-side prep (sched + exec launch)          25.267ms    15.954ms    65.435ms
+3. pop + future.result() — GPU forward wait         18.348ms    11.653ms    20.780ms
+4. update_from_output + deferred handling            0.225ms     0.178ms     0.368ms
+
+  sanity: section 1 (43.841) ≈ sum 2..4 (43.841)

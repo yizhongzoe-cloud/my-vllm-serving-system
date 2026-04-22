@@ -1,0 +1,94 @@
+[
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00000-a8f3fcdb",
+    "gpu": 0,
+    "wall_time": 1776325238.757084,
+    "timestamp": 1776325238.757084
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 0,
+    "wall_time": 1776325359.521024,
+    "source": "process_monitor",
+    "timestamp": 1776325359.521024
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 0,
+    "wall_time": 1776325359.521169,
+    "timestamp": 1776325359.521169
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "wall_time": 1776325359.521276,
+    "timestamp": 1776325359.521276,
+    "source": "fault_event"
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 3,
+    "total": 3,
+    "dropped": 0,
+    "timestamp": 1776325359.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": 0,
+    "wall_time": 1776325359.521874,
+    "recovered": 3,
+    "total": 3,
+    "dropped": 0,
+    "timestamp": 1776325359.521874,
+    "source": "fault_event"
+  },
+  {
+    "type": "kv_restore_done",
+    "request_id": "chatcmpl-req-00191-b7212d0c",
+    "wall_time": 1776325359.665554,
+    "tokens": 576,
+    "blocks": 36,
+    "timestamp": 1776325359.665554
+  },
+  {
+    "type": "first_token_after_recovery",
+    "request_id": "chatcmpl-req-00191-b7212d0c",
+    "wall_time": 1776325360.013226,
+    "timestamp": 1776325360.013226
+  },
+  {
+    "type": "first_token_after_recovery",
+    "request_id": "chatcmpl-req-00193-95d8e7e3",
+    "wall_time": 1776325360.013337,
+    "timestamp": 1776325360.013337
+  },
+  {
+    "type": "first_token_after_recovery",
+    "request_id": "chatcmpl-req-00194-884fc800",
+    "wall_time": 1776325360.013381,
+    "timestamp": 1776325360.013381
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 1,
+    "wall_time": 1776325544.022777,
+    "source": "process_monitor",
+    "timestamp": 1776325544.022777
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 1,
+    "wall_time": 1776325544.618086,
+    "timestamp": 1776325544.618086
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 1,
+    "wall_time": 1776325544.618202,
+    "timestamp": 1776325544.618202,
+    "source": "fault_event"
+  }
+]

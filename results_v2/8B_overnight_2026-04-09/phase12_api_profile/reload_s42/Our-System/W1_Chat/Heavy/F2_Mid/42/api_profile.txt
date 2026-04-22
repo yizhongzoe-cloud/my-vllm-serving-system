@@ -1,0 +1,182 @@
+FT_API_PROFILE: captured ~60s of API server cProfile (cumulative time, top 80)
+
+         4659069 function calls (4570681 primitive calls) in 8.075 seconds
+
+   Ordered by: cumulative time
+   List reduced from 856 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     2972    0.043    0.000    3.211    0.001 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:389(ft_process_outputs_socket)
+     3102    0.036    0.000    2.847    0.001 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:1501(process_engine_outputs)
+      107    0.002    0.000    2.796    0.026 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:184(_cleanup_shared_checkpoint_request)
+      107    0.003    0.000    2.793    0.026 /usr/lib/python3.10/shutil.py:688(rmtree)
+      104    0.003    0.000    2.782    0.027 /usr/lib/python3.10/shutil.py:627(_rmtree_safe_fd)
+      312    2.776    0.009    2.776    0.009 {built-in method posix.unlink}
+    28738    0.017    0.000    2.307    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/responses.py:272(wrap)
+    28534    0.160    0.000    2.276    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/responses.py:245(stream_response)
+    57282    0.448    0.000    1.838    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/chat_completion/serving.py:628(chat_completion_stream_generator)
+     2972    0.045    0.000    1.660    0.001 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/async_llm.py:645(output_handler)
+     3102    0.132    0.000    1.246    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:577(process_outputs)
+    86020    0.057    0.000    0.817    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:240(__init__)
+    86117    0.098    0.000    0.788    0.000 {method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects}
+143292/86020    0.402    0.000    0.619    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/protocol.py:35(__log_extra_fields__)
+    29035    0.111    0.000    0.351    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:94(update)
+    29035    0.056    0.000    0.346    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:264(make_request_output)
+     2982    0.006    0.000    0.308    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/asyncio.py:151(<lambda>)
+     2984    0.063    0.000    0.302    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:670(_handle_events)
+    29035    0.033    0.000    0.300    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:774(_update_stats_from_output)
+    56971    0.059    0.000    0.300    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/async_llm.py:524(generate)
+     3102    0.009    0.000    0.298    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/metrics/loggers.py:1254(record)
+    29035    0.093    0.000    0.267    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/metrics/stats.py:256(update_from_output)
+     3102    0.048    0.000    0.263    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/metrics/loggers.py:989(record)
+57904/28952    0.047    0.000    0.257    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/_exception_handler.py:34(sender)
+    28641    0.034    0.000    0.238    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:481(model_dump_json)
+     3102    0.006    0.000    0.223    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:270(recv_multipart)
+     3150    0.064    0.000    0.220    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:470(_add_recv_event)
+    29035    0.019    0.000    0.216    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:220(decode_next)
+    28952    0.022    0.000    0.210    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_fastapi_instrumentator/middleware.py:166(send_wrapper)
+    29423    0.021    0.000    0.198    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:233(_protected_step)
+     3114    0.043    0.000    0.198    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:586(_handle_recv)
+    56864    0.062    0.000    0.196    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:73(get)
+    28641    0.195    0.000    0.195    0.000 {method 'to_json' of 'pydantic_core._pydantic_core.SchemaSerializer' objects}
+    28952    0.025    0.000    0.188    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/middleware/errors.py:156(_send)
+    32264    0.020    0.000    0.183    0.000 /home/jlpang/my-vllm-serving-system/vllm/envs.py:1632(__getattr__)
+    29423    0.177    0.000    0.177    0.000 {method 'step' of 'tokenizers.decoders.DecodeStream' objects}
+    28952    0.113    0.000    0.163    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:462(send)
+      408    0.006    0.000    0.162    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_fastapi_instrumentator/middleware.py:125(__call__)
+    32149    0.030    0.000    0.161    0.000 /home/jlpang/my-vllm-serving-system/vllm/envs.py:1397(<lambda>)
+      408    0.001    0.000    0.158    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:418(run_asgi)
+      194    0.001    0.000    0.157    0.001 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/utils.py:117(wrapper)
+     2864    0.015    0.000    0.157    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:1203(_solve_epoch_loop)
+      408    0.003    0.000    0.156    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/uvicorn/middleware/proxy_headers.py:27(__call__)
+      194    0.001    0.000    0.155    0.001 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/chat_completion/api_router.py:34(create_chat_completion)
+    29035    0.099    0.000    0.154    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:328(_new_request_output)
+      194    0.005    0.000    0.152    0.001 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/chat_completion/serving.py:328(create_chat_completion)
+      408    0.001    0.000    0.147    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/fastapi/applications.py:1160(__call__)
+      408    0.001    0.000    0.146    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/applications.py:103(__call__)
+      408    0.001    0.000    0.145    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/middleware/errors.py:149(__call__)
+      408    0.002    0.000    0.144    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/middleware/cors.py:77(__call__)
+    29035    0.073    0.000    0.137    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:372(_new_completion_output)
+    87970    0.065    0.000    0.135    0.000 {built-in method builtins.any}
+    32264    0.017    0.000    0.132    0.000 /usr/lib/python3.10/os.py:772(getenv)
+    57068    0.029    0.000    0.127    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/protocol.py:264(handle_deprecated_reasoning_content)
+    57359    0.069    0.000    0.124    0.000 /usr/lib/python3.10/asyncio/locks.py:201(wait)
+      408    0.001    0.000    0.121    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/middleware/exceptions.py:47(__call__)
+  816/515    0.001    0.000    0.119    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/_exception_handler.py:31(wrapped_app)
+    33157    0.033    0.000    0.119    0.000 /usr/lib/python3.10/_collections_abc.py:821(get)
+      408    0.001    0.000    0.119    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/fastapi/middleware/asyncexitstack.py:15(__call__)
+    33635    0.053    0.000    0.118    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/metrics.py:665(observe)
+      408    0.001    0.000    0.117    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/routing.py:712(__call__)
+      408    0.002    0.000    0.117    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/routing.py:718(app)
+      408    0.001    0.000    0.110    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/routing.py:281(handle)
+      408    0.002    0.000    0.109    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/fastapi/routing.py:110(app)
+      408    0.002    0.000    0.108    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/fastapi/routing.py:113(app)
+    24500    0.051    0.000    0.106    0.000 /usr/lib/python3.10/enum.py:986(__and__)
+    57175    0.046    0.000    0.098    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:1028(__setattr__)
+    29035    0.024    0.000    0.094    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:57(put)
+   403522    0.083    0.000    0.090    0.000 {built-in method builtins.isinstance}
+    83295    0.048    0.000    0.087    0.000 /usr/lib/python3.10/enum.py:359(__call__)
+    32458    0.048    0.000    0.084    0.000 /usr/lib/python3.10/os.py:675(__getitem__)
+      194    0.005    0.000    0.084    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/fastapi/routing.py:382(app)
+      194    0.003    0.000    0.081    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/chat_completion/serving.py:218(render_chat_request)
+      194    0.003    0.000    0.072    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/serving.py:1172(_preprocess_chat)
+     3102    0.006    0.000    0.070    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/serial_utils.py:297(decode)
+   402740    0.067    0.000    0.067    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/protocol.py:52(<genexpr>)
+    28760    0.040    0.000    0.067    0.000 /usr/lib/python3.10/asyncio/locks.py:183(set)
+    83422    0.054    0.000    0.064    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/values.py:18(inc)
+     2996    0.007    0.000    0.062    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:698(_add_io_state)
+     3102    0.059    0.000    0.061    0.000 {method 'decode' of 'msgspec.msgpack.Decoder' objects}
+
+
+
+
+=== Sorted by total time (top 80) ===
+
+         4659069 function calls (4570681 primitive calls) in 8.075 seconds
+
+   Ordered by: internal time
+   List reduced from 856 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      312    2.776    0.009    2.776    0.009 {built-in method posix.unlink}
+    57282    0.448    0.000    1.838    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/chat_completion/serving.py:628(chat_completion_stream_generator)
+143292/86020    0.402    0.000    0.619    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/protocol.py:35(__log_extra_fields__)
+    28641    0.195    0.000    0.195    0.000 {method 'to_json' of 'pydantic_core._pydantic_core.SchemaSerializer' objects}
+    29423    0.177    0.000    0.177    0.000 {method 'step' of 'tokenizers.decoders.DecodeStream' objects}
+    28534    0.160    0.000    2.276    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/responses.py:245(stream_response)
+     3102    0.132    0.000    1.246    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:577(process_outputs)
+    28952    0.113    0.000    0.163    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/uvicorn/protocols/http/httptools_impl.py:462(send)
+    29035    0.111    0.000    0.351    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:94(update)
+    29035    0.099    0.000    0.154    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:328(_new_request_output)
+    86117    0.098    0.000    0.788    0.000 {method 'validate_python' of 'pydantic_core._pydantic_core.SchemaValidator' objects}
+    29035    0.093    0.000    0.267    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/metrics/stats.py:256(update_from_output)
+   403522    0.083    0.000    0.090    0.000 {built-in method builtins.isinstance}
+    29035    0.073    0.000    0.137    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:372(_new_completion_output)
+    57359    0.069    0.000    0.124    0.000 /usr/lib/python3.10/asyncio/locks.py:201(wait)
+   402740    0.067    0.000    0.067    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/protocol.py:52(<genexpr>)
+    87970    0.065    0.000    0.135    0.000 {built-in method builtins.any}
+     3150    0.064    0.000    0.220    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:470(_add_recv_event)
+     2984    0.063    0.000    0.302    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:670(_handle_events)
+    56864    0.062    0.000    0.196    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:73(get)
+    56971    0.059    0.000    0.300    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/async_llm.py:524(generate)
+     3102    0.059    0.000    0.061    0.000 {method 'decode' of 'msgspec.msgpack.Decoder' objects}
+    86020    0.057    0.000    0.817    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:240(__init__)
+    29035    0.056    0.000    0.346    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:264(make_request_output)
+    83422    0.054    0.000    0.064    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/values.py:18(inc)
+    33635    0.053    0.000    0.118    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/metrics.py:665(observe)
+    24500    0.051    0.000    0.106    0.000 /usr/lib/python3.10/enum.py:986(__and__)
+    32458    0.048    0.000    0.084    0.000 /usr/lib/python3.10/os.py:675(__getitem__)
+    83295    0.048    0.000    0.087    0.000 /usr/lib/python3.10/enum.py:359(__call__)
+     3102    0.048    0.000    0.263    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/metrics/loggers.py:989(record)
+57904/28952    0.047    0.000    0.257    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/_exception_handler.py:34(sender)
+    57175    0.046    0.000    0.098    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:1028(__setattr__)
+    39208    0.045    0.000    0.045    0.000 {method 'set_result' of '_asyncio.Future' objects}
+     2972    0.045    0.000    1.660    0.001 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/async_llm.py:645(output_handler)
+     3114    0.043    0.000    0.198    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:586(_handle_recv)
+     2972    0.043    0.000    3.211    0.001 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:389(ft_process_outputs_socket)
+    28760    0.040    0.000    0.067    0.000 /usr/lib/python3.10/asyncio/locks.py:183(set)
+    83295    0.038    0.000    0.038    0.000 /usr/lib/python3.10/enum.py:678(__new__)
+    29035    0.038    0.000    0.038    0.000 /home/jlpang/my-vllm-serving-system/vllm/outputs.py:110(__init__)
+    57175    0.037    0.000    0.045    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:94(_model_field_setattr_handler)
+   242376    0.036    0.000    0.036    0.000 {built-in method builtins.len}
+     3102    0.036    0.000    2.847    0.001 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:1501(process_engine_outputs)
+    28641    0.034    0.000    0.238    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/pydantic/main.py:481(model_dump_json)
+   192388    0.034    0.000    0.034    0.000 {method 'get' of 'dict' objects}
+     3102    0.034    0.000    0.060    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/sugar/socket.py:771(recv_multipart)
+    29035    0.033    0.000    0.300    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:774(_update_stats_from_output)
+    29035    0.033    0.000    0.037    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:149(get_next_output_text)
+    33157    0.033    0.000    0.119    0.000 /usr/lib/python3.10/_collections_abc.py:821(get)
+     6946    0.031    0.000    0.034    0.000 /usr/lib/python3.10/asyncio/tasks.py:593(sleep)
+    32149    0.030    0.000    0.161    0.000 /home/jlpang/my-vllm-serving-system/vllm/envs.py:1397(<lambda>)
+    57068    0.029    0.000    0.127    0.000 /home/jlpang/my-vllm-serving-system/vllm/entrypoints/openai/engine/protocol.py:264(handle_deprecated_reasoning_content)
+    31785    0.027    0.000    0.050    0.000 /usr/lib/python3.10/asyncio/mixins.py:22(_get_loop)
+    28952    0.025    0.000    0.188    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/middleware/errors.py:156(_send)
+    29035    0.024    0.000    0.094    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:57(put)
+    32458    0.023    0.000    0.035    0.000 /usr/lib/python3.10/os.py:755(encode)
+    31785    0.023    0.000    0.023    0.000 {built-in method _asyncio._get_running_loop}
+    28952    0.022    0.000    0.210    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_fastapi_instrumentator/middleware.py:166(send_wrapper)
+    29423    0.021    0.000    0.198    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:233(_protected_step)
+    58879    0.020    0.000    0.040    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/metrics.py:73(_raise_if_not_observable)
+    32264    0.020    0.000    0.183    0.000 /home/jlpang/my-vllm-serving-system/vllm/envs.py:1632(__getattr__)
+     3126    0.020    0.000    0.045    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/sugar/attrsettr.py:43(__getattr__)
+    58879    0.020    0.000    0.020    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/metrics.py:67(_is_observable)
+      386    0.019    0.000    0.037    0.000 /home/jlpang/my-vllm-serving-system/vllm/utils/async_utils.py:85(_batch_encode_loop)
+    29035    0.019    0.000    0.216    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/detokenizer.py:220(decode_next)
+     1907    0.018    0.000    0.037    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/core/sched/benders/cost_tables.py:191(_compute_costs_raw)
+    32264    0.017    0.000    0.132    0.000 /usr/lib/python3.10/os.py:772(getenv)
+     6460    0.017    0.000    0.036    0.000 /usr/lib/python3.10/asyncio/queues.py:150(get)
+    63449    0.017    0.000    0.017    0.000 {method 'encode' of 'str' objects}
+    28738    0.017    0.000    2.307    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/starlette/responses.py:272(wrap)
+     9306    0.016    0.000    0.041    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/metrics.py:458(set)
+    28427    0.016    0.000    0.021    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/output_processor.py:83(get_nowait)
+     6377    0.015    0.000    0.029    0.000 /usr/lib/python3.10/enum.py:980(__or__)
+     2864    0.015    0.000    0.157    0.000 /home/jlpang/my-vllm-serving-system/vllm/v1/engine/ft_client.py:1203(_solve_epoch_loop)
+     9106    0.015    0.000    0.028    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:682(_schedule_remaining_events)
+    15724    0.014    0.000    0.040    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/prometheus_client/metrics.py:335(inc)
+     9306    0.013    0.000    0.023    0.000 /usr/lib/python3.10/typing.py:306(inner)
+     5968    0.012    0.000    0.012    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/sugar/socket.py:376(__setattr__)
+    93926    0.012    0.000    0.012    0.000 {method '__exit__' of '_thread.lock' objects}
+     3126    0.012    0.000    0.051    0.000 /home/jlpang/my-vllm-serving-system/venv/lib/python3.10/site-packages/zmq/_future.py:704(_drop_io_state)
+    28437    0.012    0.000    0.015    0.000 /home/jlpang/my-vllm-serving-system/vllm/utils/collection_utils.py:49(as_list)
+
+
