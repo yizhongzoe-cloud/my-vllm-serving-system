@@ -132,8 +132,7 @@ fault_timing:
 # ---- Run parameters ----
 run_duration_sec: 300.0
 warmup_sec: 30.0
-# seeds: [42, 123, 456]
-seeds: [42]
+seeds: [42, 123, 456]
 request_timeout_sec: 120.0
 server_startup_timeout: 300.0
 
