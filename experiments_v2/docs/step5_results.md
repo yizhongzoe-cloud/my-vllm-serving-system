@@ -154,11 +154,118 @@ Step 5 的初衷源于 Step 4 的测量：长上下文下 re-prefill 比 reload 
 
 ---
 
+## 9. L40S 复现 (2× L40S, dp=2)
+
+**Date**: 2026-04-26
+**Hardware**: 2× NVIDIA L40S (48GB), dp=2
+**Cells**: 48（同 A6000 矩阵）
+**Wall time**: 291.9 minutes (4.87 h), 0 failed runs
+**Config**: `experiments_v2/config_8b_step5_l40s.yaml`
+
+### 9.1 TL;DR
+
+L40S 复现确认了 A6000 的全部定性结论：**V2-full 仍然完败 NR，per-seed 12/12 全输**。唯一显著差别是 **L40S 完成率不再崩**——所有 48 trial 完成率 ≥ 99.7%（A6000 上 V2-full 在 W8/F2 有 2/3 seed 跌到 32-39%）。L40S 多出的算力 + PCIe 带宽给了 V2-full 一些喘息空间，但**没改变它输给 NR 的事实**。
+
+### 9.2 Goodput 总览（L40S vs A6000）
+
+![Goodput L40S](../figures/8B/Step5_Main_l40s/goodput_2x2.png)
+
+| Workload | Fault | NR | PerLow | V2-NoCkpt | V2-full | V2/NR (L40S) | V2/NR (A6000) |
+|---|---|---|---|---|---|---|---|
+| W6 | none | 6.86 | 3.74 | 6.86 | 2.60 | **−62%** | −61% |
+| W6 | F2_Mid | 6.86 | 2.43 | 6.86 | 1.71 | **−75%** | −72% |
+| W8 | none | 19.56 | 15.05 | 19.52 | 18.20 | **−7%** | −37% |
+| W8 | F2_Mid | 18.40 | 5.96 | 18.36 | 13.72 | **−25%** | −40% |
+
+W6 上 L40S/A6000 几乎一样差（都在 −60% 以上），W8 上 L40S 缩小了 30 pp 的 gap，但**仍全输**。
+
+### 9.3 Per-seed 配对（V2-full vs NR）
+
+![Paired seeds L40S](../figures/8B/Step5_Main_l40s/paired_seeds.png)
+
+| Workload | Fault | seed=42 | seed=123 | seed=456 |
+|---|---|---|---|---|
+| W6 | none | 6.91 → 2.42 (−65%) | 6.94 → 2.77 (−60%) | 6.74 → 2.61 (−61%) |
+| W6 | F2_Mid | 6.91 → 1.40 (−80%) | 6.94 → 1.33 (−81%) | 6.74 → 2.39 (−65%) |
+| W8 | none | 21.56 → 20.07 (−7%) | 19.70 → 19.11 (−3%) | 17.42 → 15.40 (−12%) |
+| W8 | F2_Mid | 20.83 → 15.24 (−27%) | 17.73 → 13.59 (−23%) | 16.64 → 12.32 (−26%) |
+
+12/12 全输，跨 seed 一致。
+
+### 9.4 完成率：L40S 上 V2-full 不再崩
+
+![Completion rate L40S](../figures/8B/Step5_Main_l40s/completion_rate.png)
+
+| Workload | Fault | NR | PerLow | V2-NoCkpt | V2-full (L40S) | V2-full (A6000) |
+|---|---|---|---|---|---|---|
+| W6 | none | 100% | 100% | 100% | 100% | 100% |
+| W6 | F2_Mid | 100% | 100% | 100% | 100% | 100% |
+| W8 | none | 100% | 100% | 100% | 100% | 100% |
+| W8 | F2_Mid | 100% | 99.7% | 100% | **100%** | **56.9%** ⚠ |
+
+A6000 上 V2-full 在 W8/F2 平均完成率只有 56.9%，**L40S 全保住 100%**。算力/PCIe 余量缓解了灾难性丢请求，但**完成率 100% 不等于 V2-full 赢**——它依然在 goodput / TPOT / SLO 三个维度落后。
+
+### 9.5 TPOT p95（L40S）
+
+![TPOT p95 L40S](../figures/8B/Step5_Main_l40s/tpot_p95.png)
+
+| Workload | Fault | NR | PerLow | V2-NoCkpt | V2-full (L40S) | V2-full (A6000) |
+|---|---|---|---|---|---|---|
+| W6 | none | 26 ms | 1152 ms | 27 ms | **1610 ms** | 1706 ms |
+| W6 | F2_Mid | 28 ms | 1144 ms | 29 ms | **3461 ms** | 3489 ms |
+| W8 | none | 119 ms | 530 ms | 146 ms | 290 ms | 575 ms |
+| W8 | F2_Mid | 224 ms | 557 ms | 226 ms | 391 ms | 595 ms |
+
+**W6 上的 TPOT 灾难和 A6000 几乎一致**（1610 vs 1706 ms / 3461 vs 3489 ms）—— checkpoint 复制对 decode 的干扰是结构性的，硬件升级救不了。W8 上 L40S 把 V2-full 的 TPOT 大致减半，但仍是 NR 的 1.7-2.4 倍。
+
+### 9.6 SLO 违规率（L40S）
+
+![SLO violation L40S](../figures/8B/Step5_Main_l40s/slo_violation.png)
+
+| Workload | Fault | NR | PerLow | V2-NoCkpt | V2-full |
+|---|---|---|---|---|---|
+| W6 | none | 0.0% | 45.1% | 0.0% | **61.8%** |
+| W6 | F2_Mid | 0.0% | 64.2% | 0.0% | **74.8%** |
+| W8 | none | 1.3% | 35.3% | 2.4% | 13.2% |
+| W8 | F2_Mid | 14.1% | 75.2% | 14.6% | 40.3% |
+
+W6 上 V2-full 仍然 60-75% SLO 违规，跟 A6000 几乎一样（60-73%）。
+
+### 9.7 L40S 复现的诊断
+
+**和 A6000 一致（核心结论）**：
+1. V2-full 在所有场景输 NR；V2-NoCkpt 和 NR 持平；Periodic-Low 全场垫底
+2. W6 TPOT 灾难（NR 26-28 ms → V2-full 1610-3461 ms）依然存在
+3. Mode 4（系统级争用）+ Mode 5（价值不成立）两个判断都被复现
+
+**L40S 上新出现**：
+1. 完成率不再崩（W8/F2 V2-full 从 56.9% 升到 100%）—— 算力余量缓解了灾难性丢请求
+2. W8 上 V2-full 的 gap 显著收窄（−37% → −7%）—— 更快 prefill + 更宽 PCIe 让 checkpoint 复制相对没那么贵
+3. W6 上 gap 几乎不变 —— 短-中长 prompt 下 checkpoint 干扰是主导，硬件无关
+
+### 9.8 结论
+
+**硬件升级不改变方向，只改变绝对值**。两件证据：
+- W6 上 L40S/A6000 几乎一样差（V2/NR ≤ −60%）—— 短-中长 prompt 下 checkpoint 干扰是主导
+- W8 上 L40S 缩小但不消除 gap（仍 −7% 到 −25%）—— 即使硬件够强能"撑住"checkpoint 干扰，V2 依然无法超过 NR，因为 NR 不付出 checkpoint 代价
+
+之前导师讨论里 4 个选项里 **A（等 L40S 结果）已经验证、不能改变结论**。剩下 B（异步 checkpoint）/ C（接受 V2-NoCkpt）/ D（换硬件）需要权衡。
+
+---
+
 ## 附：数据原始路径
 
-- 实验结果：`results_v2/8B/Step5_Main/<baseline>/<workload>/Moderate/<fault>/<seed>/`
-  - `metrics.json`：聚合指标
-  - `requests.csv`：每请求记录
-  - `server.log`：vLLM 服务端日志
-- 图：`experiments_v2/figures/8B/Step5_Main/`
-- Config：`experiments_v2/config_8b_step5.yaml`
+- 实验结果：
+  - A6000：`results_v2/8B/Step5_Main/<baseline>/<workload>/Moderate/<fault>/<seed>/`
+  - **L40S：`results_v2_l40s/8B/Step5_Main/<baseline>/<workload>/Moderate/<fault>/<seed>/`**
+  - 每个 trial 含 `metrics.json` / `requests.csv` / `epochs.csv` / `recoveries.json` / `run_meta.json` / `server.log`
+- 图：
+  - A6000：`experiments_v2/figures/8B/Step5_Main/`
+  - L40S：`experiments_v2/figures/8B/Step5_Main_l40s/`
+- Config：
+  - A6000：`experiments_v2/config_8b_step5.yaml`
+  - L40S：`experiments_v2/config_8b_step5_l40s.yaml`
+- Cost profile：
+  - A6000：`experiments_v2/checkpoint_cost_profile_a6000.json`
+  - L40S：`experiments_v2/checkpoint_cost_profile_l40s.json`
+- 画图脚本：`experiments_v2/plot_step5.py`（加了 `--results-dir` / `--out-dir` 命令行参数，可同时支持 A6000 和 L40S）

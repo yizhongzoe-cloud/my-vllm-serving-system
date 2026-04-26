@@ -1,25 +1,46 @@
 """Generate Step5_Main result figures.
 
-Reads results_v2/8B/Step5_Main/<baseline>/<workload>/<load>/<fault>/<seed>/metrics.json
-and writes 5 PNGs to experiments_v2/figures/8B/Step5_Main/.
+Reads <results-dir>/8B/Step5_Main/<baseline>/<workload>/<load>/<fault>/<seed>/metrics.json
+and writes 5 PNGs to <out-dir>/.
 
 Usage:
+    # A6000 (default)
     python experiments_v2/plot_step5.py
+
+    # L40S
+    python experiments_v2/plot_step5.py \\
+        --results-dir results_v2_l40s \\
+        --out-dir experiments_v2/figures/8B/Step5_Main_l40s
 """
-import json, glob, os
+import argparse, json, glob, os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT = "experiments_v2/figures/8B/Step5_Main"
+parser = argparse.ArgumentParser()
+parser.add_argument("--results-dir", default="results_v2",
+                    help="Top-level results directory (default: results_v2)")
+parser.add_argument("--out-dir", default="experiments_v2/figures/8B/Step5_Main",
+                    help="Output directory for PNGs")
+args = parser.parse_args()
+
+RESULTS = args.results_dir
+OUT = args.out_dir
 os.makedirs(OUT, exist_ok=True)
 
 # Load all 48 cells
 rows = []
-for p in glob.glob("results_v2/8B/Step5_Main/*/*/*/*/*/metrics.json"):
+glob_pattern = f"{RESULTS}/8B/Step5_Main/*/*/*/*/*/metrics.json"
+for p in glob.glob(glob_pattern):
     parts = p.split("/")
-    baseline, workload, _, fault, seed = parts[3], parts[4], parts[5], parts[6], int(parts[7])
+    # Strip the results-dir prefix (which may contain '/') so indexing into
+    # parts[3..7] for baseline/workload/load/fault/seed still works.
+    n_prefix = len(RESULTS.rstrip("/").split("/"))
+    baseline = parts[n_prefix + 2]
+    workload = parts[n_prefix + 3]
+    fault    = parts[n_prefix + 5]
+    seed     = int(parts[n_prefix + 6])
     m = json.load(open(p))
     rows.append({
         "baseline": baseline, "workload": workload, "fault": fault, "seed": seed,
