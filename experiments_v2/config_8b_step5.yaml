@@ -83,6 +83,24 @@ workloads:
     arrival: "poisson"
     description: "Long-context summarization (unfiltered ArXiv, p95=7108)"
 
+  # LongBench narrativeqa: book/movie-script QA. Llama-3 tokenized, prompts
+  # filtered to [2K, 28K]. After filtering: 85 records, P50=12K, P95=23K.
+  W6_NarrativeQA:
+    dataset: "longbench_narrativeqa"
+    dataset_path: "experiments_v2/datasets/cached/longbench_narrativeqa.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "LongBench narrativeqa (long-doc QA, P50=12K, P95=23K)"
+
+  # LongBench qmsum + musique merged at download time (50/50 by source size).
+  # Pool: 391 records, P50=15.8K, P95=18.4K.
+  W8_LongMix:
+    dataset: "longbench_qmsum_musique"
+    dataset_path: "experiments_v2/datasets/cached/longbench_qmsum_musique.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "LongBench multi-task mix: qmsum (meeting summary) + musique (multi-hop QA)"
+
 # ---- Load levels ----
 # Manual estimates for 8B dp=2 on A6000. Run calibrate.py for precise values.
 load_levels:
@@ -210,11 +228,11 @@ experiments:
     faults: ["none"]
 
   Step5_Main:
-    # 24 cells = 4 baselines × 1 workload × 1 load × 2 faults × 3 seeds
-    # ~5-10 min per run × 24 = 2-4h on A6000 dp=2.
-    description: "Step 5 main: V2 vs NR on long-context (W5_LongDoc, 32K)"
+    # 48 cells = 4 baselines × 2 workloads × 1 load × 2 faults × 3 seeds
+    # W6 = pure narrativeqa (long-doc QA), W8 = qmsum+musique mix
+    description: "Step 5 main: V2 vs NR on LongBench (W6_NarrativeQA + W8_LongMix)"
     baselines: ["NoFT-Reprefill", "Periodic-Low", "Our-System", "Our-System-NoCkpt"]
-    workloads: ["W5_LongDoc"]
+    workloads: ["W6_NarrativeQA", "W8_LongMix"]
     load_levels: ["Moderate"]
     faults: ["none", "F2_Mid"]
 
