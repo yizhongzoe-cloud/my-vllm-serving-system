@@ -238,7 +238,6 @@ class KVCheckpointPool:
 
         # ── GPU→CPU copy (only delta blocks) ────────────────────────
         device = gpu_kv_caches[0].device
-        block_indices_gpu = block_indices.to(device)
 
         if async_copy and torch.cuda.is_available():
             stream = self._get_copy_stream()
@@ -251,20 +250,69 @@ class KVCheckpointPool:
                     out_shape, dtype=sample.dtype, device="cpu",
                 ).pin_memory()
 
-            gpu_buffers: dict[int, torch.Tensor] = {}
-            for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
-                gpu_buffers[layer_idx] = gpu_tensor[
-                    :, block_indices_gpu, :, :, :
-                ].clone()
+            # FT_CKPT_TRUE_ASYNC=1 (default): run the GPU-side gather + clone
+            # on the copy stream so they don't block decode kernels enqueued
+            # on the default stream. The previous (legacy) behavior left the
+            # gather + clone on the default stream and only the PCIe transfer
+            # was on the copy stream — which serialized 2*num_layers GPU
+            # kernels in front of every decode step (root cause of W6 TPOT
+            # spiking from ~30 ms to ~1700 ms in Step 5).
+            #
+            # Set FT_CKPT_TRUE_ASYNC=0 to fall back to the legacy behavior
+            # for direct A/B comparison.
+            true_async = os.environ.get("FT_CKPT_TRUE_ASYNC", "1") == "1"
 
-            event = torch.cuda.current_stream(device).record_event()
-            with torch.cuda.stream(stream):
-                stream.wait_event(event)
-                for layer_idx in range(len(gpu_kv_caches)):
-                    delta_pinned[layer_idx].copy_(
-                        gpu_buffers[layer_idx], non_blocking=True
+            if true_async:
+                # Mark "default stream has finished writing the KV blocks
+                # we are about to read". Recording on the current (default)
+                # stream does NOT block it — the next decode step continues
+                # to enqueue right behind this marker.
+                event = torch.cuda.current_stream(device).record_event()
+
+                with torch.cuda.stream(stream):
+                    # Copy stream waits for decode to reach the marker.
+                    # Decode never waits on copy stream, so decode N+1 can
+                    # run concurrently with the gather/clone/PCIe-copy below
+                    # whenever GPU SMs are free.
+                    stream.wait_event(event)
+
+                    # Move the small block-index tensor onto the copy
+                    # stream too, otherwise the H2D transfer would be
+                    # implicit on the default stream.
+                    block_indices_gpu = block_indices.to(
+                        device, non_blocking=True
                     )
+
+                    gpu_buffers: dict[int, torch.Tensor] = {}
+                    for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
+                        gpu_buffers[layer_idx] = gpu_tensor[
+                            :, block_indices_gpu, :, :, :
+                        ].clone()
+
+                    for layer_idx in range(len(gpu_kv_caches)):
+                        delta_pinned[layer_idx].copy_(
+                            gpu_buffers[layer_idx], non_blocking=True
+                        )
+            else:
+                # Legacy path (kept for A/B comparison). gather + clone
+                # run on the default stream and serialize behind decode.
+                block_indices_gpu = block_indices.to(device)
+
+                gpu_buffers: dict[int, torch.Tensor] = {}
+                for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
+                    gpu_buffers[layer_idx] = gpu_tensor[
+                        :, block_indices_gpu, :, :, :
+                    ].clone()
+
+                event = torch.cuda.current_stream(device).record_event()
+                with torch.cuda.stream(stream):
+                    stream.wait_event(event)
+                    for layer_idx in range(len(gpu_kv_caches)):
+                        delta_pinned[layer_idx].copy_(
+                            gpu_buffers[layer_idx], non_blocking=True
+                        )
         else:
+            block_indices_gpu = block_indices.to(device)
             delta_pinned = {}
             for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
                 subset = gpu_tensor[
