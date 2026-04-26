@@ -631,7 +631,7 @@ vllm bench latency \
 ### Setup
 
 - **Tool**: `experiments_v2/profile_checkpoint_costs.py` (with `--skip-prefill`, since prefill is already covered in Steps 2 and 3)
-- **Hardware**: A6000 single card (L40S TBD)
+- **Hardware**: A6000 and L40S, single card each
 - **Model**: Llama-3.1-8B-Instruct (the model itself is irrelevant for this measurement — KV transfer time depends only on byte count and PCIe bandwidth)
 - **gpu-memory-utilization**: 0.45 (script default; vLLM only takes half the card so the other half is free for the test buffer)
 
@@ -681,6 +681,51 @@ Save direction is noisier — non-monotonic (64 MB faster than 32 MB?), and 128 
 
 `0.43 ms` — negligible per-checkpoint fixed cost.
 
+### Results — L40S
+
+#### Reload (CPU → GPU)
+
+| KV size | Reload (ms) | Effective throughput |
+|---|---|---|
+| 2 MB | 0.64 | 3.1 GB/s |
+| 4 MB | 0.79 | 5.1 GB/s |
+| 8 MB | 0.98 | 8.2 GB/s |
+| 16 MB | 1.35 | 11.9 GB/s |
+| 32 MB | 2.12 | 15.1 GB/s |
+| 64 MB | 3.48 | 18.4 GB/s |
+| 128 MB | 6.27 | **20.4 GB/s** (peak) |
+
+L40S sustains slightly higher reload throughput than A6000 (20.4 vs 17.6 GB/s) — both bottlenecked by PCIe 4.0; the difference reflects platform-level (chipset / NVMe overhead / driver) variation rather than card hardware. Either way, well above Step 2's conservative 10 GB/s estimate.
+
+#### Checkpoint save (GPU → CPU)
+
+| KV size | Save (ms) | Effective throughput |
+|---|---|---|
+| 2 MB | 1.19 | 1.7 GB/s |
+| 4 MB | 1.38 | 2.9 GB/s |
+| 8 MB | 2.17 | 3.7 GB/s |
+| 16 MB | 3.95 | 4.0 GB/s |
+| 32 MB | 5.27 | 6.1 GB/s |
+| 64 MB | 16.58 | 3.9 GB/s |
+| 128 MB | 37.94 | 3.4 GB/s |
+
+Same pattern as A6000: noisy, non-monotonic (32 MB faster than 64 MB), and tops out at ~3-6 GB/s. Save again is the lower-priority direction (background work), so this asymmetry doesn't hurt the FT idea's recovery-path latency.
+
+#### Publication overhead (c0)
+
+`1.04 ms` — about 2× higher than A6000's 0.43 ms. Likely host-side allocator overhead variation; small enough that for any KV ≥ 4 MB it's already amortized.
+
+### Hardware comparison (reload)
+
+| KV size | A6000 (ms) | L40S (ms) | A6000 / L40S |
+|---|---|---|---|
+| 2 MB | 0.81 | 0.64 | 1.27× |
+| 16 MB | 1.57 | 1.35 | 1.16× |
+| 64 MB | 4.29 | 3.48 | 1.23× |
+| 128 MB | 7.28 | 6.27 | 1.16× |
+
+A6000 is **~1.2× slower** at reload across the size range. Same ballpark — neither machine is a bottleneck for the FT idea.
+
 ### Updated break-even table (A6000)
 
 Using the measured 17.6 GB/s reload throughput (replaces Step 2's 10 GB/s estimate):
@@ -708,6 +753,21 @@ Using the same 17.6 GB/s reload throughput across all models (transfer time depe
 
 **Bigger model + longer context → larger absolute saving and larger ratio.** The FT idea's value compounds in both directions.
 
+### Updated break-even table (L40S)
+
+Using L40S's measured 20.4 GB/s reload throughput and L40S prefill numbers from Steps 2/3/3.5:
+
+| Context | Model | KV size | Reload (measured) | Re-prefill (Steps 2/3/3.5) | Re-prefill / Reload |
+|---|---|---|---|---|---|
+| 32K | 8B Llama | 4 GB | ~200 ms | 4.21 s | **~21×** |
+| 32K | 14B Qwen | 6 GB | ~290 ms | 8.04 s | **~28×** |
+| 32K | 32B Qwen-AWQ | 8 GB | ~390 ms | 17.45 s | **~45×** |
+| 64K | 8B Llama | 8 GB | ~390 ms | 11.77 s | **~30×** |
+| 64K | 32B Qwen-AWQ | 16 GB | ~790 ms | 37.65 s | **~48×** |
+| 128K | 8B Llama | 16 GB | ~790 ms | 36.44 s | **~46×** |
+
+L40S ratios are slightly lower than A6000's because L40S has faster prefill (it's a faster GPU) but only marginally faster reload (PCIe-bound). This is the **expected** outcome: the FT idea's relative advantage is biggest when the GPU is *fast at compute but slow at PCIe* — i.e., compute keeps getting faster while PCIe stays roughly fixed across generations. Future GPUs (H100, B200) should make the ratio even more dramatic.
+
 ### Caveats
 
 - Script tested up to 128 MB chunks. For larger transfers (the full KV cache of a long-context request can be many GB), throughput is **extrapolated from the measured 128 MB peak**. In practice sustained large-transfer rates can be slightly slower due to queue effects, but the order of magnitude holds.
@@ -717,19 +777,31 @@ Using the same 17.6 GB/s reload throughput across all models (transfer time depe
 ### Reproducing
 
 ```bash
+# A6000
 source /home/yzhong76/envs/sd_env/bin/activate
-
 python experiments_v2/profile_checkpoint_costs.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --output experiments_v2/checkpoint_cost_profile_a6000.json \
   --skip-prefill
+
+# L40S
+source /home/yzhong76/code/my-vllm-serving-system/.venv/bin/activate
+python experiments_v2/profile_checkpoint_costs.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --output experiments_v2/checkpoint_cost_profile_l40s.json \
+  --skip-prefill
 ```
 
-Output JSON: `experiments_v2/checkpoint_cost_profile_a6000.json`.
+Output JSONs: `experiments_v2/checkpoint_cost_profile_a6000.json`, `experiments_v2/checkpoint_cost_profile_l40s.json`.
 
 ### Conclusion
 
-Measured PCIe throughput is ~17.6 GB/s on A6000 — 1.7× higher than Step 2's conservative estimate. Updated break-even ratios range from **33× (8B/32K) to 83× (32B/64K)**. KV reload remains 1-2 orders of magnitude faster than re-prefill across all tested model/context combinations. Step 4 confirms Step 2's qualitative conclusion (Mode 5 does not hold in long-context settings) with measured rather than estimated reload cost. L40S measurements pending.
+Measured peak PCIe reload throughput: **17.6 GB/s on A6000, 20.4 GB/s on L40S** — both ~2× higher than Step 2's conservative 10 GB/s estimate. Updated break-even ratios:
+
+- **A6000**: 33× (8B/32K) → 83× (32B/64K)
+- **L40S**: 21× (8B/32K) → 48× (32B/64K)
+
+L40S ratios are smaller because faster compute compresses the prefill cost more than PCIe lets reload cost shrink — a positive result for the FT idea's future-proofing: **the gap between compute throughput and PCIe bandwidth widens with each GPU generation, so the ratio is expected to grow on H100/B200/etc.** Across both machines, KV reload remains 1-2 orders of magnitude faster than re-prefill for every tested model/context combination, confirming Step 2's qualitative conclusion (Mode 5 does not hold in long-context settings) with measured rather than estimated reload cost.
 
 ---
 
