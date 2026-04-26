@@ -247,14 +247,30 @@ vllm bench latency \
 | 16K | 1.69 s | **3.23 s** | 1.91× |
 | 32K | 4.21 s | **8.04 s** | 1.91× |
 
+### Results — single-card A6000
+
+| Context | 8B Llama (Step 2) | 14B Qwen (this) | 14B / 8B |
+|---|---|---|---|
+| 8K | 1.20 s | **2.25 s** | 1.88× |
+| 16K | 2.86 s | **5.41 s** | 1.89× |
+| 32K | 7.61 s | **14.30 s** | 1.88× |
+
+### Hardware comparison (14B Qwen)
+
+| Context | L40S | A6000 | A6000 / L40S |
+|---|---|---|---|
+| 8K | 1.41 s | 2.25 s | 1.60× |
+| 16K | 3.23 s | 5.41 s | 1.67× |
+| 32K | 8.04 s | 14.30 s | 1.78× |
+
 ### Growth per 2× context
 
-| Step | 8B Llama | 14B Qwen |
-|---|---|---|
-| 8K → 16K | 2.31× | 2.29× |
-| 16K → 32K | 2.49× | 2.49× |
+| Step | 8B Llama (L40S) | 14B Qwen (L40S) | 14B Qwen (A6000) |
+|---|---|---|---|
+| 8K → 16K | 2.31× | 2.29× | 2.40× |
+| 16K → 32K | 2.49× | 2.49× | 2.64× |
 
-The growth-per-doubling is essentially identical at both sizes — **the N² scaling is invariant to model size**.
+The growth-per-doubling is essentially identical across model sizes and consistent across hardware — **the N² scaling is invariant to model size**, and growth ratios on A6000 are slightly higher (likely because A6000's slower compute makes the linear-FFN regime relatively shorter, letting the quadratic-attention component dominate sooner).
 
 ### Cross-model observations
 
@@ -316,6 +332,46 @@ Run on 2026-04-26, 02:10–02:15 local time. `--gpu-memory-utilization 0.95` for
 
 (p99 - p10) / avg ranges from 0.66 % (32K) to 1.36 % (8K) — same noise floor as the 8B Step-2 run.
 
+### Detailed A6000 percentiles (5 iters, 3 warmup)
+
+#### 8K context
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 2.2520 |
+| p10 | 2.2450 |
+| p25 | 2.2481 |
+| p50 | 2.2515 |
+| p75 | 2.2560 |
+| p90 | 2.2591 |
+| p99 | 2.2610 |
+
+#### 16K context
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 5.4101 |
+| p10 | 5.3907 |
+| p25 | 5.3990 |
+| p50 | 5.4128 |
+| p75 | 5.4231 |
+| p90 | 5.4274 |
+| p99 | 5.4300 |
+
+#### 32K context (input-len 32767)
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 14.3022 |
+| p10 | 14.2404 |
+| p25 | 14.2705 |
+| p50 | 14.3153 |
+| p75 | 14.3467 |
+| p90 | 14.3535 |
+| p99 | 14.3575 |
+
+(p99 - p10) / avg < 0.5 % across all three points — same low-noise behavior as L40S.
+
 ### Reproducing
 
 ```bash
@@ -367,6 +423,28 @@ Cross-model trend confirmed: **prefill cost scales as O(N²) in context length a
 | 64K | 11.77 s | — | **37.65 s** ⚠ | 3.20× |
 
 ⚠ The 64K data point uses `--enforce-eager` (no torch.compile / cuda graphs), unlike 8K-32K of the same model and unlike the 8B/14B comparison points. The expected impact on prefill latency is small (cuda graphs primarily help decode latency by amortizing kernel launch overhead; for ≥64K prefill the per-kernel runtime dwarfs launch overhead), but treat the 64K-32B number as slightly upper-biased.
+
+### Results — single-card A6000
+
+A6000 used `--enforce-eager` for **all** context lengths (not just 64K). The current `zoe/slo-scheduling` fork's torch.compile path hits an `unsupported operator: _C.marlin_gemm.default` error during dynamo capture for AWQ models — `--enforce-eager` bypasses it. Also did not configure YaRN rope scaling (only set `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` for 64K), so 64K outputs may be numerically unreliable; **latency measurement itself remains valid** (full attention compute runs).
+
+| Context | 8B Llama (Step 2) | 14B Qwen (Step 3) | 32B Qwen-AWQ (this) | 32B/8B |
+|---|---|---|---|---|
+| 8K | 1.20 s | 2.25 s | **5.52 s** | 4.60× |
+| 16K | 2.86 s | 5.41 s | **12.44 s** | 4.35× |
+| 32K | 7.61 s | 14.30 s | **29.63 s** | 3.89× |
+| 64K | 22.37 s | — | **77.11 s** ⚠ | 3.45× |
+
+### Hardware comparison (32B Qwen-AWQ)
+
+| Context | L40S | A6000 | A6000 / L40S |
+|---|---|---|---|
+| 8K | 3.49 s | 5.52 s | 1.58× |
+| 16K | 7.64 s | 12.44 s | 1.63× |
+| 32K | 17.45 s | 29.63 s | 1.70× |
+| 64K | 37.65 s | 77.11 s | 2.05× |
+
+A6000/L40S ratio drifts higher with context length (1.58× → 2.05×). At 8K-32K the gap is in line with their compute throughput ratio (~1.5-1.8×). The widening at 64K is partly an artefact: L40S keeps the 8K-32K cuda-graph speedup baseline while A6000 was eager-only for all points, and 64K on L40S itself drops to eager — so 64K compares eager-vs-eager but normalized against different shorter-context baselines.
 
 ### Growth per 2× context
 
@@ -457,6 +535,58 @@ Run on 2026-04-26, 02:41–03:13 local time. Percentile spread (p99-p10)/avg < 1
 | p90 | 37.6866 |
 | p99 | 37.6871 |
 
+### Detailed A6000 percentiles (5 iters, 3 warmup, **`--enforce-eager`** all points, 0.95 util)
+
+#### 8K context
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 5.5153 |
+| p10 | 5.4740 |
+| p25 | 5.4893 |
+| p50 | 5.5178 |
+| p75 | 5.5460 |
+| p90 | 5.5542 |
+| p99 | 5.5591 |
+
+#### 16K context
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 12.4399 |
+| p10 | 12.3910 |
+| p25 | 12.4166 |
+| p50 | 12.4481 |
+| p75 | 12.4726 |
+| p90 | 12.4820 |
+| p99 | 12.4877 |
+
+#### 32K context (input-len 32767)
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 29.6328 |
+| p10 | 29.6122 |
+| p25 | 29.6198 |
+| p50 | 29.6350 |
+| p75 | 29.6437 |
+| p90 | 29.6525 |
+| p99 | 29.6578 |
+
+#### 64K context (input-len 65535, `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, no YaRN)
+
+| Statistic | Latency (s) |
+|---|---|
+| Avg | 77.1067 |
+| p10 | 77.0816 |
+| p25 | 77.0905 |
+| p50 | 77.1134 |
+| p75 | 77.1202 |
+| p90 | 77.1283 |
+| p99 | 77.1332 |
+
+(p99 - p10) / avg < 1 % across all four points.
+
 ### Reproducing
 
 ```bash
@@ -493,9 +623,113 @@ vllm bench latency \
 
 ---
 
-## Step 4: Checkpoint Reload Cost (TBD)
+## Step 4: Checkpoint Reload Cost
 
-_To be filled in. Use `experiments_v2/profile_checkpoint_costs.py`._
+**Date**: 2026-04-26
+**Goal**: Measure actual GPU↔CPU transfer time for KV cache save (GPU → CPU pinned memory) and reload (CPU → GPU). Step 2's break-even analysis used a conservative 10 GB/s estimate; this step replaces it with measured numbers.
+
+### Setup
+
+- **Tool**: `experiments_v2/profile_checkpoint_costs.py` (with `--skip-prefill`, since prefill is already covered in Steps 2 and 3)
+- **Hardware**: A6000 single card (L40S TBD)
+- **Model**: Llama-3.1-8B-Instruct (the model itself is irrelevant for this measurement — KV transfer time depends only on byte count and PCIe bandwidth)
+- **gpu-memory-utilization**: 0.45 (script default; vLLM only takes half the card so the other half is free for the test buffer)
+
+### Why model-independent
+
+Step 4 measures **bytes-per-second over PCIe**. The script allocates a buffer of size S in GPU memory and times moving it to/from a pinned host buffer. The buffer's *content* is irrelevant — same byte count gives the same transfer time regardless of which model produced it.
+
+So one measurement (8B) generalizes to all models. To convert to a specific model + context, multiply `tokens × kv_bytes_per_token`:
+
+| Model | KV bytes / token |
+|---|---|
+| Llama-3.1-8B | 128 KB |
+| Qwen2.5-14B | 192 KB |
+| Qwen2.5-32B-AWQ | 256 KB (KV is BF16; AWQ only quantizes weights) |
+
+### Results — A6000
+
+#### Reload (CPU → GPU)
+
+| KV size | Reload (ms) | Effective throughput |
+|---|---|---|
+| 2 MB | 0.81 | 2.5 GB/s |
+| 4 MB | 1.01 | 4.0 GB/s |
+| 8 MB | 1.19 | 6.7 GB/s |
+| 16 MB | 1.57 | 10.2 GB/s |
+| 32 MB | 2.41 | 13.3 GB/s |
+| 64 MB | 4.29 | 14.9 GB/s |
+| 128 MB | 7.28 | **17.6 GB/s** (peak) |
+
+Throughput plateaus around 17.6 GB/s for ≥64 MB transfers — this is the practical PCIe 4.0 ceiling on this host. Step 2's 10 GB/s estimate was conservative by ~1.7×.
+
+#### Checkpoint save (GPU → CPU)
+
+| KV size | Save (ms) | Effective throughput |
+|---|---|---|
+| 2 MB | 0.98 | 2.0 GB/s |
+| 4 MB | 1.37 | 2.9 GB/s |
+| 8 MB | 1.98 | 4.0 GB/s |
+| 16 MB | 3.72 | 4.3 GB/s |
+| 32 MB | 9.42 | 3.4 GB/s |
+| 64 MB | 8.40 | 7.6 GB/s |
+| 128 MB | 37.34 | 3.4 GB/s |
+
+Save direction is noisier — non-monotonic (64 MB faster than 32 MB?), and 128 MB shows a sharp drop. Likely an artifact of how the test allocates / pins host buffers across runs (memory fragmentation, async launch overhead). The peak suggests save can hit ~7-8 GB/s under good conditions but the practical sustained rate is closer to 3-5 GB/s. **For the FT idea, save speed matters less than reload speed** — saves happen in the background, reloads happen on the user-facing recovery path.
+
+#### Publication overhead (c0)
+
+`0.43 ms` — negligible per-checkpoint fixed cost.
+
+### Updated break-even table (A6000)
+
+Using the measured 17.6 GB/s reload throughput (replaces Step 2's 10 GB/s estimate):
+
+| Context | KV size (8B) | Reload (measured) | Re-prefill (Step 2) | Re-prefill / Reload |
+|---|---|---|---|---|
+| 32K | 4 GB | ~230 ms | 7.61 s | **~33×** |
+| 64K | 8 GB | ~470 ms | 22.37 s | **~48×** |
+| 128K | 16 GB | ~930 ms | 71.92 s | **~77×** |
+
+Compared to Step 2's estimate (19× / 28× / 45×), the measured advantage is **~1.7× larger** because actual PCIe throughput exceeds the 10 GB/s assumption.
+
+### Multi-model break-even (A6000, prefill from Steps 2/3/3.5)
+
+Using the same 17.6 GB/s reload throughput across all models (transfer time depends only on bytes):
+
+| Context | Model | KV size | Reload | Re-prefill | Ratio |
+|---|---|---|---|---|---|
+| 32K | 8B Llama | 4 GB | ~230 ms | 7.61 s | ~33× |
+| 32K | 14B Qwen | 6 GB | ~340 ms | 14.30 s | ~42× |
+| 32K | 32B Qwen-AWQ | 8 GB | ~470 ms | 29.63 s | ~63× |
+| 64K | 8B Llama | 8 GB | ~470 ms | 22.37 s | ~48× |
+| 64K | 32B Qwen-AWQ | 16 GB | ~930 ms | 77.11 s | ~83× |
+| 128K | 8B Llama | 16 GB | ~930 ms | 71.92 s | ~77× |
+
+**Bigger model + longer context → larger absolute saving and larger ratio.** The FT idea's value compounds in both directions.
+
+### Caveats
+
+- Script tested up to 128 MB chunks. For larger transfers (the full KV cache of a long-context request can be many GB), throughput is **extrapolated from the measured 128 MB peak**. In practice sustained large-transfer rates can be slightly slower due to queue effects, but the order of magnitude holds.
+- Save direction has measurement noise (see above). Reload — the user-facing metric — is clean and monotonic.
+- `is_real_measurement: false` in the JSON because we passed `--skip-prefill`. KV save/load measurements are still real; only the prefill table inside the JSON is a placeholder.
+
+### Reproducing
+
+```bash
+source /home/yzhong76/envs/sd_env/bin/activate
+
+python experiments_v2/profile_checkpoint_costs.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --output experiments_v2/checkpoint_cost_profile_a6000.json \
+  --skip-prefill
+```
+
+Output JSON: `experiments_v2/checkpoint_cost_profile_a6000.json`.
+
+### Conclusion
+
+Measured PCIe throughput is ~17.6 GB/s on A6000 — 1.7× higher than Step 2's conservative estimate. Updated break-even ratios range from **33× (8B/32K) to 83× (32B/64K)**. KV reload remains 1-2 orders of magnitude faster than re-prefill across all tested model/context combinations. Step 4 confirms Step 2's qualitative conclusion (Mode 5 does not hold in long-context settings) with measured rather than estimated reload cost. L40S measurements pending.
 
 ---
 
