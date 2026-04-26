@@ -281,6 +281,179 @@ def download_arxiv(
 
 
 # ---------------------------------------------------------------------------
+# LongBench (THUDM/LongBench) — long-context multi-task benchmark
+# ---------------------------------------------------------------------------
+#
+# LongBench is distributed as a single data.zip on HuggingFace; we download it,
+# extract per-task JSONL files, and convert to the unified format. Each subtask
+# has 200 records by design.
+#
+# We support two output modes here:
+#   - single-task file (e.g., longbench_narrativeqa.jsonl)
+#   - combined file mixing multiple subtasks (e.g., longbench_qmsum_musique.jsonl)
+
+# Official LongBench prompt templates (from their repo's task2prompt.py).
+_LONGBENCH_PROMPTS = {
+    "narrativeqa": (
+        "You are given a story, which can be either a novel or a movie script, "
+        "and a question. Answer the question as concisely as you can, using a "
+        "single phrase if possible. Do not provide any explanation.\n\n"
+        "Story: {context}\n\n"
+        "Now, answer the question based on the story as concisely as you can, "
+        "using a single phrase if possible. Do not provide any explanation.\n\n"
+        "Question: {input}\n\nAnswer:"
+    ),
+    "qmsum": (
+        "You are given a meeting transcript and a query containing a question "
+        "or instruction. Answer the query in one or more sentences.\n\n"
+        "Transcript:\n{context}\n\n"
+        "Now, answer the query based on the above meeting transcript in one "
+        "or more sentences.\n\nQuery: {input}\nAnswer:"
+    ),
+    "musique": (
+        "Answer the question based on the given passages. Only give me the "
+        "answer and do not output any other words.\n\n"
+        "The following are given passages.\n{context}\n\n"
+        "Answer the question based on the given passages. Only give me the "
+        "answer and do not output any other words.\n\n"
+        "Question: {input}\nAnswer:"
+    ),
+}
+
+
+def _extract_longbench_zip() -> str:
+    """Download LongBench data.zip from HF and extract once. Returns dir path."""
+    import zipfile
+    from huggingface_hub import hf_hub_download
+
+    zip_path = hf_hub_download(
+        "THUDM/LongBench", "data.zip", repo_type="dataset"
+    )
+    extract_dir = os.path.join(os.path.dirname(zip_path), "extracted")
+    data_dir = os.path.join(extract_dir, "data")
+    if not os.path.isdir(data_dir):
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+    return data_dir
+
+
+def _build_longbench_records(
+    subtask: str,
+    output_dataset_label: str,
+    id_prefix: str,
+    min_prompt_tokens: int,
+    max_prompt_tokens: int,
+    min_output_tokens: int,
+    max_output_tokens: int,
+    start_idx: int = 0,
+) -> list[dict]:
+    """Tokenize one LongBench subtask, filter by length, return unified records."""
+    data_dir = _extract_longbench_zip()
+    src = os.path.join(data_dir, f"{subtask}.jsonl")
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"LongBench subtask file missing: {src}")
+
+    template = _LONGBENCH_PROMPTS[subtask]
+    tokenizer = _get_tokenizer()
+
+    rows: list[dict] = []
+    with open(src) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+
+    records: list[dict] = []
+    for r in rows:
+        context = r.get("context", "")
+        question = r.get("input", "")
+        answers = r.get("answers") or []
+        if not context or not question or not answers:
+            continue
+
+        prompt = template.format(context=context, input=question)
+        prompt_tokens = _count_tokens(prompt, tokenizer)
+        if prompt_tokens < min_prompt_tokens or prompt_tokens > max_prompt_tokens:
+            continue
+
+        # Use first reference answer; clamp output token count to a reasonable range
+        answer = answers[0]
+        ans_tokens = _count_tokens(answer, tokenizer)
+        output_tokens = max(min_output_tokens, min(max_output_tokens, ans_tokens))
+
+        records.append({
+            "id": f"{id_prefix}-{start_idx + len(records):05d}",
+            "dataset": output_dataset_label,
+            "prompt": prompt,
+            "prompt_tokens": prompt_tokens,
+            "expected_output_tokens": output_tokens,
+            "subtask": subtask,
+        })
+
+    return records
+
+
+def download_longbench(
+    output_dir: str,
+    subtasks_single: list[str] | None = None,
+    mix_subtasks: list[str] | None = None,
+    mix_filename: str = "longbench_mix.jsonl",
+    mix_label: str = "longbench_mix",
+    min_prompt_tokens: int = 2000,
+    max_prompt_tokens: int = 28000,
+    min_output_tokens: int = 16,
+    max_output_tokens: int = 256,
+) -> None:
+    """Download LongBench and emit unified JSONL files.
+
+    Args:
+        output_dir: Where to write the output JSONLs.
+        subtasks_single: Subtasks to emit as their own files
+            (one file per subtask, label="longbench_<subtask>").
+        mix_subtasks: Subtasks to merge into a single combined file.
+        mix_filename: Filename for the combined file.
+        mix_label: `dataset` label written to records in the combined file.
+        min/max_prompt_tokens: Filter prompts outside this Llama-3 token range.
+        min/max_output_tokens: Clamp the per-record `expected_output_tokens`.
+    """
+    logger.info("=== LongBench ===")
+    subtasks_single = subtasks_single or []
+    mix_subtasks = mix_subtasks or []
+
+    for sub in subtasks_single:
+        records = _build_longbench_records(
+            sub,
+            output_dataset_label=f"longbench_{sub}",
+            id_prefix=f"longbench-{sub}",
+            min_prompt_tokens=min_prompt_tokens,
+            max_prompt_tokens=max_prompt_tokens,
+            min_output_tokens=min_output_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+        out = os.path.join(output_dir, f"longbench_{sub}.jsonl")
+        _save_jsonl(records, out)
+        _print_stats(f"LongBench[{sub}]", records)
+
+    if mix_subtasks:
+        combined: list[dict] = []
+        for sub in mix_subtasks:
+            part = _build_longbench_records(
+                sub,
+                output_dataset_label=mix_label,
+                id_prefix=f"longbench-{sub}",
+                min_prompt_tokens=min_prompt_tokens,
+                max_prompt_tokens=max_prompt_tokens,
+                min_output_tokens=min_output_tokens,
+                max_output_tokens=max_output_tokens,
+                start_idx=0,
+            )
+            combined.extend(part)
+        out = os.path.join(output_dir, mix_filename)
+        _save_jsonl(combined, out)
+        _print_stats(f"LongBench[mix:{'+'.join(mix_subtasks)}]", combined)
+
+
+# ---------------------------------------------------------------------------
 # Alpaca
 # ---------------------------------------------------------------------------
 
@@ -420,6 +593,15 @@ def main():
         download_arxiv(
             os.path.join(out, "arxiv_2000.jsonl"),
             max_samples=2000, seed=args.seed,
+        )
+
+    if args.only == "longbench":
+        download_longbench(
+            output_dir=out,
+            subtasks_single=["narrativeqa"],
+            mix_subtasks=["qmsum", "musique"],
+            mix_filename="longbench_qmsum_musique.jsonl",
+            mix_label="longbench_qmsum_musique",
         )
 
     logger.info("Done.")
