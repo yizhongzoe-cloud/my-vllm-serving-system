@@ -85,7 +85,7 @@ Plus **No-FT** (no fault tolerance at all) as the overhead-free reference.
 | E1: Main | End-to-end comparison | Goodput, SLO violation, failover gap |
 | E2: Recovery | Recovery time breakdown | Detection / KV Restore / Replay |
 | E3: Ablation | Routing vs Checkpoint contribution | Goodput by component |
-| E4: Tradeoff | Checkpoint overhead vs recovery benefit | Goodput + failover gap |
+| ~~E4: Tradeoff~~ | ~~Checkpoint overhead vs recovery benefit~~ | ~~Goodput + failover gap~~ (covered by E1) |
 | E5: Controller | Solver overhead | Solver latency per epoch |
 
 ---
@@ -160,8 +160,9 @@ Plus **No-FT** (no fault tolerance at all) as the overhead-free reference.
 
 ---
 
-## Slide 11: E4 Checkpoint Overhead vs Recovery Benefit
+## ~~Slide 11: E4 Checkpoint Overhead vs Recovery Benefit~~ (covered by E1, removed)
 
+<!--
 ![tradeoff](img/checkpoint_tradeoff.png)
 
 ### Key Points
@@ -172,6 +173,7 @@ Plus **No-FT** (no fault tolerance at all) as the overhead-free reference.
   - Fixed-High: 22/39 (56%), gap ~883ms — most checkpointing yet worst recovery
   - **Our-System: 27/27 (100%), gap ~491ms — best on both axes**
 - **Core trade-off story: more checkpointing ≠ better**
+-->
 
 ---
 
@@ -198,7 +200,7 @@ Plus **No-FT** (no fault tolerance at all) as the overhead-free reference.
 
 ### Next Steps
 - **Real datasets**: replace synthetic workloads with ShareGPT / CNN-DailyMail / Alpaca (real length distributions, heavy-tailed)
-- **Lightweight output-length predictor**: current solver uses expected output length `G_j` for capacity planning; add a small predictor to estimate `G_j` from prompt, improving admission accuracy
+- **Async optimization**: solver, checkpoint copy, and RPC are currently synchronous and on the critical path; decouple from the decode loop to reduce TPOT overhead
 - **Scale to 8B model on 4 GPUs** (dp=4): losing 1 GPU = 25% capacity loss (more realistic than 50% with dp=2), and routing has more choices → Benders benefit should be more visible
 - **Profile solver parameters**: measure actual prefill/decode throughput on target hardware before experiments, instead of using hand-tuned constants
 - **Per-request SLO**: assign different TPOT targets per request class (e.g. chat 100ms, summarization 200ms) so Benders can differentiate scheduling

@@ -805,6 +805,36 @@ L40S ratios are smaller because faster compute compresses the prefill cost more 
 
 ---
 
+## Motivation Summary (Steps 2-4)
+
+The three measurement steps together form the empirical motivation for the FT idea:
+
+1. **Re-prefill is expensive at long context** (Step 2/3/3.5). Super-linear growth driven by attention's O(N²): every 2× context costs ~2.2-2.9× more time. At 32K, prefill is seconds; at 128K, **>1 minute on 8B and projected several minutes on 70B-class**.
+
+2. **Reload is 1-2 orders of magnitude cheaper than re-prefill** (Step 4, measured). Re-prefill / reload ratio ranges from **21× (8B/32K on L40S) to 83× (32B/64K on A6000)** — measured, not estimated.
+
+3. **Trend holds across hardware and model size**. Two GPUs (A6000, L40S), three models (8B Llama, 14B Qwen, 32B Qwen-AWQ) — every combination shows the same qualitative gap. The mechanism (PCIe-bound reload vs FLOP-bound prefill) is fundamental, not specific to one platform.
+
+4. **Future-proofing**. GPU compute throughput grows faster across generations than PCIe bandwidth. The reload-vs-reprefill gap therefore **widens on newer hardware** (H100, B200), making the FT idea's value proposition strengthen over time rather than erode.
+
+Together: Mode 5 (the "checkpoint brings no measurable benefit" diagnosis from the prior W7-Heavy results) does not hold in long-context settings. The original direction is viable when scoped to long-running inference. Step 5 is the end-to-end validation that ties this measurement evidence to user-visible system performance.
+
+---
+
 ## Step 5: End-to-End Workload Comparison (TBD)
 
 _W5 LongDoc, F2_Mid fault, V2 vs NR, multiple seeds. To be filled in after Step 3-4._
+
+---
+
+## Idea (post Step 5): Aggressive Utilization + Selective Checkpoint
+
+Pull `gpu_memory_utilization` to 0.95 (vs safe 0.85). Let vLLM preempt naturally; replace its SWAP / RECOMPUTE with **selective preservation** (save only high-value KV portion, drop the rest). Two roles for checkpoint: fault recovery + throughput enabler.
+
+Differs from vLLM SWAP: SWAP saves entire request (4 GB at 32K), selective saves valuable subset (~half). Halves PCIe traffic.
+
+Validate via Step-5 ablation: NR low-util / NR high-util-SWAP / V2 high-util-selective. Compare aggregate throughput + P99 under preemption.
+
+Risks: save throughput at multi-GB scale untested (Step 4 only ≤128 MB); selective scoring needs design; potential overlap with QLLM (EuroMLSys'25).
+
+Pursue only if Step 5 baseline already wins on long context.
