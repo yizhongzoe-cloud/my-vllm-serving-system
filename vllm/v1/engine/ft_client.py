@@ -1493,15 +1493,16 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         self._solver_future = None
 
         if result is None:
-            # P0-impl-3a follow-up: demoted from WARNING to DEBUG.
-            # Fires once per Benders failure (hundreds per 5-min run on
-            # W1_Chat/Heavy because the solver routinely hits the
-            # iteration cap). At that volume WARNING is non-actionable
-            # spam — the same condition is already counted via the
-            # greedy fallback path metrics.
-            logger.debug(
-                "Centralized solver returned None (infeasible), "
-                "degraded to greedy for %d requests", len(pending))
+            # FT_SOLVER_DIAG: log every Benders failure at INFO so we
+            # can audit the converge/fail ratio. Counter is bumped for
+            # post-run summary.
+            if not hasattr(self, "_solver_fail_count"):
+                self._solver_fail_count = 0
+            self._solver_fail_count += 1
+            logger.info(
+                "FT_SOLVER_DIAG benders_fail count=%d pending=%d",
+                self._solver_fail_count, len(pending),
+            )
             self._pending_solver_requests.extend(pending)
             await self._greedy_dispatch_pending()
             return
@@ -1784,9 +1785,52 @@ class CentralizedBendersFTClient(FTDPAsyncMPClient):
         )
 
     async def _greedy_dispatch_pending(self) -> None:
-        """Fallback: dispatch all pending requests via load-balanced routing."""
-        pending = list(self._pending_solver_requests)
-        self._pending_solver_requests.clear()
+        """Fallback: dispatch pending requests via load-balanced routing.
+
+        FT_STATIC_CAP=N: gate dispatch so total in-flight requests
+        (across all engines) never exceeds N. Excess requests stay in
+        the pending queue and are retried at the next solver epoch.
+        Only applies to new admissions — fault rerouting in
+        _handle_engine_failure is unaffected (displaced reqs bypass
+        _pending_solver_requests and must always be rerouted to a
+        survivor).
+
+        Note: the cap is "soft" — the solver-success path
+        (_dispatch_solver_result) and the reroute path both bump
+        reqs_in_flight without consulting this cap. Set
+        FT_SKIP_SOLVER=1 to force all new admissions through this
+        function so the cap is honored consistently. Reroute always
+        bypasses by design.
+        """
+        try:
+            cap = int(os.environ.get("FT_STATIC_CAP", "0") or 0)
+        except ValueError:
+            cap = 0
+
+        if cap > 0:
+            in_flight = len(self.reqs_in_flight)
+            headroom = cap - in_flight
+            if headroom <= 0:
+                # Fully loaded — leave pending in queue, log throttling.
+                if self._pending_solver_requests and not getattr(
+                    self, "_static_cap_throttle_logged", False
+                ):
+                    logger.info(
+                        "FT_STATIC_CAP throttling: in_flight=%d cap=%d "
+                        "pending=%d (further throttle events suppressed)",
+                        in_flight, cap, len(self._pending_solver_requests),
+                    )
+                    self._static_cap_throttle_logged = True
+                return
+            # Reset suppression flag once we have headroom again.
+            self._static_cap_throttle_logged = False
+            pending = self._pending_solver_requests[:headroom]
+            self._pending_solver_requests = (
+                self._pending_solver_requests[headroom:]
+            )
+        else:
+            pending = list(self._pending_solver_requests)
+            self._pending_solver_requests.clear()
 
         for req in pending:
             req.client_index = self.client_index

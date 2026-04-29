@@ -289,6 +289,10 @@ class BendersSolveLoop:
 
         # Step 4–7: Iterate.
         best_result: BendersSolveResult | None = None
+        # FT_SOLVER_DIAG: track cert_type frequencies across iterations
+        # so we can summarize what kind of cuts dominate when this
+        # solve fails.
+        cert_type_counts: dict[str, int] = {}
 
         for iteration in range(self._max_iterations):
             # Step 4: Solve master.
@@ -339,6 +343,10 @@ class BendersSolveLoop:
                     cut = make_cut(solution, cert)
                     master.add_cut(cut.involved)
                     all_feasible = False
+                    ct_key = str(cert.cert_type)
+                    cert_type_counts[ct_key] = (
+                        cert_type_counts.get(ct_key, 0) + 1
+                    )
                     logger.debug(
                         "Benders iteration %d: scenario %s infeasible "
                         "(%s), added cut #%d",
@@ -382,17 +390,25 @@ class BendersSolveLoop:
                 )
                 return result
 
-        # Step 7: Max iterations exceeded.
-        # P0-impl-3a follow-up: this fires hundreds of times per 5-min run
-        # on W1_Chat/Heavy because Benders frequently hits the iteration
-        # cap and falls through to greedy. At that frequency WARNING is
-        # non-actionable spam. Demoted to DEBUG; the fall-through itself
-        # is still observable via greedy dispatch counts.
+        # Step 7: Max iterations exceeded OR early break from master
+        # infeasible. FT_SOLVER_DIAG: log final reason at INFO so we
+        # can audit which failure mode dominates.
         elapsed = time.monotonic() - start_time
-        logger.debug(
-            "Benders did not converge in %d iterations (%.3fs); "
-            "falling back to greedy",
-            self._max_iterations,
-            elapsed,
+        if solution is None:
+            # Loop exited via `break` because master was infeasible.
+            last_reason = "master_infeasible"
+        else:
+            # Loop ran all max_iterations; last solution still had at
+            # least one infeasible scenario.
+            last_reason = "iter_cap_scenario_infeasible"
+        cert_summary = ",".join(
+            f"{k}={v}" for k, v in sorted(cert_type_counts.items())
+        ) or "none"
+        logger.info(
+            "FT_SOLVER_DIAG benders_returned_none reason=%s "
+            "iters_attempted=%d elapsed=%.3fs num_cuts=%d "
+            "cost_table_size=%d cert_types=[%s]",
+            last_reason, iteration + 1, elapsed,
+            master.num_cuts, len(cost_table), cert_summary,
         )
         return None

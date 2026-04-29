@@ -958,6 +958,18 @@ def _build_server_cmd(config: dict, baseline_name: str, port: int) -> list[str]:
     if config.get("enforce_eager"):
         cmd.append("--enforce-eager")
 
+    # Disable prefix caching for FT experiments. With small/clustered
+    # prompt pools (LongBench-style), prefix-cache hit rates inflate
+    # artificially and confound the FT-mechanism comparison: scheduler
+    # gets a misleading num_computed view that doesn't match what FT
+    # restore can deliver. Disabling globally keeps all baselines
+    # symmetric (No-FT, NoFT-Reprefill, Periodic-Low, Our-System) and
+    # isolates the FT recovery mechanism's contribution. Following
+    # BanaServe (arXiv 2510.13223). Set FT_ENABLE_PREFIX_CACHE=1 to
+    # re-enable for sensitivity studies.
+    if os.environ.get("FT_ENABLE_PREFIX_CACHE") != "1":
+        cmd.append("--no-enable-prefix-caching")
+
     # Solution 3: Optional max-num-seqs cap for admission throttling
     # experiments. Passed via env var so it can be toggled per-run
     # without touching the config file.

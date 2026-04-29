@@ -104,8 +104,26 @@ def _generate_single_trace(
         arrival_type, rps, duration_sec, np_rng, workload_config,
     )
 
-    # Sample from dataset (with wrap-around)
-    samples = sample_from_dataset(dataset, len(arrival_times), rng)
+    # Sample from dataset.
+    # FT_WORKLOAD_EXHAUST=1: shuffle-without-replacement first, so every
+    # prompt in the pool is seen exactly once before any repeats. If the
+    # cell is long enough that arrivals exceed pool size, fall back to
+    # with-replacement random sampling for the overflow.
+    import os as _os
+    if _os.environ.get("FT_WORKLOAD_EXHAUST") == "1":
+        n_arrivals = len(arrival_times)
+        pool_size = len(dataset)
+        shuffled = list(dataset)
+        rng.shuffle(shuffled)
+        if n_arrivals <= pool_size:
+            samples = shuffled[:n_arrivals]
+        else:
+            samples = shuffled + [
+                shuffled[rng.randint(0, pool_size - 1)]
+                for _ in range(n_arrivals - pool_size)
+            ]
+    else:
+        samples = sample_from_dataset(dataset, len(arrival_times), rng)
 
     trace = []
     for i, (t, sample) in enumerate(zip(arrival_times, samples)):
