@@ -503,6 +503,28 @@ class EngineCore:
                     # case there is nothing to prepend.
                     pass
 
+    def _drain_slo_preempted_restores(self) -> None:
+        """M3 drain hook: migrate scheduler-side SLO-preempted restore
+        entries into the engine's _ft_pending_restores queue.
+
+        Scheduler.preempt_for_slo() appends (req_id, num_checkpointed_tokens)
+        tuples to scheduler.slo_preempted_pending_restore. This method drains
+        them into the engine's _ft_pending_restores list, which is processed
+        by _process_ft_pending_restores after schedule() — same path used for
+        cross-engine fault recovery. The result is checkpoint-based restore
+        when the preempted req is later re-admitted.
+
+        No-op when FT_SLO_PREEMPT is off (list will be empty).
+        """
+        base = getattr(self.scheduler, "_base", self.scheduler)
+        pending = getattr(base, "slo_preempted_pending_restore", None)
+        if not pending:
+            return
+        if not hasattr(self, "_ft_pending_restores"):
+            self._ft_pending_restores: list[tuple[str, int]] = []
+        self._ft_pending_restores.extend(pending)
+        pending.clear()
+
     def _drain_ft_lazy_pending(self) -> None:
         """Solution 4 drain hook. Promotes rerouted requests from the
         lazy holding deque into the scheduler when the count of
@@ -952,6 +974,12 @@ class EngineCore:
         # if there is capacity. No-op when FT_LAZY_RELOAD is off.
         if _FT_LAZY_RELOAD_ENABLED:
             self._drain_ft_lazy_pending()
+
+        # M3 SLO-aware preemption: drain scheduler-side pending restores
+        # (entries from _preempt_for_slo) into the engine's _ft_pending_restores
+        # queue so they are processed after schedule() like cross-engine
+        # rerouted reqs. No-op when FT_SLO_PREEMPT is off.
+        self._drain_slo_preempted_restores()
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -1459,6 +1487,9 @@ class EngineCore:
         # if there is capacity. No-op when FT_LAZY_RELOAD is off.
         if _FT_LAZY_RELOAD_ENABLED:
             self._drain_ft_lazy_pending()
+
+        # M3 SLO-aware preemption drain: see step() for rationale.
+        self._drain_slo_preempted_restores()
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.

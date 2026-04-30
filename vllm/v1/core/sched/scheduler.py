@@ -435,10 +435,53 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        # ───────────────────────────────────────────────────────────
+        # M1 SLO BUDGET TELEMETRY (no behavior change).
+        # Enable via FT_SLO_BUDGET_LOG=1. Logs every N=200 schedule()
+        # calls (~6 sec at 30ms decode steps): one INFO line per req
+        # with stage + per-SLO budgets in ms. Negative = in violation.
+        # ───────────────────────────────────────────────────────────
+        if os.environ.get("FT_SLO_BUDGET_LOG") == "1":
+            self._slo_log_step = getattr(self, "_slo_log_step", 0) + 1
+            if self._slo_log_step % 200 == 0:
+                from vllm.v1.core.sched.utils import compute_slo_budgets
+                _now = time.time()
+                _all_reqs = list(self.running) + list(self.waiting)
+                for _r in _all_reqs:
+                    _b = compute_slo_budgets(_r, _now)
+                    logger.info(
+                        "FT_SLO_BUDGET req=%s stage=%s ttft=%.0f tpot=%.0f "
+                        "gap=%.0f min=%.0f",
+                        _r.request_id, _b["stage"],
+                        _b["ttft_ms"], _b["tpot_ms"],
+                        _b["gap_ms"], _b["min_ms"],
+                    )
+
+        # Initialize preempted_reqs early so M3 SLO-aware preemption (below)
+        # can append to it. Standard preempt path (in running scheduling
+        # loop) also appends. Used at line ~772 to skip waiting admission
+        # when preemptions happened this step (prevents same-step preempt+
+        # admit + scheduled-in-prev-step assertion).
+        preempted_reqs: list[Request] = []
+
+        # ───────────────────────────────────────────────────────────
+        # M3 SLO-AWARE PREEMPTION. Enable via FT_SLO_PREEMPT=1.
+        # All gating logic is in _pick_slo_preempt_victim. This caller
+        # just acts on the decision.
+        # See memory/project_paper_framing_rag.md.
+        # ───────────────────────────────────────────────────────────
+        if os.environ.get("FT_SLO_PREEMPT") == "1":
+            _victim = self._pick_slo_preempt_victim(time.time())
+            if _victim is not None:
+                self.running.remove(_victim)
+                self._preempt_for_slo(_victim, time.monotonic())
+                # Track to skip waiting admit this step (prevents same-step
+                # preempt+admit and the scheduled_in_prev_step assertion).
+                preempted_reqs.append(_victim)
+
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
-        preempted_reqs: list[Request] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -1087,6 +1130,144 @@ class Scheduler(SchedulerInterface):
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
+        self.waiting.prepend_request(request)
+
+    def _pick_slo_preempt_victim(self, now: float) -> "Request | None":
+        """Decide whether to preempt a running req for the waiting head's
+        SLO budget. Returns the running req to preempt, or None.
+
+        Triggers only when:
+          1. Waiting head is a recovery (rerouted) req — failure_gap_slo is
+             the only SLO category that justifies proactive preemption.
+          2. Global rate limit elapsed (FT_SLO_PREEMPT_MIN_INTERVAL_MS,
+             default 2s).
+          3. Some running req has a checkpoint AND isn't in per-req cooldown
+             (FT_SLO_PREEMPT_PER_REQ_COOLDOWN_MS, default 30s) — prevents
+             the same req being preempted again after it just resumed.
+          4. Budget gap is large (FT_SLO_PREEMPT_MIN_GAP_MS, default 3s) AND
+             relative gap exceeds hysteresis (FT_SLO_PREEMPT_HYSTERESIS,
+             default 0.30).
+
+        See memory/project_paper_framing_rag.md for the synergy framing.
+        """
+        if not self.running or not self.waiting:
+            return None
+
+        # 1. Global rate limit.
+        min_interval_ms = float(
+            os.environ.get("FT_SLO_PREEMPT_MIN_INTERVAL_MS", "2000.0")
+        )
+        last_t = getattr(self, "_slo_last_preempt_time", 0.0)
+        if (now - last_t) * 1000.0 < min_interval_ms:
+            return None
+
+        # 2. Only act on recovery reqs in waiting head.
+        try:
+            head = self.waiting.peek_request()
+        except (IndexError, KeyError):
+            return None
+        if head is None or not getattr(head, "is_rerouted", False):
+            return None
+
+        # 3. Build candidate list: running reqs with checkpoint AND not in
+        # per-req cooldown. Sort by loosest budget descending; pick first.
+        from vllm.v1.core.sched.utils import compute_slo_budgets
+        per_req_cooldown_ms = float(
+            os.environ.get("FT_SLO_PREEMPT_PER_REQ_COOLDOWN_MS", "30000.0")
+        )
+        history = getattr(self, "_slo_preempt_history", None)
+        if history is None:
+            self._slo_preempt_history = {}
+            history = self._slo_preempt_history
+
+        candidates: list[tuple["Request", float]] = []
+        for r in self.running:
+            if getattr(r, "num_checkpointed_tokens", 0) <= 0:
+                continue
+            last_for_r = history.get(r.request_id, 0.0)
+            if (now - last_for_r) * 1000.0 < per_req_cooldown_ms:
+                continue  # this req in cooldown
+            candidates.append((r, compute_slo_budgets(r, now)["min_ms"]))
+
+        if not candidates:
+            return None
+        victim, victim_b = max(candidates, key=lambda t: t[1])
+
+        # 4. Apply gating.
+        head_b = compute_slo_budgets(head, now)["min_ms"]
+        gap = victim_b - head_b
+        min_gap_ms = float(
+            os.environ.get("FT_SLO_PREEMPT_MIN_GAP_MS", "3000.0")
+        )
+        if gap < min_gap_ms:
+            return None
+        hysteresis = float(
+            os.environ.get("FT_SLO_PREEMPT_HYSTERESIS", "0.30")
+        )
+        rel_pass = (
+            (gap / max(abs(victim_b), 1.0)) > hysteresis
+            or (head_b < 0 < victim_b)
+        )
+        if not rel_pass:
+            return None
+
+        # All checks passed. Record state and return.
+        self._slo_last_preempt_time = now
+        history[victim.request_id] = now
+        self._slo_preempt_count = getattr(self, "_slo_preempt_count", 0) + 1
+        logger.info(
+            "FT_SLO_PREEMPT #%d: victim=%s (budget=%.0fms) "
+            "for recovery=%s (budget=%.0fms), gap=%.0fms",
+            self._slo_preempt_count,
+            victim.request_id, victim_b,
+            head.request_id, head_b, gap,
+        )
+        return victim
+
+    def _preempt_for_slo(self, request: Request, timestamp: float) -> None:
+        """SLO-aware preemption that preserves checkpoint state for resume.
+
+        Unlike _preempt_request which forces full reprefill on resume, this
+        variant marks `is_rerouted=True` and queues a pending-restore entry
+        so the engine's existing FT recovery path (core.py:
+        _process_ft_pending_restores) restores KV from /dev/shm checkpoint
+        when the req is later re-admitted (~1-2s vs ~22s full reprefill).
+
+        Requires `num_checkpointed_tokens>0`. Falls back to vanilla
+        _preempt_request if no checkpoint exists.
+
+        Important: matches vanilla _preempt_request's `num_computed_tokens=0`
+        reset (engine's restore path patches this AFTER restore). Without
+        reset, the waiting admit loop's `assert num_new_tokens > 0` fires.
+
+        See memory/project_paper_framing_rag.md for the synergy framing.
+        """
+        assert request.status == RequestStatus.RUNNING, (
+            "Only running requests can be preempted"
+        )
+        ckpt_tokens = getattr(request, "num_checkpointed_tokens", 0)
+        if ckpt_tokens <= 0:
+            return self._preempt_request(request, timestamp)
+
+        self.kv_cache_manager.free(request)
+        self.encoder_cache_manager.free(request)
+        request.status = RequestStatus.PREEMPTED
+        request.is_rerouted = True
+        request.num_computed_tokens = 0  # restore patches this on resume
+        request.spec_token_ids.clear()
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+        # Queue pending-restore entry. EngineCore drains this list at the
+        # start of step() and migrates into _ft_pending_restores, which is
+        # processed after schedule() to restore KV before execute_model.
+        if not hasattr(self, "slo_preempted_pending_restore"):
+            self.slo_preempted_pending_restore: list[tuple[str, int]] = []
+        self.slo_preempted_pending_restore.append(
+            (request.request_id, ckpt_tokens)
+        )
+
         self.waiting.prepend_request(request)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
