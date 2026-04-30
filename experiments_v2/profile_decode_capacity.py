@@ -41,7 +41,7 @@ def _start_server(model: str, port: int, max_model_len: int = 2048) -> subproces
         "--model", model,
         "--port", str(port),
         "--max-model-len", str(max_model_len),
-        "--gpu-memory-utilization", "0.45",
+        "--gpu-memory-utilization", "0.55",
         "--dtype", "float16",
         "--data-parallel-size", "1",  # Must be 1 for per-replica profiling
         "--enforce-eager",
