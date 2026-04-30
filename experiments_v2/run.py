@@ -1406,7 +1406,9 @@ async def _send_requests(
 ) -> list[RequestResult]:
     """Send all requests concurrently, respecting arrival times."""
     connector = aiohttp.TCPConnector(limit=200)
-    async with aiohttp.ClientSession(connector=connector) as session:
+    # read_bufsize default 64KB chokes on long-prompt SSE chunks (e.g. when
+    # vLLM returns prompt token_ids in early frames). Bump to 4MB.
+    async with aiohttp.ClientSession(connector=connector, read_bufsize=4 * 1024 * 1024) as session:
         tasks = [
             _send_single_request(
                 session, spec, port, timeout_sec, experiment_start,
@@ -1678,7 +1680,7 @@ def main():
 
                 # Use a single session for all requests (same as no-fault path).
                 connector = aiohttp.TCPConnector(limit=200)
-                async with aiohttp.ClientSession(connector=connector) as session:
+                async with aiohttp.ClientSession(connector=connector, read_bufsize=4 * 1024 * 1024) as session:
                     # Run requests and fault injection concurrently.
                     send_tasks = [
                         asyncio.create_task(send_one(session, spec)) for spec in trace
@@ -1708,7 +1710,7 @@ def main():
             # No fault: just send requests.
             async def _send_no_fault():
                 connector = aiohttp.TCPConnector(limit=200)
-                async with aiohttp.ClientSession(connector=connector) as session:
+                async with aiohttp.ClientSession(connector=connector, read_bufsize=4 * 1024 * 1024) as session:
                     _force = config.get("force_output_len", False)
                     send_tasks = [
                         _send_single_request(

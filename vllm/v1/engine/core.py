@@ -1215,6 +1215,48 @@ class EngineCore:
                 ))
 
         if request_block_map:
+            # FT_CKPT_INSTRUMENT: lightweight counter for fire count + block
+            # count, broken down by prefill/decode stage. Only int adds, no
+            # IO. Periodic INFO dump every 500 fires (~30s at our cadence).
+            if not hasattr(self, "_ft_ckpt_inst"):
+                self._ft_ckpt_inst = {
+                    "fires_total": 0, "blocks_total": 0,
+                    "fires_prefill": 0, "blocks_prefill": 0,
+                    "fires_decode": 0, "blocks_decode": 0,
+                    "per_req_fires": {}, "per_req_blocks": {},
+                }
+            _inst = self._ft_ckpt_inst
+            _fire_blocks = 0
+            for req_id, block_ids, _num_tokens in request_block_map:
+                _fire_blocks += len(block_ids)
+                _r = ft.request_pool.get_request(req_id)
+                _is_decode = (
+                    _r is not None
+                    and getattr(_r, "num_output_tokens", 0) > 0
+                )
+                if _is_decode:
+                    _inst["fires_decode"] += 1
+                    _inst["blocks_decode"] += len(block_ids)
+                else:
+                    _inst["fires_prefill"] += 1
+                    _inst["blocks_prefill"] += len(block_ids)
+                _inst["per_req_fires"][req_id] = (
+                    _inst["per_req_fires"].get(req_id, 0) + 1
+                )
+                _inst["per_req_blocks"][req_id] = (
+                    _inst["per_req_blocks"].get(req_id, 0) + len(block_ids)
+                )
+            _inst["fires_total"] += 1  # one RPC fire per request_block_map
+            _inst["blocks_total"] += _fire_blocks
+            if _inst["fires_total"] % 500 == 0:
+                logger.info(
+                    "FT_CKPT_INST fires=%d blocks=%d "
+                    "(prefill: %d fires/%d blocks; decode: %d fires/%d blocks)",
+                    _inst["fires_total"], _inst["blocks_total"],
+                    _inst["fires_prefill"], _inst["blocks_prefill"],
+                    _inst["fires_decode"], _inst["blocks_decode"],
+                )
+
             # Eagerly update checkpoint metadata BEFORE firing RPC.
             # num_checkpointed_tokens is known now; only size_bytes
             # needs the RPC result (updated when RPC completes next step).
@@ -1717,6 +1759,19 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        # Dump final FT_CKPT_INST stats if any.
+        _inst = getattr(self, "_ft_ckpt_inst", None)
+        if _inst:
+            logger.info(
+                "FT_CKPT_INST FINAL fires=%d blocks=%d "
+                "(prefill: %d fires/%d blocks; decode: %d fires/%d blocks) "
+                "per_req_count=%d",
+                _inst["fires_total"], _inst["blocks_total"],
+                _inst["fires_prefill"], _inst["blocks_prefill"],
+                _inst["fires_decode"], _inst["blocks_decode"],
+                len(_inst["per_req_fires"]),
+            )
+
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()

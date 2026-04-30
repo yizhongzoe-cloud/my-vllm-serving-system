@@ -997,6 +997,9 @@ class FTDPAsyncMPClient(DPLBAsyncMPClient):
                 current_counts[target_idx][0] += self.client_count
 
             # Add checkpoint info so the new engine can attempt KV restore.
+            # TODO: this in-memory "promise" can lead the actual /dev/shm
+            # publish by 5-30ms (worse with FT_BG_PUBLISH=1). Cleaner fix is
+            # to read /dev/shm's latest manifest here as ground truth.
             ckpt_tokens = self._checkpoint_tokens.get(req_id, 0)
             cached_request.num_checkpointed_tokens = ckpt_tokens
             cached_request.is_rerouted = True

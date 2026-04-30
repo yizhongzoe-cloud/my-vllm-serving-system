@@ -101,6 +101,19 @@ workloads:
     arrival: "poisson"
     description: "LongBench multi-task mix: qmsum (meeting summary) + musique (multi-hop QA)"
 
+  # RULER niah_single_1 at 64K. Synthetic needle-in-haystack; haystack is
+  # repeated noise sentence. Pool: 200 records, prompt_tokens P50=65389.
+  # Reprefill cost at 64K ~22s on A6000 (boot test 2026-04-29) → forces FT
+  # mechanism to matter. NOTE: this entry needs max_model_len >= 65536; this
+  # config sets max_model_len=32768 so W9 cannot run here. Use
+  # config_8b_ruler64k.yaml for actual W9 experiments.
+  W9_Ruler64K:
+    dataset: "ruler_64k_niah"
+    dataset_path: "experiments_v2/datasets/cached/ruler_64k_niah.jsonl"
+    tpot_slo_ms: 400.0
+    arrival: "poisson"
+    description: "RULER niah_single_1 64K (synthetic NIAH, reprefill ~22s)"
+
 # ---- Load levels ----
 # Manual estimates for 8B dp=2 on A6000. Run calibrate.py for precise values.
 load_levels:

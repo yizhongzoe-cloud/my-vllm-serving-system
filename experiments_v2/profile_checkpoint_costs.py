@@ -398,18 +398,29 @@ def estimate_c0_from_checkpoint_data(
 # Main
 # ============================================================================
 
-def _start_server(model: str, port: int, max_model_len: int = 4096) -> subprocess.Popen:
-    """Start vLLM server for prefill profiling."""
+def _start_server(model: str, port: int, max_model_len: int = 70000) -> subprocess.Popen:
+    """Start vLLM server for prefill profiling.
+
+    Configured to match production chunked-prefill setup:
+      max_model_len: 70000 (room for 65K prompt + small max_tokens)
+      gpu_memory_utilization: 0.80 (64K KV ~8GB on Llama-3.1-8B)
+      --no-enable-prefix-caching: critical — without this, repeated profile
+        prompts with shared prefixes hit prefix cache and measurements show
+        prefill 100x faster than reality.
+      max_num_batched_tokens: 2048 (matches production chunked prefill chunk size)
+    """
     cmd = [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", model,
         "--port", str(port),
         "--max-model-len", str(max_model_len),
-        "--gpu-memory-utilization", "0.45",
+        "--gpu-memory-utilization", "0.80",
         "--dtype", "float16",
         "--data-parallel-size", "1",
         "--enforce-eager",
         "--scheduling-policy", "fcfs",
+        "--no-enable-prefix-caching",
+        "--max-num-batched-tokens", "2048",
     ]
     log_file = open("/tmp/ckpt_profile_server.log", "w")
     env = os.environ.copy()
@@ -499,7 +510,8 @@ def main():
     else:
         profiler = PrefillBenchmark(args.model, port=args.port)
         prefill_data = profiler.run(
-            token_lengths=[16, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048],
+            token_lengths=[16, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048,
+                           4096, 8192, 16384, 32768, 65536],
             num_warmup=2,
             num_trials=5,
         )
@@ -523,7 +535,9 @@ def main():
     else:
         try:
             kv_bench = KVCheckpointBenchmark.from_model_name(args.model)
-            block_counts = [1, 2, 4, 8, 16, 32, 64]
+            # block_size=16 tokens. KV per block ≈ 2 MB (Llama-3.1-8B GQA fp16).
+            # Extended to 4096 blocks (~8 GB) for 64K-prompt experiments.
+            block_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
             save_data, restore_data = kv_bench.benchmark_save_restore(block_counts)
             # save = checkpoint (GPU→Host), restore = load (Host→GPU)
             checkpoint_data = save_data
