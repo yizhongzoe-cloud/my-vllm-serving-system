@@ -3,7 +3,7 @@
     "model": "meta-llama/Llama-3.1-8B-Instruct",
     "gpu": "NVIDIA L40S",
     "dp_size": 1,
-    "max_model_len": 65536,
+    "max_model_len": 32768,
     "tpot_slo_ms": 200.0,
     "planning_horizon_sec": 0.5
   },
@@ -15,11 +15,11 @@
     }
   },
   "residual_prefill_capacity": {
-    "0": 21418,
-    "10": 19306,
-    "20": 17938,
-    "30": 17066,
-    "40": 15806,
-    "50": 14742
+    "0": 21226,
+    "10": 19204,
+    "20": 17934,
+    "30": 17045,
+    "40": 15782,
+    "50": 14746
   }
 }

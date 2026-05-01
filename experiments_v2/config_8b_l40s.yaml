@@ -1,0 +1,355 @@
+# RULER 64K config — forked from config_8b_step5_overnight.yaml.
+# Key changes for 64K regime:
+#   max_model_len 32768 → 65536
+#   gpu_memory_utilization 0.85 → 0.80 (KV per req at 64K ~= 8 GB)
+#   checkpoint_pool_bytes 32 GB → 64 GB (8 reqs at 8 GB each)
+#   TTFT / failover-gap SLO loosened (64K prefill alone ~20-30s on A6000)
+#   RPS lowered (one 64K req takes long, steady-state concurrency gated)
+
+# ---- Hardware & Model ----
+model: "meta-llama/Llama-3.1-8B-Instruct"
+model_tag: "8B"
+max_model_len: 65536
+gpu_memory_utilization: 0.80
+dtype: "float16"
+enforce_eager: true
+dp_size: 2
+
+# ---- Solver / FT parameters ----
+# NOTE: ft_prefill/decode_throughput are legacy fallback values.
+# The decode-first capacity model (ft_decode_capacity_profile) is preferred.
+# kv_bytes_per_token is auto-computed from model config (no need to set).
+ft_prefill_throughput: 4000.0
+ft_decode_throughput: 2000.0
+ft_load_bandwidth: 10.0e9
+ft_planning_horizon: 1.0
+ft_checkpoint_cost_profile: "experiments_v2/checkpoint_cost_profile_8b_l40s.json"
+ft_decode_capacity_profile: "experiments_v2/decode_capacity_profile_8b_l40s.json"
+failure_detection_time_ms: 100.0
+failure_timeout_sec: 5.0
+checkpoint_pool_bytes: 68719476736  # 64 GB — at 64K each req has ~8 GB KV; 64GB covers ~8 such requests fully checkpointed.
+
+force_output_len: true
+
+# ---- Workloads ----
+workloads:
+  W1_Chat:
+    dataset: "sharegpt"
+    dataset_path: "experiments_v2/datasets/cached/sharegpt_5000.jsonl"
+    tpot_slo_ms: 100.0
+    arrival: "poisson"
+    description: "Chatbot, decode-heavy"
+
+  W2_Summary:
+    dataset: "cnndm"
+    dataset_path: "experiments_v2/datasets/cached/cnndm_3000.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "Summarization, prefill-heavy"
+
+  W3_Instruct:
+    dataset: "alpaca"
+    dataset_path: "experiments_v2/datasets/cached/alpaca_full.jsonl"
+    tpot_slo_ms: 50.0
+    arrival: "poisson"
+    description: "Instruction-following, tight SLO"
+
+  W4_Mixed:
+    mix:
+      - {workload: "W1_Chat", weight: 0.50}
+      - {workload: "W3_Instruct", weight: 0.20}
+      - {workload: "W2_Summary", weight: 0.30}
+    arrival: "poisson"
+    description: "Production mix, per-request SLO differentiation"
+
+  W5_LongDoc:
+    dataset: "arxiv"
+    dataset_path: "experiments_v2/datasets/cached/arxiv_filtered.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "Long-context summarization (ArXiv papers, prompt_tokens <= 5500)"
+
+  W7_Saturated:
+    dataset: "sharegpt"
+    dataset_path: "experiments_v2/datasets/cached/sharegpt_5000.jsonl"
+    tpot_slo_ms: 100.0
+    arrival: "poisson"
+    description: "Queue-saturation stress: sharegpt @ high RPS + tight SLO"
+
+  W5b_LongFull:
+    dataset: "arxiv"
+    dataset_path: "experiments_v2/datasets/cached/arxiv_2000.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "Long-context summarization (unfiltered ArXiv, p95=7108)"
+
+  # LongBench narrativeqa: book/movie-script QA. Llama-3 tokenized, prompts
+  # filtered to [2K, 28K]. After filtering: 85 records, P50=12K, P95=23K.
+  W6_NarrativeQA:
+    dataset: "longbench_narrativeqa"
+    dataset_path: "experiments_v2/datasets/cached/longbench_narrativeqa.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "LongBench narrativeqa (long-doc QA, P50=12K, P95=23K)"
+
+  # LongBench qmsum + musique merged at download time (50/50 by source size).
+  # Pool: 391 records, P50=15.8K, P95=18.4K.
+  W8_LongMix:
+    dataset: "longbench_qmsum_musique"
+    dataset_path: "experiments_v2/datasets/cached/longbench_qmsum_musique.jsonl"
+    tpot_slo_ms: 200.0
+    arrival: "poisson"
+    description: "LongBench multi-task mix: qmsum (meeting summary) + musique (multi-hop QA)"
+
+  # RULER niah_single_1 at 64K. Synthetic needle-in-haystack; haystack is
+  # repeated noise sentence. Pool: 200 records, prompt_tokens P50=65389.
+  # Reprefill cost at 64K ~22s on A6000 (boot test 2026-04-29) → forces FT
+  # mechanism to matter. TPOT SLO 400ms: clean decode is 34ms (passes), but
+  # chunked-prefill contention pushes TPOT to 686ms (violates). Cuts cleanly
+  # between "no contention" and "fault-induced contention".
+  W9_Ruler64K:
+    dataset: "ruler_64k_niah"
+    dataset_path: "experiments_v2/datasets/cached/ruler_64k_niah.jsonl"
+    tpot_slo_ms: 400.0
+    arrival: "poisson"
+    description: "RULER niah_single_1 64K (synthetic NIAH, reprefill ~22s)"
+
+# ---- Load levels ----
+# 64K prompts: each request's prefill alone is 20-30s on A6000.
+# Concurrency is naturally low; RPS values further reduced from 32K config.
+load_levels:
+  Light:    {pct: 0.25, rps: 0.03}
+  Moderate: {pct: 0.40, rps: 0.10}
+  Heavy:    {pct: 0.55, rps: 0.15}
+
+# ---- SLO ----
+# Boot-test calibrated (2026-04-29 W9_Ruler64K, dp=2 A6000):
+#   Clean prefill TTFT ≈ 22s; queued ≈ 40-64s.
+#   Clean decode TPOT ≈ 34ms; chunked-prefill-contended ≈ 686ms.
+#   Reprefill cost ≈ 22s; KV checkpoint reload ≈ 1-2s.
+# TTFT 40s: clean reqs pass, queued reqs violate (real signal of contention).
+# Gap 5s: reprefill physically cannot meet, KV reload easily does.
+# TPOT in workload entry is 400ms (between 34ms clean and 686ms congested).
+slo:
+  ttft_ms: 40000.0
+  failure_gap_ms: 5000.0
+  ttft_base_ms: 1500.0
+  gap_base_ms: 4000.0
+
+# ---- Fault injection ----
+# 900s cells with 60s warmup. F2_Mid moved to 500s so pipe is fully populated
+# (steady-state in-flight at Light=0.05 RPS) and more reqs are past prefill in
+# decode stage when the fault hits.
+fault_timing:
+  none: null
+  F1_Early: 200.0
+  F2_Mid: 500.0
+  F3_Late: 750.0
+
+# ---- Run parameters ----
+# 64K cell: at rps=0.15, 900s arrival count ≈ 135. Pool=200 records.
+# Per-request timeout raised since 64K prefill alone may take 20-30s.
+run_duration_sec: 900.0
+warmup_sec: 60.0
+seeds: [42, 123, 456]
+request_timeout_sec: 300.0
+server_startup_timeout: 600.0
+
+# ---- Baselines ----
+baselines:
+  No-FT:
+    scheduling_policy: "fcfs"
+    enable_checkpointing: false
+    max_gpu_failures: 0
+    fixed_checkpoint_blocks: 0
+
+  Periodic-Low:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+
+  Periodic-High:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 1
+
+  Benders-Only:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 10
+
+  Adaptive-Only:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+  Our-System:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: true
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+  # Same as Our-System but with checkpoint controller off. Used to
+  # isolate how much of the framework baseline overhead comes from the
+  # checkpoint controller (per-step running-req iteration + GPU→host
+  # copies). Compare against Our-System on the same workload.
+  Our-System-NoCkpt:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+  # Lightest possible "don't drop displaced reqs" baseline:
+  # fault_tolerant scheduler (no Benders solver), no checkpointing,
+  # max_gpu_failures=1 (handle faults). On fault, displaced reqs
+  # have no checkpoint state → recovery re-prefills from scratch.
+  #
+  # Use with FT_RECOVERY_MODE=reprefill to extend the prompt with
+  # already-decoded tokens (preserves stream consistency), or with
+  # the default "reload" mode which degrades to restart (full
+  # re-prefill of original prompt only, since there's no checkpoint
+  # to reload).
+  #
+  # Comparison: No-FT drops displaced reqs entirely (goodput looks
+  # good but loses work). This baseline keeps them at the cost of
+  # re-prefill overhead. Our-System keeps them with KV reload
+  # (faster recovery but has checkpoint overhead).
+  NoFT-Reprefill:
+    scheduling_policy: "fault_tolerant"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+  # Our-System but with checkpointing disabled. Used with
+  # FT_RECOVERY_MODE=reprefill to measure solver-only value
+  # (no ckpt overhead, no reload).
+  Our-System-NoCkpt:
+    scheduling_policy: "ft_benders_centralized"
+    enable_checkpointing: false
+    max_gpu_failures: 1
+    fixed_checkpoint_blocks: 0
+
+# ---- Experiments ----
+experiments:
+  Step5_Smoke:
+    # 1 — single seed, no fault, NR only. Sanity check that the long-context
+    # config boots and finishes 300s with reasonable goodput.
+    description: "Step 5 smoke: NR / W5 LongDoc / Moderate / no fault"
+    baselines: ["NoFT-Reprefill"]
+    workloads: ["W5_LongDoc"]
+    load_levels: ["Moderate"]
+    faults: ["none"]
+
+  Step5_Main:
+    # 48 cells = 4 baselines × 2 workloads × 1 load × 2 faults × 3 seeds
+    # W6 = pure narrativeqa (long-doc QA), W8 = qmsum+musique mix
+    description: "Step 5 main: V2 vs NR on LongBench (W6_NarrativeQA + W8_LongMix)"
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Our-System", "Our-System-NoCkpt"]
+    workloads: ["W6_NarrativeQA", "W8_LongMix"]
+    load_levels: ["Moderate"]
+    faults: ["none", "F2_Mid"]
+
+  E0_Smoke:
+  # 4
+    description: "Pipeline validation"
+    baselines: ["NoFT-Reprefill", "Our-System"]
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate"]
+    faults: ["none", "F2_Mid"]
+
+  E1a_Quick:
+  # 48 — 精简版，先看趋势。完整版用 E1a_Main
+    description: "End-to-end quick (4 baselines × 2 workloads × 3 loads × 2 faults)"
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High", "Our-System"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  # ====== Post-fix re-run, split for parallel GPU pairs ======
+  # P0-impl-3a fix (da5c8f25e) invalidated all old E1a_Quick data.
+  # Re-run with clean fix, split across GPU 4-5 + GPU 6-7 to halve wall time.
+  E1a_Quick_v2_HalfA:
+  # 24 cells, ~2.8h on GPU 4-5
+    description: "Post-fix re-run Half A (No-FT + Periodic-Low) on GPU 4-5"
+    baselines: ["No-FT", "Periodic-Low"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  # NoFT-Reprefill baseline: lightest "don't drop displaced reqs" strategy.
+  # Run as a separate experiment so it can be launched independently.
+  E1a_NoFT_Reprefill:
+  # 12 cells, ~1.5h
+    description: "NoFT-Reprefill baseline (fault_tolerant + no ckpt + reprefill recovery)"
+    baselines: ["NoFT-Reprefill"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  E1a_Quick_v2_HalfB:
+  # 24 cells, ~2.8h on GPU 6-7
+    description: "Post-fix re-run Half B (Periodic-High + Our-System) on GPU 6-7"
+    baselines: ["Periodic-High", "Our-System"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  E1a_Main:
+  # 288
+    description: "End-to-end (8B full sweep)"
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High",
+                 "Benders-Only", "Adaptive-Only", "Our-System"]
+    workloads: ["W1_Chat", "W2_Summary", "W3_Instruct", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none", "F1_Early", "F2_Mid", "F3_Late"]
+
+  E2_Recovery:
+  # 8
+    description: "Recovery breakdown"
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High", "Our-System"]
+    workloads: ["W1_Chat", "W2_Summary"]
+    load_levels: ["Moderate"]
+    faults: ["F2_Mid"]
+
+  E3_Ablation:
+  # 40
+    description: "Joint optimization ablation"
+    baselines: ["Periodic-Low", "Periodic-High", "Benders-Only",
+                 "Adaptive-Only", "Our-System"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  E4_Checkpoint_Tradeoff:
+  # 16
+    description: "Checkpoint overhead vs recovery benefit"
+    baselines: ["NoFT-Reprefill", "Periodic-Low", "Periodic-High", "Our-System"]
+    workloads: ["W1_Chat"]
+    load_levels: ["Moderate", "Heavy"]
+    faults: ["none", "F2_Mid"]
+
+  E5_Controller:
+  # 12
+    description: "Solver overhead"
+    baselines: ["Our-System"]
+    workloads: ["W1_Chat", "W2_Summary", "W3_Instruct", "W4_Mixed"]
+    load_levels: ["Light", "Moderate", "Heavy"]
+    faults: ["none"]
+
+  E6_SLO_Sensitivity:
+  # 4
+    description: "SLO sensitivity"
+    baselines: ["NoFT-Reprefill", "Our-System"]
+    workloads: ["W1_Chat", "W4_Mixed"]
+    load_levels: ["Moderate"]
+    faults: ["F2_Mid"]
+    slo_scales:
+      Tight:    {ttft_mult: 3.0,  gap_mult: 1.5}
+      Moderate: {ttft_mult: 5.0,  gap_mult: 3.0}
+      Loose:    {ttft_mult: 10.0, gap_mult: 5.0}
+
+results_dir: "results_v2"
