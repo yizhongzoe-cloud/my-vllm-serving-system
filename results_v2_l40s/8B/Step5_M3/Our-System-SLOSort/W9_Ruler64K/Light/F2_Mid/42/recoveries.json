@@ -1,0 +1,64 @@
+[
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00000-8f835b7a",
+    "gpu": 0,
+    "wall_time": 1777550967.496426,
+    "timestamp": 1777550967.496426
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00006-bee4bcb7",
+    "gpu": 1,
+    "wall_time": 1777551155.375731,
+    "timestamp": 1777551155.375731
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 0,
+    "wall_time": 1777551391.834081,
+    "source": "process_monitor",
+    "timestamp": 1777551391.834081
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 0,
+    "wall_time": 1777551391.834527,
+    "timestamp": 1777551391.834527
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "wall_time": 1777551391.834768,
+    "timestamp": 1777551391.834768,
+    "source": "fault_event"
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00014-adbf6f97",
+    "gpu": 1,
+    "wall_time": 1777551485.771013,
+    "timestamp": 1777551485.771013
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00015-91d31e9c",
+    "gpu": 1,
+    "wall_time": 1777551492.530289,
+    "timestamp": 1777551492.530289
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00016-aede2659",
+    "gpu": 1,
+    "wall_time": 1777551504.631786,
+    "timestamp": 1777551504.631786
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 1,
+    "wall_time": 1777551843.48964,
+    "source": "process_monitor",
+    "timestamp": 1777551843.48964
+  }
+]

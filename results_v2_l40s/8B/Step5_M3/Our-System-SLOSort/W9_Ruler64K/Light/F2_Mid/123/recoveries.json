@@ -1,0 +1,90 @@
+[
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00000-aa1e97df",
+    "gpu": 0,
+    "wall_time": 1777556066.090249,
+    "timestamp": 1777556066.090249
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00002-a0284f04",
+    "gpu": 0,
+    "wall_time": 1777556085.735863,
+    "timestamp": 1777556085.735863
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 0,
+    "wall_time": 1777556466.175394,
+    "source": "process_monitor",
+    "timestamp": 1777556466.175394
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 0,
+    "wall_time": 1777556466.175578,
+    "timestamp": 1777556466.175578
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "wall_time": 1777556466.175766,
+    "timestamp": 1777556466.175766,
+    "source": "fault_event"
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": -1,
+    "recovered": 1,
+    "total": 1,
+    "dropped": 0,
+    "timestamp": 1777556466.0,
+    "source": "ft_client"
+  },
+  {
+    "type": "failover_complete",
+    "replica_id": 0,
+    "wall_time": 1777556466.176309,
+    "recovered": 1,
+    "total": 1,
+    "dropped": 0,
+    "timestamp": 1777556466.176309,
+    "source": "fault_event"
+  },
+  {
+    "type": "kv_restore_done",
+    "request_id": "chatcmpl-req-00012-9192f0f5",
+    "wall_time": 1777556472.748368,
+    "tokens": 128,
+    "blocks": 8,
+    "timestamp": 1777556472.748368
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00014-8cb66783",
+    "gpu": 1,
+    "wall_time": 1777556477.54569,
+    "timestamp": 1777556477.54569
+  },
+  {
+    "type": "first_token_after_recovery",
+    "request_id": "chatcmpl-req-00012-9192f0f5",
+    "wall_time": 1777556487.941587,
+    "timestamp": 1777556487.941587
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00017-adf4999b",
+    "gpu": 1,
+    "wall_time": 1777556535.350912,
+    "timestamp": 1777556535.350912
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 1,
+    "wall_time": 1777556961.968148,
+    "source": "process_monitor",
+    "timestamp": 1777556961.968148
+  }
+]

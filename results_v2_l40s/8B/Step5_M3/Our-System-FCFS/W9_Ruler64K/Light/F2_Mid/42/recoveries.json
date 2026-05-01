@@ -1,0 +1,50 @@
+[
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00000-b6ea4dcc",
+    "gpu": 0,
+    "wall_time": 1777549959.128231,
+    "timestamp": 1777549959.128231
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 0,
+    "wall_time": 1777550383.459276,
+    "source": "process_monitor",
+    "timestamp": 1777550383.459276
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 0,
+    "wall_time": 1777550383.459638,
+    "timestamp": 1777550383.459638
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 0,
+    "wall_time": 1777550383.459842,
+    "timestamp": 1777550383.459842,
+    "source": "fault_event"
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00014-af2b0eec",
+    "gpu": 1,
+    "wall_time": 1777550477.411852,
+    "timestamp": 1777550477.411852
+  },
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00015-a79b68c0",
+    "gpu": 1,
+    "wall_time": 1777550484.149338,
+    "timestamp": 1777550484.149338
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 1,
+    "wall_time": 1777550834.380872,
+    "source": "process_monitor",
+    "timestamp": 1777550834.380872
+  }
+]

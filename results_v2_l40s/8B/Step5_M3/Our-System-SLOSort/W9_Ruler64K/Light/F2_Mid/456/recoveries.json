@@ -1,0 +1,36 @@
+[
+  {
+    "type": "request_route",
+    "request_id": "chatcmpl-req-00000-9dff4777",
+    "gpu": 0,
+    "wall_time": 1777561061.027206,
+    "timestamp": 1777561061.027206
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 1,
+    "wall_time": 1777561491.321034,
+    "source": "process_monitor",
+    "timestamp": 1777561491.321034
+  },
+  {
+    "type": "failure_declared",
+    "replica_id": 1,
+    "wall_time": 1777561492.292899,
+    "timestamp": 1777561492.292899
+  },
+  {
+    "type": "failover_start",
+    "replica_id": 1,
+    "wall_time": 1777561492.292966,
+    "timestamp": 1777561492.292966,
+    "source": "fault_event"
+  },
+  {
+    "type": "monitor_observed",
+    "replica_id": 0,
+    "wall_time": 1777561929.571846,
+    "source": "process_monitor",
+    "timestamp": 1777561929.571846
+  }
+]
