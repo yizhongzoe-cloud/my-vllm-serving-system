@@ -912,6 +912,63 @@ class EngineCore:
 
         self._ft_pending_restores = still_pending
 
+    def _process_slo_retained_queue(self) -> None:
+        """Phase 2 SLO preempt retain path: tick down per-request
+        retain_steps and drain expired entries back into vLLM waiting
+        queue.
+
+        Called every step BEFORE scheduler.schedule(). For each
+        retained request:
+          - Decrement retain_steps_remaining
+          - When it reaches 0, prepend the request to vLLM waiting
+            queue. Standard admit picks it up next step.
+          - The request's blocks were never freed and KV is intact, so
+            vLLM admit sees existing blocks + non-zero
+            num_computed_tokens, and forward continues from where it
+            stopped (zero reload cost).
+
+        This implementation is the simple version: fixed-step retain
+        without GPU memory pressure detection. Adding LRU eviction +
+        memory-pressure guards is future work.
+        """
+        if os.environ.get("SLO_PRIORITY_PREEMPT") != "1":
+            return
+        base = getattr(self.scheduler, "_base", self.scheduler)
+        retained = getattr(base, "slo_preempted_retained", None)
+        if not retained:
+            return
+        # Tick down each entry's retain_steps and drain those that
+        # reached 0.
+        # Defensive: between preempt and resume, the request may have
+        # transitioned to a FINISHED_* status (e.g. client disconnect,
+        # request_timeout, abort). Re-adding such a request to the
+        # waiting queue causes vLLM's schedule() to raise
+        # "Invalid request status: FINISHED_*". Skip those.
+        from vllm.v1.request import RequestStatus
+        new_retained: list[tuple] = []
+        for request, steps_remaining in retained:
+            steps_remaining -= 1
+            if request.status != RequestStatus.PREEMPTED:
+                # Stale entry — request was finished or aborted while
+                # in the retained queue. Drop it (no prepend).
+                logger.info(
+                    "FT SLO retain: %s dropped from retain queue "
+                    "(status=%s, no resume)",
+                    request.request_id, request.status,
+                )
+                continue
+            if steps_remaining <= 0:
+                base.waiting.prepend_request(request)
+                logger.info(
+                    "FT SLO retain: %s resumed (KV preserved on "
+                    "GPU, num_computed_tokens=%d)",
+                    request.request_id,
+                    getattr(request, "num_computed_tokens", 0),
+                )
+            else:
+                new_retained.append((request, steps_remaining))
+        base.slo_preempted_retained = new_retained
+
     def _process_overlap_reload_queue(self) -> None:
         """Phase 2 C-mode (queue-based, V3): manage the side queue of
         capacity-preempted reqs through three stages: waiting for KV
@@ -1418,6 +1475,11 @@ class EngineCore:
         # in-flight ones; admits completed ones into vLLM waiting queue.
         # No-op when FT_CAPACITY_PREEMPT_RELOAD_OVERLAP is off.
         self._process_overlap_reload_queue()
+
+        # Phase 2 SLO retain path: tick down retained requests and
+        # resume those whose retain window expired. No-op when
+        # FT_SLO_PREEMPT_RETAIN is off.
+        self._process_slo_retained_queue()
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -1932,6 +1994,11 @@ class EngineCore:
         # Phase 2 C-mode (queue-based): manage overlap reload side queue.
         # See step() for rationale.
         self._process_overlap_reload_queue()
+
+        # Phase 2 SLO retain path: tick down retained requests and
+        # resume those whose retain window expired. See step() for
+        # rationale.
+        self._process_slo_retained_queue()
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.

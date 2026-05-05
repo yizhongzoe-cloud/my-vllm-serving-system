@@ -470,6 +470,12 @@ class Scheduler(SchedulerInterface):
         # just acts on the decision.
         # See memory/project_paper_framing_rag.md.
         # ───────────────────────────────────────────────────────────
+        # Fault-recovery driven SLO preempt path (M3 / FT_SLO_PREEMPT).
+        # This path is for recovery requests joining the waiting queue
+        # after a fault — it gates on `is_rerouted` and requires the
+        # victim to have a host-side checkpoint. Kept intact for
+        # fault-recovery experiments. The new SLO priority preempt path
+        # (see SLO_PRIORITY_PREEMPT below) is fully independent.
         if os.environ.get("FT_SLO_PREEMPT") == "1":
             _victim = self._pick_slo_preempt_victim(time.time())
             if _victim is not None:
@@ -477,6 +483,19 @@ class Scheduler(SchedulerInterface):
                 self._preempt_for_slo(_victim, time.monotonic())
                 # Track to skip waiting admit this step (prevents same-step
                 # preempt+admit and the scheduled_in_prev_step assertion).
+                preempted_reqs.append(_victim)
+
+        # ── SLO priority preempt path (new, independent of fault) ──
+        # When SLO_PRIORITY_PREEMPT=1, fire a separate picker that
+        # selects victims by SLO slack (no ckpt requirement) and routes
+        # them through _preempt_for_slo_retain (blocks retained on GPU).
+        # This path does NOT share state, env vars, or markers with the
+        # fault-recovery path above. See paper_design_notes.md §8.
+        if os.environ.get("SLO_PRIORITY_PREEMPT") == "1":
+            _victim = self._pick_priority_preempt_victim(time.time())
+            if _victim is not None:
+                self.running.remove(_victim)
+                self._preempt_for_slo_retain(_victim, time.monotonic())
                 preempted_reqs.append(_victim)
 
         scheduled_new_reqs: list[Request] = []
@@ -1238,6 +1257,130 @@ class Scheduler(SchedulerInterface):
         )
         return victim
 
+    def _pick_priority_preempt_victim(
+        self, now: float
+    ) -> "Request | None":
+        """SLO priority preempt victim picker (independent of fault path).
+
+        Triggers when a tight-SLO request is waiting and a looser-SLO
+        request is running. Selects the running request with the most
+        SLO slack as the preempt victim. The victim's blocks are
+        retained (see _preempt_for_slo_retain) so it can resume
+        without reload after the urgent request makes progress.
+
+        Differences from _pick_slo_preempt_victim (the fault path):
+          - No `is_rerouted` gate. We trigger on plain SLO budget,
+            not on fault recovery membership.
+          - No `num_checkpointed_tokens > 0` requirement on the
+            victim. Retain semantics keep KV on GPU; ckpt is unrelated.
+          - Slack-based ranking (loosest-SLO running req picked).
+
+        Gates (env-tunable, all independent of FT_SLO_PREEMPT_*):
+          SLO_PRIORITY_PREEMPT_MIN_INTERVAL_MS (default 2000): global
+            rate limit between back-to-back priority preempts.
+          SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS (default 30000):
+            same victim cannot be picked twice within this window.
+          SLO_PRIORITY_PREEMPT_MIN_GAP_MS (default 3000): victim's SLO
+            slack must exceed waiting head's slack by at least this
+            much to justify the preempt.
+        """
+        if not self.running or not self.waiting:
+            return None
+
+        # Global rate limit.
+        try:
+            min_interval_ms = float(
+                os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_MIN_INTERVAL_MS", "2000.0"
+                )
+            )
+        except ValueError:
+            min_interval_ms = 2000.0
+        last_t = getattr(self, "_priority_preempt_last_time", 0.0)
+        if (now - last_t) * 1000.0 < min_interval_ms:
+            return None
+
+        # Look at the waiting head's SLO slack.
+        try:
+            head = self.waiting.peek_request()
+        except (IndexError, KeyError):
+            return None
+        if head is None:
+            return None
+
+        # Independence gate: skip fault-recovery requests. The
+        # fault path (FT_SLO_PREEMPT) handles those; SLO priority
+        # preempt only acts on regular tight-SLO new requests.
+        if getattr(head, "is_rerouted", False):
+            return None
+
+        from vllm.v1.core.sched.utils import compute_slo_budgets
+        try:
+            head_slack = compute_slo_budgets(head, now)["min_ms"]
+        except Exception:
+            return None
+
+        # Build candidate list from running queue. No ckpt requirement.
+        try:
+            cooldown_ms = float(
+                os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS",
+                    "30000.0",
+                )
+            )
+        except ValueError:
+            cooldown_ms = 30000.0
+        history = getattr(self, "_priority_preempt_history", None)
+        if history is None:
+            self._priority_preempt_history = {}
+            history = self._priority_preempt_history
+
+        candidates: list[tuple["Request", float]] = []
+        for r in self.running:
+            last_for_r = history.get(r.request_id, 0.0)
+            if (now - last_for_r) * 1000.0 < cooldown_ms:
+                continue  # in per-req cooldown
+            try:
+                r_slack = compute_slo_budgets(r, now)["min_ms"]
+            except Exception:
+                continue
+            candidates.append((r, r_slack))
+
+        if not candidates:
+            return None
+
+        # Pick loosest-SLO running req (largest slack).
+        victim, victim_slack = max(candidates, key=lambda t: t[1])
+
+        # Slack gap gate: only preempt if victim is significantly looser
+        # than the waiting head.
+        try:
+            min_gap_ms = float(
+                os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_MIN_GAP_MS", "3000.0"
+                )
+            )
+        except ValueError:
+            min_gap_ms = 3000.0
+        if (victim_slack - head_slack) < min_gap_ms:
+            return None
+
+        # All checks passed. Record state and return.
+        self._priority_preempt_last_time = now
+        history[victim.request_id] = now
+        self._priority_preempt_count = (
+            getattr(self, "_priority_preempt_count", 0) + 1
+        )
+        logger.info(
+            "SLO_PRIORITY_PREEMPT #%d: victim=%s (slack=%.0fms) "
+            "for waiting head=%s (slack=%.0fms), gap=%.0fms",
+            self._priority_preempt_count,
+            victim.request_id, victim_slack,
+            head.request_id, head_slack,
+            victim_slack - head_slack,
+        )
+        return victim
+
     def _preempt_for_slo(self, request: Request, timestamp: float) -> None:
         """SLO-aware preemption that preserves checkpoint state for resume.
 
@@ -1342,6 +1485,71 @@ class Scheduler(SchedulerInterface):
         )
 
         self.waiting.prepend_request(request)
+
+    def _preempt_for_slo_retain(
+        self, request: Request, timestamp: float
+    ) -> None:
+        """SLO-aware preempt that RETAINS blocks (priority-driven path).
+
+        Used when the trigger is "an urgent request needs a forward
+        batch slot", not "we need GPU memory". The preempted request:
+          - Keeps its allocated GPU blocks (KV cache stays on GPU)
+          - num_computed_tokens unchanged (no recomputation needed)
+          - status=PREEMPTED so vLLM scheduler doesn't include it in
+            forward batch
+          - Lives in self.slo_preempted_retained side queue
+        Engine drains the side queue after a configured number of steps
+        (FT_SLO_PREEMPT_RETAIN_STEPS, default 5), at which point the
+        request is prepended to vLLM waiting queue. Standard admit
+        sees blocks already allocated + KV intact → request resumes
+        decoding from where it left off, zero reload cost.
+
+        IMPORTANT: This path assumes GPU memory is sufficient. The
+        retained request continues to occupy ~N blocks throughout the
+        retain window. If new requests admit during this window and
+        push the KV pool toward saturation, additional logic (LRU
+        eviction of retained reqs, fall back to release path) is
+        needed. Not implemented in this version — caller must ensure
+        the workload doesn't exceed pool capacity during retain.
+        """
+        assert request.status == RequestStatus.RUNNING, (
+            "Only running requests can be preempted"
+        )
+
+        # No-op for kv_cache_manager: blocks stay allocated to request.
+        # Encoder cache can be released safely.
+        self.encoder_cache_manager.free(request)
+        request.status = RequestStatus.PREEMPTED
+        # NOTE: do NOT set is_rerouted=True here. That flag is a
+        # recovery-path marker used by _pick_slo_preempt_victim's
+        # waiting-head gate (line ~1192) to decide whether to trigger
+        # another SLO preempt. Setting it here would cause this very
+        # request to satisfy the gate when it resumes, leading to a
+        # retain → resume → retain infinite loop after the per-req
+        # cooldown expires. Retain is not a recovery, so leave this
+        # attribute at its current value.
+        # Do NOT reset num_computed_tokens — KV is still on GPU and
+        # represents that many computed tokens.
+        request.spec_token_ids.clear()
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+        if not hasattr(self, "slo_preempted_retained"):
+            # Tuple shape: (request, retain_steps_remaining)
+            self.slo_preempted_retained: list[
+                tuple["Request", int]
+            ] = []
+        try:
+            retain_steps = int(
+                os.environ.get("SLO_PRIORITY_PREEMPT_RETAIN_STEPS", "5")
+            )
+        except ValueError:
+            retain_steps = 5
+        self.slo_preempted_retained.append((request, retain_steps))
+
+        # Do NOT prepend to vLLM waiting queue. Engine drains the side
+        # queue when retain_steps_remaining reaches 0.
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER

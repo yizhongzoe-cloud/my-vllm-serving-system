@@ -328,6 +328,141 @@ From this discussion + earlier work:
 
 ---
 
+## 8. SLO priority preempt path (independent design)
+
+Capacity-driven preempt (V3) and SLO-priority-driven preempt (this
+path) are two separate mechanisms with different release strategies
+and different triggers. They must not share code, state, or env vars.
+
+**SLO priority preempt path uses**:
+- Trigger: SLO slack of waiting head vs running queue (no fault
+  recovery markers, no ckpt requirement on victim).
+- Victim picker: loosest-SLO running request.
+- Preempt action: retain GPU blocks (`_preempt_for_slo_retain`).
+- Resume: engine drains retained queue after N steps
+  (`_process_slo_retained_queue`).
+- Env vars: all `SLO_PRIORITY_PREEMPT_*` prefix, never `FT_*`.
+
+**Disjoint from fault path**: do not reuse `_pick_slo_preempt_victim`,
+`is_rerouted`, `slo_preempted_pending_restore`, or any `FT_SLO_*` env
+var. Fault path stays intact for fault-recovery experiments.
+
+**Open issues for production but out of scope for first paper data**:
+- HBM pressure during retain window: retained reqs hold blocks; new
+  admissions can saturate the KV pool. Need LRU eviction of oldest
+  retained req with fallback to release path.
+- Quantitative "tight SLO" definition: first version uses coarse SLO
+  budget difference; production may need a more principled metric.
+
+**Simplifications in current implementation (revisit before paper exp)**:
+
+1. **`retain_steps` fixed at 5**. Resume after exactly 5 scheduler
+   steps regardless of whether the urgent request that triggered the
+   preempt has finished. Better: track which urgent request triggered
+   the preempt, resume the victim only after that request's progress
+   passes a threshold (or completes).
+
+2. **"Tight SLO" derived from SLO budget slack** (`compute_slo_budgets
+   ["min_ms"]`). All requests in the current sweep config share one
+   SLO setting, so slack differences come from queue-wait time, not
+   from explicit priority labels. Paper's framing assumes mixed SLO
+   tiers (tight / normal / loose) — this requires per-request SLO
+   labels in the workload generator, not a uniform SLO across the
+   cell.
+
+3. **Polling trigger every scheduler step**. The picker runs every
+   step (gated by `MIN_INTERVAL_MS=2000`). An event-driven trigger
+   that fires only when an urgent request enters the waiting queue
+   would be cleaner and lower overhead.
+
+4. **FINISHED-status retained requests are silently dropped**. If a
+   retained request transitions to FINISHED_* between preempt and
+   resume (e.g. client disconnect, request_timeout), the drain skips
+   it. Fine for sanity but a real system should surface a metric.
+
+5. **Retain queue size unbounded**. Multiple urgent requests in
+   quick succession can fill the queue with retained victims; no cap.
+   May cause large bursts of resumed requests when the retain window
+   expires.
+
+These are simplifications that let the mechanism run end-to-end. None
+break correctness for the sanity test, but #1 and #2 affect the paper
+narrative directly and should be revisited when designing the
+per-trigger routing experiment (§9a above).
+
+---
+
+## 9. Remaining experiments before paper submission
+
+Four experiments are needed to bring the paper from "measurement-rigor
+study" to "complete contribution". Listed by priority for paper impact:
+
+### 9a. Per-trigger routing 4-cell comparison
+
+Demonstrates that capacity preempt and SLO preempt should run
+different release strategies. Without this experiment the per-trigger
+routing argument is just a design proposal.
+
+Setup:
+- Construct mixed workload with both capacity pressure and SLO
+  priority pressure (e.g. tight-SLO requests injected at intervals
+  into a steady high-load batch).
+- Run 4 baselines:
+  1. Capacity preempt × release blocks (V3 current)
+  2. Capacity preempt × retain blocks
+  3. SLO priority preempt × release blocks
+  4. SLO priority preempt × retain blocks
+- Metrics: SLO satisfaction rate per priority tier, end-to-end
+  goodput, retain-pool peak occupancy.
+
+Expected: each strategy wins in its own trigger scenario;
+single-strategy baselines lose in the off-scenario.
+
+### 9b. Multi-GPU PCIe contention
+
+Independent niche TokenFlow does not cover. Quantifies how reload
+performance degrades when TP collective communication shares PCIe
+with reload copies on machines without NVLink (L40S, A6000 PCIe,
+RTX series).
+
+Setup:
+- L40S × 2 or A6000 × 2 (no NVLink), TP=2.
+- Reload while TP communication is active vs while TP is idle.
+- Sweep model size (8B, 13B, 70B) where possible.
+
+Expected: reload time is meaningfully longer when TP traffic shares
+PCIe; gives a deployment-relevance argument for the design.
+
+### 9c. Production-shape workload
+
+Required for the motivation chapter to ground the "batch API"
+framing in real workload characteristics.
+
+Setup:
+- Mixed prompt length distribution (4K / 16K / 64K with realistic
+  proportions, e.g. modeled on Anthropic / OpenAI batch traffic).
+- Mixed SLO tiers (tight / normal / loose).
+- Time-varying arrival rate including bursts.
+- Multi-hour cell duration (not 6-minute).
+
+Expected: V3 maintains tight-tier SLO satisfaction under bursts that
+collapse vanilla vLLM's RECOMPUTE path.
+
+### 9d. 128K scaling extension
+
+Optional but extends the recovery-time-vs-context main figure. 128K
+cannot fit on a single A6000 for an 8B model, so this requires
+multi-GPU.
+
+Setup:
+- 2-GPU TP, 8B model, RULER 128K.
+- Same NoFT-Reprefill vs V3 paired comparison as 1K-64K.
+
+Expected: continues the speedup curve; reprefill cost approaches
+minutes while reload stays sub-second.
+
+---
+
 ## Cross-references
 
 - `experiments_v2/docs/ckpt_overhead_findings.md` — Phase 1+2 findings
