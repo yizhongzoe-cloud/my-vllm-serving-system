@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720">
+  <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+
+  <!-- Title -->
+  <text x="60" y="80" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#000000">Evaluation: isolating FT vs. scheduling contributions</text>
+  <line x1="60" y1="100" x2="1220" y2="100" stroke="#D1D5DB" stroke-width="1"/>
+
+  <!-- Q1: Baselines (top-left) -->
+  <rect x="60" y="120" width="565" height="240" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="80" y="153" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Baselines</text>
+  <text x="80" y="178" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">Four configurations on the same vLLM substrate.</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="80" y="213">A.  No-FT + FCFS — vanilla. In-flight requests lost on failure.</text>
+    <text x="80" y="241">B.  Reprefill + FCFS — reroute and re-run prefill.</text>
+    <text x="80" y="269">C.  Checkpoint + FCFS — KV restore, vanilla scheduling.</text>
+    <text x="80" y="305" font-weight="bold" fill="#DC2626">D.  Checkpoint + SLO-aware — ours.</text>
+  </g>
+  <text x="80" y="338" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">C vs D isolates the scheduler. D vs B isolates fault tolerance.</text>
+
+  <!-- Q2: Workloads & Faults (top-right) -->
+  <rect x="655" y="120" width="565" height="240" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="675" y="153" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Workloads &amp; faults</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="675" y="190">•  ShareGPT — short-context chat.</text>
+    <text x="675" y="218">•  LongBench — NarrativeQA, QMSum, MuSiQue.</text>
+    <text x="675" y="246">•  Azure LLM trace — production arrivals.</text>
+    <text x="675" y="274">•  Poisson arrivals, three random seeds.</text>
+    <text x="675" y="328">•  Inject one engine failure at <tspan font-weight="bold" fill="#DC2626">350 s</tspan> into a 700 s run.</text>
+  </g>
+
+  <!-- Q3: Metrics (bottom-left) -->
+  <rect x="60" y="380" width="565" height="240" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="80" y="413" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Metrics</text>
+
+  <text x="80" y="453" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">Primary: <tspan font-weight="bold" fill="#DC2626">goodput</tspan> — SLO-met output tokens per second.</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="80" y="497">Secondary:</text>
+    <text x="80" y="525">•  Recovery success rate.</text>
+    <text x="80" y="553">•  TTFT and TPOT distributions.</text>
+    <text x="80" y="581">•  System-wide GPU utilization.</text>
+  </g>
+
+  <!-- Q4: Hypothesis (bottom-right, accent border) -->
+  <rect x="655" y="380" width="565" height="240" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1"/>
+  <rect x="655" y="380" width="6" height="240" fill="#DC2626"/>
+  <text x="685" y="413" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Hypothesis</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="685" y="450" font-weight="bold" fill="#000000">Tight TTFT (under 2 s for 15K-token prompts):</text>
+    <text x="685" y="478">C beats B mechanically, but the win is hidden by</text>
+    <text x="685" y="504">queueing on the surviving engine.</text>
+    <text x="685" y="540">D keeps the win, by letting recovery requests</text>
+    <text x="685" y="566">preempt non-urgent work.</text>
+    <text x="685" y="602" font-weight="bold" fill="#000000">Loose SLO: all FT configurations converge.</text>
+  </g>
+
+  <!-- Bottom strip: Resources -->
+  <line x1="60" y1="650" x2="1220" y2="650" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="60" y="678" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">Resources: 2+ GPUs (data-parallel) · Llama-3.1-8B-Instruct · ~50 GPU-hours main sweep + 20 GPU-hours sensitivity.</text>
+
+  <!-- Footer -->
+  <text x="1220" y="700" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280" text-anchor="end">p.3 / 3</text>
+</svg>

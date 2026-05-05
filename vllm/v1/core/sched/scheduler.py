@@ -1120,6 +1120,20 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+
+        # Phase 2: capacity-driven preempt -> reload routing
+        # When FT_CAPACITY_PREEMPT_RELOAD=1 and a checkpoint exists for this
+        # request, route the preempt through _preempt_for_slo, which marks
+        # is_rerouted=True and queues a pending-restore entry. This causes
+        # the resume path to load KV from the host checkpoint instead of
+        # full reprefilling. Fall through to vanilla RECOMPUTE if either
+        # the env var is unset or no checkpoint exists.
+        if (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD") == "1"
+            and getattr(request, "num_checkpointed_tokens", 0) > 0
+        ):
+            return self._preempt_for_slo(request, timestamp)
+
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
@@ -1248,6 +1262,65 @@ class Scheduler(SchedulerInterface):
         ckpt_tokens = getattr(request, "num_checkpointed_tokens", 0)
         if ckpt_tokens <= 0:
             return self._preempt_request(request, timestamp)
+
+        # ── Phase 2 C-mode (queue-based, V3): release blocks + side queue ──
+        #
+        # IMPORTANT — preempt type vs block release rule:
+        #
+        # This branch handles **capacity-driven preempt** (preempt
+        # triggered because KV pool is full). For this type, blocks
+        # MUST be released; otherwise the free pool is unchanged, other
+        # requests still can't admit, and we've defeated the entire
+        # purpose of preempting (freeing memory).
+        #
+        # A future **SLO-driven preempt** path (urgent request bumps
+        # an existing one, not memory pressure) should **retain
+        # blocks** instead:
+        #   - The goal there is to free a forward batch slot, not memory
+        #   - Retaining blocks skips re-alloc + re-reload overhead
+        #   - When the urgent request finishes, the preempted req can
+        #     resume directly with KV still in its original blocks
+        # See experiments_v2/docs/paper_design_notes.md
+        # "Per-trigger preempt routing" section for full analysis.
+        #
+        # V3 flow:
+        #   1. Release blocks (kv_cache_manager.free) so other reqs use them
+        #   2. Add request to side queue (slo_preempted_for_overlap_reload)
+        #   3. Do NOT prepend to vLLM waiting queue
+        # Engine drains the side queue each step:
+        #   - Wait until KV pool has enough free blocks → alloc fresh
+        #     blocks for the request
+        #   - Start async reload writing to the freshly-alloc'd blocks
+        #   - Once reload completes → prepend to vLLM waiting queue and
+        #     let vLLM's standard admit path take over
+        # Throughout reload the request is in our queue, never in
+        # vLLM's scheduling stream, so its forward never mixes with
+        # other reqs' batch — true overlap.
+        use_overlap = (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
+        )
+        if use_overlap:
+            # Capacity-type release: free blocks back to free pool.
+            self.kv_cache_manager.free(request)
+            self.encoder_cache_manager.free(request)
+            request.status = RequestStatus.PREEMPTED
+            request.is_rerouted = True
+            request.num_computed_tokens = 0  # engine sets ckpt_tokens on resume
+            request.spec_token_ids.clear()
+            request.num_preemptions += 1
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+            if not hasattr(self, "slo_preempted_for_overlap_reload"):
+                # Tuple shape: (request, ckpt_tokens). No block_ids saved
+                # — we'll alloc fresh blocks at reload time.
+                self.slo_preempted_for_overlap_reload: list[
+                    tuple["Request", int]
+                ] = []
+            self.slo_preempted_for_overlap_reload.append(
+                (request, ckpt_tokens)
+            )
+            return
 
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)

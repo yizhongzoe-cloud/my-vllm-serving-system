@@ -377,6 +377,47 @@ class KVCheckpointPool:
                 actual_bytes / (1024 * 1024),
             )
 
+        # ── Per-fire ckpt stats logging (FT_CKPT_STATS_LOG=1) ──────────
+        # Records each save_checkpoint invocation to a CSV. Used in
+        # sanity verification to confirm: (1) ckpt is actually firing,
+        # (2) fire frequency matches fixed_checkpoint_blocks=1 cadence,
+        # (3) per-fire bytes are incremental (≈1 block) when
+        # FT_DELTA_CHECKPOINT=1, not full (entire KV cumulative).
+        if os.environ.get("FT_CKPT_STATS_LOG") == "1":
+            if not hasattr(self, "_ckpt_stats_csv_file"):
+                from collections import defaultdict as _defaultdict
+                _out_dir = os.environ.get(
+                    "FT_CKPT_STATS_OUTPUT_DIR", "/tmp"
+                )
+                os.makedirs(_out_dir, exist_ok=True)
+                _csv_path = os.path.join(
+                    _out_dir, f"ckpt_stats_pid{os.getpid()}.csv"
+                )
+                self._ckpt_stats_csv_file = open(
+                    _csv_path, "w", buffering=1
+                )
+                self._ckpt_stats_csv_file.write(
+                    "timestamp,request_id,fire_count,mode,"
+                    "num_blocks_written,bytes_written,"
+                    "num_tokens_total,num_layers\n"
+                )
+                self._ckpt_stats_fire_count = _defaultdict(int)
+            self._ckpt_stats_fire_count[request_id] += 1
+            _mode = (
+                "delta" if (use_delta and existing_entry is not None)
+                else "full"
+            )
+            _n_blocks = len(delta_block_ids)
+            _bytes_written = (
+                per_block_bytes * _n_blocks * len(gpu_kv_caches)
+            )
+            self._ckpt_stats_csv_file.write(
+                f"{time.time():.6f},{request_id},"
+                f"{self._ckpt_stats_fire_count[request_id]},"
+                f"{_mode},{_n_blocks},{_bytes_written},"
+                f"{num_tokens},{len(gpu_kv_caches)}\n"
+            )
+
         return entry
 
     def restore_checkpoint(
@@ -384,6 +425,7 @@ class KVCheckpointPool:
         request_id: str,
         gpu_kv_caches: list[torch.Tensor],
         target_block_ids: list[int],
+        sync: bool = True,
     ) -> int:
         """Restore a checkpointed KV cache from host memory to GPU.
 
@@ -398,6 +440,13 @@ class KVCheckpointPool:
                 backend-aware restore path.
             target_block_ids: Block IDs on the target GPU to write the
                 restored data into (may differ from original block_ids).
+            sync: If True (default), block until copy completes before
+                returning (legacy behavior).
+                If False, enqueue copy on copy stream and return
+                immediately. Caller must use query_async_restore() to
+                check completion before reading restored KV. Used by
+                Phase 2 C-mode to overlap reload with concurrent forward
+                of other requests.
 
         Returns:
             Number of tokens restored, or 0 if no checkpoint found.
@@ -448,10 +497,46 @@ class KVCheckpointPool:
             device=device,
         )
 
+        # ── CUDA-event-timed reload profiling (FT_CUDA_EVENT_PROFILE=1) ──
+        # Times the host->GPU restore copy on the copy stream. CSV row is
+        # written when the copy completes (lazily for sync=True or via
+        # query_async_restore for sync=False).
+        _profile = (
+            os.environ.get("FT_CUDA_EVENT_PROFILE") == "1"
+            and torch.cuda.is_available()
+        )
+        if _profile:
+            self._init_reload_csv_if_needed()
+
+        # Compute bytes_loaded upfront (we need it whether or not we sync).
+        sample = gpu_kv_caches[0]
+        per_block_bytes = (
+            2  # K and V
+            * sample.shape[2]  # block_size
+            * sample.shape[3]  # num_kv_heads
+            * sample.shape[4]  # head_size
+            * sample.element_size()
+        )
+        bytes_loaded = (
+            per_block_bytes * num_checkpoint_blocks
+            * len(gpu_kv_caches)
+        )
+
+        _profile_start = None
+        _profile_end = None
+        _profile_ts = time.time()
+        if _profile:
+            _profile_start = torch.cuda.Event(enable_timing=True)
+            _profile_end = torch.cuda.Event(enable_timing=True)
+
         if torch.cuda.is_available():
             stream = self._get_copy_stream()
             # Ensure any in-flight async save completes before we read.
             stream.synchronize()
+            # Record profile events ON the copy stream so elapsed_time
+            # reflects actual host->GPU transfer cost.
+            if _profile and _profile_start is not None:
+                _profile_start.record(stream)
             with torch.cuda.stream(stream):
                 for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
                     host_tensor = entry.kv_tensors.get(layer_idx)
@@ -461,7 +546,45 @@ class KVCheckpointPool:
                         device, non_blocking=True
                     )
                     gpu_tensor[:, target_indices, :, :, :] = src
-            stream.synchronize()
+            if _profile and _profile_end is not None:
+                _profile_end.record(stream)
+            # Always need a "done" marker for query_async_restore even
+            # if profile is off (but profile is on by default in our
+            # FT runs, so _profile_end is the same).
+            done_event = _profile_end
+            if not sync and done_event is None:
+                done_event = torch.cuda.Event()
+                done_event.record(stream)
+
+            if sync:
+                # Legacy synchronous path: host blocks until copy done.
+                stream.synchronize()
+                if _profile:
+                    self._write_reload_csv_row(
+                        request_id=request_id,
+                        start_event=_profile_start,
+                        end_event=_profile_end,
+                        enqueue_ts=_profile_ts,
+                        num_blocks=num_checkpoint_blocks,
+                        num_tokens=entry.num_tokens,
+                        bytes_loaded=bytes_loaded,
+                        steps_to_complete=1,
+                        sync_mode="sync",
+                    )
+            else:
+                # Phase 2 C-mode async path: do NOT block host. Caller
+                # must call query_async_restore() on subsequent steps to
+                # check completion. CSV row is deferred until completion.
+                if not hasattr(self, "_async_restore_state"):
+                    self._async_restore_state: dict[str, dict] = {}
+                self._async_restore_state[request_id] = {
+                    "start_event": _profile_start,
+                    "done_event": done_event,
+                    "enqueue_time": _profile_ts,
+                    "tokens": entry.num_tokens,
+                    "num_blocks": num_checkpoint_blocks,
+                    "bytes_loaded": bytes_loaded,
+                }
         else:
             for layer_idx, gpu_tensor in enumerate(gpu_kv_caches):
                 host_tensor = entry.kv_tensors.get(layer_idx)
@@ -478,6 +601,143 @@ class KVCheckpointPool:
             entry.num_tokens, num_checkpoint_blocks,
         )
         return entry.num_tokens
+
+    # ── Reload CSV / async restore helpers (Phase 2) ──────────────────
+
+    def _init_reload_csv_if_needed(self) -> None:
+        """Lazy-init reload_times CSV. Idempotent."""
+        if hasattr(self, "_reload_csv_file"):
+            return
+        out_dir = os.environ.get("FT_CUDA_EVENT_OUTPUT_DIR", "/tmp")
+        os.makedirs(out_dir, exist_ok=True)
+        csv_path = os.path.join(
+            out_dir, f"reload_times_pid{os.getpid()}.csv"
+        )
+        self._reload_csv_file = open(csv_path, "w", buffering=1)
+        self._reload_csv_file.write(
+            "timestamp,request_id,reload_ms,num_blocks,num_tokens,"
+            "bytes_loaded,steps_to_complete,wait_ms_total,sync_mode\n"
+        )
+        # Register atexit flush for any pending async restores.
+        import atexit as _atexit
+        _atexit.register(self._flush_pending_async_restores)
+
+    def _write_reload_csv_row(
+        self,
+        request_id: str,
+        start_event: "torch.cuda.Event | None",
+        end_event: "torch.cuda.Event | None",
+        enqueue_ts: float,
+        num_blocks: int,
+        num_tokens: int,
+        bytes_loaded: int,
+        steps_to_complete: int,
+        sync_mode: str,
+    ) -> None:
+        """Write one reload row to CSV. Caller must ensure end_event
+        is ready (queryable). Failures are logged and skipped."""
+        if not hasattr(self, "_reload_csv_file"):
+            return
+        try:
+            if start_event is not None and end_event is not None:
+                reload_ms = start_event.elapsed_time(end_event)
+            else:
+                reload_ms = 0.0
+        except Exception:
+            reload_ms = 0.0
+        wait_ms_total = (time.time() - enqueue_ts) * 1000.0
+        try:
+            self._reload_csv_file.write(
+                f"{enqueue_ts:.6f},{request_id},{reload_ms:.4f},"
+                f"{num_blocks},{num_tokens},{bytes_loaded},"
+                f"{steps_to_complete},{wait_ms_total:.4f},{sync_mode}\n"
+            )
+        except Exception:
+            pass
+
+    def query_async_restore(
+        self,
+        request_id: str,
+        steps_waited: int = 1,
+    ) -> bool:
+        """Check if an async restore for request_id is complete.
+
+        On completion, writes the CSV row (with steps_waited and
+        wait_ms_total) and clears the per-request state.
+
+        Args:
+            request_id: The request whose async restore to check.
+            steps_waited: How many engine steps have elapsed since
+                enqueue (engine tracks this and passes in).
+
+        Returns:
+            True if complete (or never registered, defensive), False if
+            the restore is still in flight.
+        """
+        if not hasattr(self, "_async_restore_state"):
+            return True
+        state = self._async_restore_state.get(request_id)
+        if state is None:
+            return True
+        end_event = state["done_event"]
+        if end_event is None:
+            # No event recorded — treat as complete (defensive).
+            del self._async_restore_state[request_id]
+            return True
+        try:
+            ready = bool(end_event.query())
+        except Exception:
+            # If query fails, conservatively report not ready; atexit
+            # flush will write the row.
+            return False
+        if not ready:
+            return False
+        # Write completion row.
+        self._write_reload_csv_row(
+            request_id=request_id,
+            start_event=state.get("start_event"),
+            end_event=end_event,
+            enqueue_ts=state["enqueue_time"],
+            num_blocks=state["num_blocks"],
+            num_tokens=state["tokens"],
+            bytes_loaded=state.get("bytes_loaded", 0),
+            steps_to_complete=steps_waited,
+            sync_mode="async",
+        )
+        del self._async_restore_state[request_id]
+        return True
+
+    def _flush_pending_async_restores(self) -> None:
+        """Called via atexit. Flush any unfinished async restore CSV
+        rows so we don't lose data if the process dies mid-flight."""
+        if not hasattr(self, "_async_restore_state"):
+            return
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        for req_id, state in list(
+            self._async_restore_state.items()
+        ):
+            try:
+                self._write_reload_csv_row(
+                    request_id=req_id,
+                    start_event=state.get("start_event"),
+                    end_event=state.get("done_event"),
+                    enqueue_ts=state["enqueue_time"],
+                    num_blocks=state["num_blocks"],
+                    num_tokens=state["tokens"],
+                    bytes_loaded=state.get("bytes_loaded", 0),
+                    steps_to_complete=-1,  # marker: never completed
+                    sync_mode="async_atexit",
+                )
+            except Exception:
+                continue
+        self._async_restore_state.clear()
+        try:
+            self._reload_csv_file.close()
+        except Exception:
+            pass
 
     def delete_checkpoint(self, request_id: str) -> None:
         """Delete a checkpoint and free its memory."""

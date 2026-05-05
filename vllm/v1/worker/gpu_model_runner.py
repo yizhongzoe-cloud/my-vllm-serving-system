@@ -3072,13 +3072,104 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-        return self.model(
+        # ── CUDA-event-timed forward profiling (FT_CUDA_EVENT_PROFILE=1) ──
+        # Measures GPU kernel time of the model forward pass on the default
+        # stream. Excludes Python/host overhead. Used to isolate the
+        # compute-side cost of concurrent async KV checkpoint transfer.
+        _profile = (
+            os.environ.get("FT_CUDA_EVENT_PROFILE") == "1"
+            and torch.cuda.is_available()
+        )
+        if _profile and not hasattr(self, "_cuda_event_csv_file"):
+            from collections import deque as _deque
+            import atexit as _atexit
+            _out_dir = os.environ.get(
+                "FT_CUDA_EVENT_OUTPUT_DIR", "/tmp"
+            )
+            os.makedirs(_out_dir, exist_ok=True)
+            _csv_path = os.path.join(
+                _out_dir, f"forward_times_pid{os.getpid()}.csv"
+            )
+            self._cuda_event_csv_file = open(_csv_path, "w", buffering=1)
+            self._cuda_event_csv_file.write(
+                "step,timestamp,forward_ms,num_input_tokens\n"
+            )
+            self._cuda_event_buffer = _deque()
+            self._cuda_event_step = 0
+
+            def _flush_cuda_events():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                while self._cuda_event_buffer:
+                    _step, _ts, _start, _end, _nt = (
+                        self._cuda_event_buffer.popleft()
+                    )
+                    try:
+                        _ms = _start.elapsed_time(_end)
+                        self._cuda_event_csv_file.write(
+                            f"{_step},{_ts:.6f},{_ms:.4f},{_nt}\n"
+                        )
+                    except Exception:
+                        continue
+                try:
+                    self._cuda_event_csv_file.close()
+                except Exception:
+                    pass
+
+            _atexit.register(_flush_cuda_events)
+
+        if _profile:
+            _profile_start = torch.cuda.Event(enable_timing=True)
+            _profile_end = torch.cuda.Event(enable_timing=True)
+            _profile_ts = time.time()
+            _profile_start.record()
+
+        _out = self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
+
+        if _profile:
+            _profile_end.record()
+            _nt = (
+                int(input_ids.shape[0]) if input_ids is not None
+                else (
+                    int(positions.shape[0])
+                    if positions is not None else 0
+                )
+            )
+            self._cuda_event_buffer.append(
+                (
+                    self._cuda_event_step,
+                    _profile_ts,
+                    _profile_start,
+                    _profile_end,
+                    _nt,
+                )
+            )
+            self._cuda_event_step += 1
+            # Flush completed events without blocking GPU.
+            while self._cuda_event_buffer:
+                _step, _ts, _start, _end, _ntb = (
+                    self._cuda_event_buffer[0]
+                )
+                if not _end.query():
+                    break
+                try:
+                    _ms = _start.elapsed_time(_end)
+                    self._cuda_event_csv_file.write(
+                        f"{_step},{_ts:.6f},{_ms:.4f},{_ntb}\n"
+                    )
+                except Exception:
+                    pass
+                self._cuda_event_buffer.popleft()
+
+        return _out
 
     @staticmethod
     def _is_uniform_decode(
@@ -7581,14 +7672,16 @@ class GPUModelRunner(
             return 0
 
         # Try local pool first (same-engine restore).
-        # Note: local pool path is always synchronous (small same-engine
-        # restores; not worth pipelining). Only the shared /dev/shm
-        # cross-engine path honors `sync=False`.
+        # Phase 2 C-mode: local pool now honors sync=False (was previously
+        # always-sync). When sync=False, the pool enqueues the copy on the
+        # copy stream and returns immediately; engine must use
+        # query_restore_done() to check completion before reading the KV.
         if hasattr(self, "_ft_checkpoint_pool"):
             tokens = self._ft_checkpoint_pool.restore_checkpoint(
                 request_id=request_id,
                 gpu_kv_caches=self.kv_caches,
                 target_block_ids=target_block_ids,
+                sync=sync,
             )
             if tokens > 0:
                 return tokens
@@ -7913,6 +8006,46 @@ class GPUModelRunner(
         if stream is not None and getattr(self, "_ft_has_pending_restore", False):
             stream.synchronize()
             self._ft_has_pending_restore = False
+
+    def query_restore_done(
+        self,
+        request_id: str,
+        steps_waited: int = 1,
+    ) -> bool:
+        """Phase 2 C-mode: check if a previously-enqueued async restore
+        for `request_id` has completed.
+
+        Engine calls this once per pending restore per step. When True is
+        returned, the local pool has already written the CSV row for this
+        restore (with steps_to_complete = steps_waited).
+
+        Args:
+            request_id: The request whose async restore to query.
+            steps_waited: How many engine steps have elapsed since the
+                async restore was enqueued. Used by the pool to record
+                the completion latency in steps.
+
+        Returns:
+            True if the async restore is complete (or was never tracked,
+            defensive); False if still in flight.
+        """
+        # Local pool path (same-engine restore).
+        if hasattr(self, "_ft_checkpoint_pool"):
+            try:
+                return bool(
+                    self._ft_checkpoint_pool.query_async_restore(
+                        request_id, steps_waited=steps_waited,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "query_async_restore failed for %s; "
+                    "treating as complete (defensive)",
+                    request_id,
+                )
+                return True
+        # No local pool — defensively return True.
+        return True
 
     def _restore_batched_v2(
         self,

@@ -365,6 +365,57 @@ This positions our work as discovering a NEW use for an existing primitive, whic
 
 **Full paper narrative (Sections 1-5):** see `~/.claude/projects/.../memory/project_paper_framing_rag.md`. Includes section-by-section structure, ablation table for evaluation, abstract-ready takeaway paragraph.
 
+## M3 implementation done (2026-04-30 night)
+
+SLO-aware preemption code is committed to the same branch (`zoe/slo-scheduling`) as uncommitted changes on top of `083bb3269 long context profile,ruler dataset of 64k`.
+
+### Files modified (post-commit, uncommitted)
+
+| File | Change | Purpose |
+|---|---|---|
+| `vllm/v1/core/sched/utils.py` | Added `compute_slo_budgets(req, now) -> dict` | Per-req SLO budget math (TTFT/TPOT/gap), used by M1 telemetry and M3 trigger |
+| `vllm/v1/core/sched/scheduler.py` | M1 telemetry block (FT_SLO_BUDGET_LOG=1) + M3 trigger (FT_SLO_PREEMPT=1, calls `_pick_slo_preempt_victim` + `_preempt_for_slo`) | Per-step budget log + SLO-aware preempt decision and execution |
+| `vllm/v1/engine/core.py` | `_drain_slo_preempted_restores` migrates scheduler-side pending into `_ft_pending_restores` | Wires same-engine SLO preempt resume through existing FT recovery restore path |
+
+### M3 design summary
+
+`_pick_slo_preempt_victim(now)` returns the running req to preempt, or None. Four guards:
+1. Global rate limit (FT_SLO_PREEMPT_MIN_INTERVAL_MS, default 2000ms)
+2. Waiting head must be is_rerouted=True (failure_gap_slo recovery — only legitimate priority signal at saturation)
+3. Per-req cooldown (FT_SLO_PREEMPT_PER_REQ_COOLDOWN_MS, default 30000ms) — same req can't be preempted twice within cooldown
+4. Budget gap > FT_SLO_PREEMPT_MIN_GAP_MS (3000ms) AND relative > FT_SLO_PREEMPT_HYSTERESIS (0.30)
+
+`_preempt_for_slo(request, timestamp)`:
+- Frees GPU KV (Option B per memory; Option C "warm preempt" deferred to follow-up)
+- Sets is_rerouted=True, num_computed_tokens=0
+- Queues (req_id, num_checkpointed_tokens) onto `slo_preempted_pending_restore`
+- Engine drains queue at step() entry → fed into existing _ft_pending_restores → restore_kv_blocks runs before forward pass
+
+### Verification on A6000 (mechanically only — A6000 too saturated for performance demo)
+
+| Test | Preempts | Restores | Asserts | Completion |
+|---|---|---|---|---|
+| Smoke 1 (no fault, no FT_SLO_PREEMPT) | 0 | 0 | 0 | 100% — baseline |
+| Smoke 2 (no fault, FT_SLO_PREEMPT=1) | **0** | 0 | 0 | **100%** ← short-circuit on no-recovery works |
+| Fault test 1 (no per-req cooldown) | 78 (cycle bug) | 80 | 0 | 32% |
+| Fault test 2 (per-req cooldown 30s) | **13 (different victims)** | 12 | 0 | 38% |
+
+Mechanical correctness confirmed. Performance demo requires L40S — see ablation plan in memory.
+
+### Next: L40S phase 1-5 per MACHINE_SETUP_RUNBOOK.md
+
+5-condition ablation for paper:
+
+| Cell | Mechanism | Scheduler | Notes |
+|---|---|---|---|
+| 1 | No-FT | FCFS | drops fault-affected reqs |
+| 2 | NoFT-Reprefill | FCFS | full reprefill on recovery |
+| 3 | Our-System | FCFS (FT_SLO_PREEMPT unset) | mechanism present, queue-blocked |
+| 4 | Our-System | M1+M2 only (FT_SLO_BUDGET_LOG=1, FT_SLO_PREEMPT=0) | sort prioritizes recovery in waiting, no proactive preempt |
+| 5 | Our-System | M1+M2+M3 (FT_SLO_PREEMPT=1) | full proposed mechanism |
+
+Same `zoe/slo-scheduling` branch. Toggle via env vars.
+
 ## Files To Know
 
 ### Configs

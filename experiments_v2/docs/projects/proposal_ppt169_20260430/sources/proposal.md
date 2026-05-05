@@ -1,0 +1,49 @@
+# Motivation
+
+Long-context retrieval-augmented generation (RAG) is increasingly common in production LLM serving, with prompts ranging from 32K to 128K tokens. In this regime, recovery is asymmetric: a mid-run engine failure forfeits 20–90 seconds of prefill compute on a single request, and naive re-prefill on a surviving replica cannot meet reasonable TTFT SLOs. Fault tolerance is a real production need.
+
+Existing work treats fault tolerance and scheduling separately. Fault-tolerant LLM serving systems focus on recovery mechanisms (e.g., KV cache transfer in Mooncake \[6\]) but assume static workloads. SLO-aware scheduling systems (QLM \[7\], Scorpio \[8\], JITServe \[9\], SLOs-Serve \[10\]) optimize admission and dispatch but assume no faults, and crucially cannot preempt long-context requests because reclaiming a mid-prefill request would lose tens of seconds of work. This separation hides an opportunity: the host-memory state maintained for fault recovery is exactly what an SLO-aware scheduler needs to preempt cheaply.
+
+# Research Question
+
+Can the host-memory KV state maintained for fault recovery serve as a *dual-purpose primitive*—enabling both fast restore after failure and cheap preemption of in-flight long-context requests during normal operation? We study whether combining KV-checkpoint-based fault tolerance with preemption-aware SLO scheduling yields qualitatively different behavior from either alone, particularly under high post-fault utilization where a fast restore mechanism alone is insufficient because recovery requests still wait in the FCFS tail.
+
+# System Design
+
+We build on vLLM (v0.16) and add three components:
+
+  - **KV cache checkpointing.** Periodic asynchronous copy of per-request KV blocks from GPU to host pinned memory, then publish to a shared memory file system (`/dev/shm`) using atomic write. Frequency is governed by an online cost model.
+
+  - **Cross-engine restore.** On engine failure, displaced requests are rerouted to a surviving engine, which restores KV blocks from the shared file system into freshly allocated GPU blocks and resumes decoding without re-prefilling the prompt.
+
+  - **Preemption-aware SLO scheduler.** At each scheduling step, the scheduler computes the remaining SLO budget (TTFT, TPOT) for every pending request and sorts by tightest budget first. A currently-executing request is preempted (its checkpointed KV state retained on host) when its budget significantly exceeds the top pending request, with a hysteresis margin to avoid oscillation. After a fault, all in-flight and recovered requests are immediately rescheduled.
+
+The key design observation is that vanilla SLO-aware schedulers cannot preempt long-context requests cheaply because mid-prefill state is too expensive to abandon, while vanilla fault-tolerant systems already maintain that state but do not expose it to the scheduler. By making the checkpoint visible to both subsystems, preemption becomes a side-effect of work already paid for.
+
+# Evaluation Plan
+
+**Baselines.** We compare four configurations on the same vLLM substrate: *No-FT + FCFS* (vanilla; in-flight requests lost on failure), *Reprefill + FCFS* (reroute and re-prefill on the surviving engine), *Checkpoint + FCFS* (KV checkpoint and restore with vanilla scheduling), and *Checkpoint + SLO-aware (ours)* (checkpoint plus preemption-aware scheduling). The third vs. fourth comparison isolates the scheduling contribution; the fourth vs. second isolates the fault-tolerance contribution.
+
+**Workloads.** ShareGPT for short-context chat traffic, LongBench \[12\] (NarrativeQA, QMSum, MuSiQue) for long-context document understanding, and the Azure LLM inference trace \[5\] for production-realistic arrival patterns. Each workload uses a Poisson arrival process with three random seeds for noise reduction.
+
+**Faults.** A single mid-run engine failure is injected at 350 s into a 700 s cell, drawn from real production fault patterns. We also include a no-fault control to measure normal-path overhead.
+
+**Metrics.** The primary metric is goodput, defined as SLO-met output tokens per second across the system. Secondary metrics include recovery success rate, TTFT and TPOT distributions, and system-wide GPU utilization. SLO settings are varied along TTFT and failover-gap axes.
+
+**Hypothesis.** Under tight TTFT (below 2 seconds for 15K-token prompts), Checkpoint+FCFS will improve over Reprefill+FCFS but its mechanical advantage is partially hidden by queueing at the surviving engine. Checkpoint+SLO-aware preserves the advantage by allowing recovery requests to preempt non-urgent work. Under loose SLOs, all three FT configurations converge.
+
+# Related Work
+
+LLM serving work on scheduling focuses on steady-state SLO compliance: DistServe \[2\], Sarathi-Serve \[3\], and Llumnix \[4\] introduce phase-aware dispatch, chunked prefill, and live migration respectively, but assume no faults. SLO-aware systems (QLM \[7\], Scorpio \[8\], JITServe \[9\], SLOs-Serve \[10\]) manage admission under load but do not preempt long-context requests because mid-prefill state cannot be cheaply reclaimed. Fault tolerance for LLM serving is less explored: Mooncake \[6\] transfers KV cache across instances for prefix-aware routing, sharing mechanism with our restore path but targeting cache reuse; BanaServe \[11\] rebalances placement under load imbalance, not faults; Splitwise \[5\] releases the trace we use. Our work observes that the KV state maintained for fault tolerance is precisely what SLO-aware scheduling needs, and studies what becomes possible when both subsystems share this primitive.
+
+# Resources
+
+**Hardware.** 2+ GPUs configured for data-parallel (dp) deployment, sufficient to host multiple vLLM engine replicas and inject controlled engine failures across them.
+
+**Software.** The serving stack is built on vLLM v0.16 \[1\] with the standard PyTorch and CUDA toolchain. Profiles for decode capacity and checkpoint cost are calibrated locally on the target hardware.
+
+**Models and datasets.** We use the open-weight Llama-3.1-8B-Instruct model. Datasets include ShareGPT-Vicuna (5000 conversations), LongBench \[12\], and the Azure LLM inference trace from the Splitwise release \[5\].
+
+**Compute budget.** Roughly 50 GPU hours for the main evaluation sweep, plus 20 GPU hours for sensitivity studies.
+
+<span>99</span> W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica. Efficient Memory Management for Large Language Model Serving with PagedAttention. *SOSP*, 2023. Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. *OSDI*, 2024. A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, A. Tumanov, and R. Ramjee. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. *OSDI*, 2024. B. Sun, Z. Huang, H. Zhao, W. Xiao, X. Zhang, Y. Li, and W. Lin. Llumnix: Dynamic Scheduling for Large Language Model Serving. *OSDI*, 2024. P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. *ISCA*, 2024. R. Qin, Z. Li, W. He, J. Cui, H. Tang, F. Ren, T. Ma, S. Cai, Y. Zhang, M. Zhang, Y. Wu, W. Zheng, and X. Xu. Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving. *FAST*, 2025. A. Patke, D. Reddy, S. Jha, H. Qiu, C. Pinto, C. Narayanaswami, Z. Kalbarczyk, and R. Iyer. Queue Management for SLO-Oriented Large Language Model Serving. *SoCC*, 2024. Y. Tang, T. Lan, X. Huang, H. Lu, and W. Chen. Scorpio: Serving the Right Requests at the Right Time for Heterogeneous SLOs in LLM Inference. arXiv:2505.23022, 2025. W. Zhang, Z. Wu, Y. Mu, R. Ning, B. Liu, N. Sarda, M. Lee, and F. Lai. JITServe: SLO-aware LLM Serving with Imprecise Request Information. arXiv:2504.20068, 2025. S. Chen, Z. Jia, S. Khan, A. Krishnamurthy, and P. B. Gibbons. SLOs-Serve: Optimized Serving of Multi-SLO LLMs. arXiv:2504.08784, 2025. Y. He, M. Xu, J. Wu, J. Hu, C. Ma, M. Shen, L. Chen, C. Xu, L. Qu, and K. Ye. BanaServe: Unified KV Cache and Dynamic Module Migration for Balancing Disaggregated LLM Serving in AI Infrastructure. arXiv:2510.13223, 2025. Y. Bai, X. Lv, J. Zhang, H. Lyu, J. Tang, Z. Huang, Z. Du, X. Liu, A. Zeng, L. Hou, Y. Dong, J. Tang, and J. Li. LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding. *ACL*, 2024.

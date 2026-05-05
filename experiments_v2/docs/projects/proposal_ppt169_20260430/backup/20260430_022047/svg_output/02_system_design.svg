@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720">
+  <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+
+  <!-- Title -->
+  <text x="60" y="80" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#000000">System Design: KV checkpoint as dual-purpose primitive</text>
+  <line x1="60" y1="100" x2="1220" y2="100" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="60" y="128" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#6B7280">Built on vLLM v0.16 — three components</text>
+
+  <!-- Column 1: KV Cache Checkpointing -->
+  <rect x="60" y="155" width="360" height="335" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="80" y="195" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#DC2626">①</text>
+  <text x="125" y="195" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="20" font-weight="bold" fill="#000000">KV Cache Checkpointing</text>
+
+  <text x="80" y="240" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="80" dy="0">•  Periodic asynchronous copy of</tspan>
+    <tspan x="80" dy="26">   per-request KV blocks from GPU</tspan>
+    <tspan x="80" dy="26">   to host pinned memory</tspan>
+  </text>
+  <text x="80" y="340" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="80" dy="0">•  Publish to shared memory FS</tspan>
+    <tspan x="80" dy="26">   (</tspan><tspan font-family='Consolas, "Courier New", monospace' font-size="16" fill="#000000">/dev/shm</tspan><tspan>) via atomic write</tspan>
+  </text>
+  <text x="80" y="420" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="80" dy="0">•  Frequency governed by an</tspan>
+    <tspan x="80" dy="26">   online cost model</tspan>
+  </text>
+
+  <!-- Column 2: Cross-engine Restore -->
+  <rect x="450" y="155" width="360" height="335" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="470" y="195" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#DC2626">②</text>
+  <text x="515" y="195" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="20" font-weight="bold" fill="#000000">Cross-engine Restore</text>
+
+  <text x="470" y="240" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="470" dy="0">•  On engine failure, displaced</tspan>
+    <tspan x="470" dy="26">   requests rerouted to a</tspan>
+    <tspan x="470" dy="26">   surviving engine</tspan>
+  </text>
+  <text x="470" y="340" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="470" dy="0">•  Restore KV blocks from shared</tspan>
+    <tspan x="470" dy="26">   FS into freshly allocated</tspan>
+    <tspan x="470" dy="26">   GPU blocks</tspan>
+  </text>
+  <text x="470" y="440" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="470" dy="0">•  Resume decoding </tspan><tspan font-weight="bold" fill="#DC2626">without</tspan>
+    <tspan x="470" dy="26">   re-prefilling the prompt</tspan>
+  </text>
+
+  <!-- Column 3: Preemption-aware SLO Scheduler -->
+  <rect x="840" y="155" width="360" height="335" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="860" y="195" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#DC2626">③</text>
+  <text x="905" y="195" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="20" font-weight="bold" fill="#000000">Preemption-aware Scheduler</text>
+
+  <text x="860" y="240" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="860" dy="0">•  Per step: compute remaining</tspan>
+    <tspan x="860" dy="26">   SLO budget (TTFT, TPOT);</tspan>
+    <tspan x="860" dy="26">   sort tightest-first</tspan>
+  </text>
+  <text x="860" y="340" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="860" dy="0">•  Preempt running request when</tspan>
+    <tspan x="860" dy="26">   its budget exceeds top pending</tspan>
+    <tspan x="860" dy="26">   by hysteresis margin</tspan>
+  </text>
+  <text x="860" y="440" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="860" dy="0">•  Post-fault: immediately</tspan>
+    <tspan x="860" dy="26">   reschedule all in-flight +</tspan>
+    <tspan x="860" dy="26">   recovered requests</tspan>
+  </text>
+
+  <!-- Key insight callout -->
+  <rect x="60" y="520" width="1160" height="140" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1"/>
+  <rect x="60" y="520" width="6" height="140" fill="#DC2626"/>
+
+  <text x="90" y="558" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Key insight</text>
+
+  <text x="90" y="595" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="90" dy="0">Vanilla SLO schedulers </tspan><tspan font-weight="bold" fill="#000000">cannot</tspan><tspan> preempt long-context requests cheaply — mid-prefill state is too costly to abandon.</tspan>
+    <tspan x="90" dy="28">Vanilla FT systems </tspan><tspan font-weight="bold" fill="#000000">already</tspan><tspan> maintain that state. Sharing the checkpoint between subsystems makes preemption a</tspan>
+    <tspan x="90" dy="28">side-effect of work already paid for.</tspan>
+  </text>
+
+  <!-- Footer -->
+  <text x="1220" y="700" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280" text-anchor="end">p.2 / 3</text>
+</svg>

@@ -672,7 +672,32 @@ class EngineCore:
 
         Requests whose blocks are not yet allocated (still in waiting
         queue) are kept for the next step.
+
+        Phase 2 C-mode (FT_CAPACITY_PREEMPT_RELOAD_OVERLAP=1):
+          - Newly-enqueued restores use sync=False; this step's forward
+            for the recovering req is skipped (num_scheduled_tokens=0).
+          - Per-step we query whether prior in-flight restores have
+            completed; only when complete do we admit the req's forward
+            and patch num_computed_tokens.
+          - This achieves true overlap: copy stream runs reload while
+            default stream concurrently runs forward of OTHER reqs.
         """
+        # ──────────────────────────────────────────────────────────────
+        # Phase 2 C-mode (queue-based): when overlap is enabled, X has
+        # NOT been added to vLLM waiting queue. It's parked in
+        # scheduler.slo_preempted_for_overlap_reload while reload runs
+        # on the copy stream. _process_overlap_reload_queue() handles
+        # this side queue from step() (called BEFORE schedule()), so
+        # by the time _process_ft_pending_restores runs, no overlap-
+        # related entries are in _ft_pending_restores. We return early
+        # here to keep the code path clean.
+        # ──────────────────────────────────────────────────────────────
+        use_overlap = (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
+        )
+        if use_overlap:
+            return
+
         if not hasattr(self, "_ft_pending_restores") or not self._ft_pending_restores:
             return
 
@@ -887,6 +912,413 @@ class EngineCore:
 
         self._ft_pending_restores = still_pending
 
+    def _process_overlap_reload_queue(self) -> None:
+        """Phase 2 C-mode (queue-based, V3): manage the side queue of
+        capacity-preempted reqs through three stages: waiting for KV
+        pool capacity, async reload in progress, then admit to vLLM.
+
+        Called every step BEFORE scheduler.schedule().
+
+        IMPORTANT — preempt type vs release rule:
+        This method serves capacity-driven preempt (triggered by KV
+        pool pressure). Scheduler-side _preempt_for_slo has already
+        released the blocks. This method handles re-allocation and
+        reload. SLO-driven preempt should follow a different path
+        (retain blocks); see paper_design_notes.md.
+
+        State machine per request:
+          waiting_for_blocks → reloading → done (then removed)
+
+        Stage A (drain new): drain scheduler.slo_preempted_for_overlap_reload,
+            initialize each entry with state=waiting_for_blocks.
+        Stage B (try alloc): for each waiting_for_blocks entry, try
+            kv_cache_manager.allocate_slots(request, num_new_tokens=
+            ckpt_tokens). If success, transition to reloading + start
+            async restore. If fail (KV pool full), keep waiting.
+        Stage C (query done): for each reloading entry, query worker.
+            Done → prepend to vLLM waiting queue (with num_computed_
+            tokens patched to ckpt_tokens) so vLLM standard admit picks
+            it up. Block_ids are owned by the request from our alloc;
+            vLLM's admit will see existing blocks and skip its own
+            allocation.
+        """
+        use_overlap = (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
+        )
+        if not use_overlap:
+            return
+
+        base = getattr(self.scheduler, "_base", self.scheduler)
+
+        if not hasattr(self, "_overlap_reload_inflight"):
+            self._overlap_reload_inflight: dict[str, dict] = {}
+
+        # ── Stage A: drain new preempts (init waiting_for_blocks) ──
+        pending_list = getattr(
+            base, "slo_preempted_for_overlap_reload", None
+        )
+        if pending_list:
+            for request, ckpt_tokens in list(pending_list):
+                req_id = request.request_id
+                self._overlap_reload_inflight[req_id] = {
+                    "request": request,
+                    "ckpt_tokens": ckpt_tokens,
+                    "state": "waiting_for_blocks",
+                    "steps_waited": 0,
+                    "enqueue_time": time.time(),
+                }
+                logger.info(
+                    "FT overlap V3: %s queued, waiting for "
+                    "%d-token block allocation",
+                    req_id, ckpt_tokens,
+                )
+            pending_list.clear()
+
+        if not self._overlap_reload_inflight:
+            return
+
+        kv_cache_mgr = base.kv_cache_manager
+
+        # ── Stage B: try alloc for waiting_for_blocks ──────────────
+        for req_id, state in list(
+            self._overlap_reload_inflight.items()
+        ):
+            if state["state"] != "waiting_for_blocks":
+                continue
+            request = state["request"]
+            ckpt_tokens = state["ckpt_tokens"]
+            try:
+                kv_blocks = kv_cache_mgr.allocate_slots(
+                    request,
+                    num_new_tokens=ckpt_tokens,
+                )
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: allocate_slots crashed for %s",
+                    req_id,
+                )
+                kv_blocks = None
+
+            if kv_blocks is None:
+                # KV pool doesn't have enough free blocks. Wait for
+                # other reqs to finish/free.
+                state["steps_waited"] += 1
+                continue
+
+            # Got blocks. Extract block_ids for the reload target.
+            try:
+                block_ids_tuple = kv_cache_mgr.get_block_ids(req_id)
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: get_block_ids failed for %s "
+                    "after allocate_slots succeeded",
+                    req_id,
+                )
+                state["steps_waited"] += 1
+                continue
+            target_block_ids: list[int] = []
+            for grp in block_ids_tuple:
+                target_block_ids.extend(int(b) for b in grp)
+            if not target_block_ids:
+                state["steps_waited"] += 1
+                continue
+
+            # Start async reload to the freshly-allocated blocks.
+            try:
+                results = self.collective_rpc(
+                    "restore_kv_blocks",
+                    args=(req_id, target_block_ids, False),  # sync=False
+                )
+                tokens_started = (
+                    results[0] if results and results[0] else 0
+                )
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: restore RPC failed for %s",
+                    req_id,
+                )
+                tokens_started = 0
+
+            if tokens_started <= 0:
+                # Reload couldn't start. Free the blocks we just alloc'd
+                # and fall back to vLLM standard reprefill path.
+                try:
+                    kv_cache_mgr.free(request)
+                except Exception:
+                    pass
+                request.num_computed_tokens = 0
+                base.waiting.prepend_request(request)
+                logger.info(
+                    "FT overlap V3: %s reload skipped (no ckpt); "
+                    "freed alloc'd blocks and fell back to reprefill",
+                    req_id,
+                )
+                del self._overlap_reload_inflight[req_id]
+                continue
+
+            # Transition to reloading state.
+            state["state"] = "reloading"
+            state["tokens_started"] = tokens_started
+            state["block_ids"] = target_block_ids
+            state["reload_started_step"] = state.get(
+                "steps_waited", 0
+            )
+            logger.info(
+                "FT overlap V3: %s alloc'd %d blocks (after "
+                "%d step(s) wait), reload started",
+                req_id, len(target_block_ids),
+                state.get("steps_waited", 0),
+            )
+
+        # ── Stage C: query reloading entries ──────────────────────
+        for req_id, state in list(
+            self._overlap_reload_inflight.items()
+        ):
+            if state["state"] != "reloading":
+                continue
+            steps_in_reload = state.get("steps_in_reload", 0) + 1
+            state["steps_in_reload"] = steps_in_reload
+            try:
+                results = self.collective_rpc(
+                    "query_restore_done",
+                    args=(req_id, steps_in_reload),
+                )
+                done = bool(results[0]) if results else True
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: query failed for %s "
+                    "(treating as not-done)",
+                    req_id,
+                )
+                done = False
+
+            if not done:
+                continue
+
+            # Reload done. Patch request state, prepend to vLLM waiting.
+            request = state["request"]
+            tokens_started = state["tokens_started"]
+            request.num_computed_tokens = tokens_started
+            request.num_checkpointed_tokens = tokens_started
+            base.waiting.prepend_request(request)
+            logger.info(
+                "FT overlap V3: %s done — alloc waited %d step(s), "
+                "reload took %d step(s), %d tokens restored",
+                req_id,
+                state.get("steps_waited", 0),
+                steps_in_reload,
+                tokens_started,
+            )
+            del self._overlap_reload_inflight[req_id]
+
+    def _process_ft_pending_restores_overlap(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """Phase 2 C-mode: async restore with same-step forward of OTHER reqs.
+
+        Per-step flow:
+          Stage 1: Check `_ft_inflight_restores` (started in prior steps).
+            For each: query worker via collective_rpc("query_restore_done").
+            - Done: patch scheduler_output to admit this req's forward
+              this step (set num_computed_tokens, subtract restored prefix
+              from num_scheduled_tokens). Remove from inflight dict.
+            - Not done: set num_scheduled_tokens=0 for this req (skip its
+              forward this step). Increment steps_waited. Keep in inflight.
+          Stage 2: Process newly-arrived `_ft_pending_restores`.
+            Enqueue async via restore_kv_blocks(sync=False). Add to
+            inflight dict. Set num_scheduled_tokens=0 for this req
+            (forward this step skips it; copy stream runs reload while
+            default stream forwards the OTHER reqs).
+
+        The CSV row for each reload is written by the worker side when
+        query_async_restore reports done (with steps_to_complete +
+        wait_ms_total).
+        """
+        if not hasattr(self, "_ft_inflight_restores"):
+            self._ft_inflight_restores: dict[str, dict] = {}
+
+        # Build NewRequestData lookup once for both stages.
+        new_req_data_by_id = {
+            nrd.req_id: nrd
+            for nrd in scheduler_output.scheduled_new_reqs
+        }
+
+        # ── Stage 1: Check existing in-flight restores ─────────────────
+        new_inflight: dict[str, dict] = {}
+        for req_id, state in list(self._ft_inflight_restores.items()):
+            steps_waited = state.get("steps_waited", 1) + 1
+            try:
+                results = self.collective_rpc(
+                    "query_restore_done",
+                    args=(req_id, steps_waited),
+                )
+                done = bool(results[0]) if results else True
+            except Exception:
+                logger.exception(
+                    "FT overlap: query_restore_done failed for %s "
+                    "(treating as not-done)",
+                    req_id,
+                )
+                done = False
+
+            if done:
+                # Reload finished. Patch scheduler_output to admit it.
+                tokens_restored = state["tokens_restored"]
+                request = self.scheduler._base.requests.get(req_id)
+                if request is not None:
+                    request.num_computed_tokens = tokens_restored
+                    request.num_checkpointed_tokens = tokens_restored
+                old_scheduled = (
+                    scheduler_output.num_scheduled_tokens.get(req_id)
+                )
+                if (
+                    old_scheduled is not None
+                    and old_scheduled > tokens_restored
+                ):
+                    new_scheduled = old_scheduled - tokens_restored
+                    scheduler_output.num_scheduled_tokens[req_id] = (
+                        new_scheduled
+                    )
+                    scheduler_output.total_num_scheduled_tokens -= (
+                        tokens_restored
+                    )
+                    nrd = new_req_data_by_id.get(req_id)
+                    if nrd is not None:
+                        nrd.num_computed_tokens = tokens_restored
+                logger.info(
+                    "FT overlap restore done: %s after %d step(s), "
+                    "%d tokens restored",
+                    req_id, steps_waited, tokens_restored,
+                )
+            else:
+                # Reload not done yet. Remove X completely from this
+                # step's batch (not just num_sched=0). Otherwise model
+                # runner still sees X in scheduled_new_reqs /
+                # scheduled_running_reqs and the batch token count
+                # won't match its expected shape.
+                self._ft_overlap_remove_from_batch(
+                    scheduler_output, req_id
+                )
+                state["steps_waited"] = steps_waited
+                new_inflight[req_id] = state
+        self._ft_inflight_restores = new_inflight
+
+        # ── Stage 2: Process newly-arrived pending restores ────────────
+        if (
+            not hasattr(self, "_ft_pending_restores")
+            or not self._ft_pending_restores
+        ):
+            return
+        if not hasattr(self.scheduler, "ft_scheduler"):
+            self._ft_pending_restores.clear()
+            return
+
+        kv_cache_mgr = self.scheduler._base.kv_cache_manager
+        still_pending: list[tuple[str, int]] = []
+
+        for req_id, num_ckpt_tokens in self._ft_pending_restores:
+            try:
+                target_block_ids = self._get_ft_target_block_ids(
+                    req_id, kv_cache_mgr
+                )
+            except Exception:
+                target_block_ids = []
+            if not target_block_ids:
+                still_pending.append((req_id, num_ckpt_tokens))
+                continue
+
+            # Enqueue async restore (sync=False). Worker enqueues the
+            # copy on copy stream and returns immediately.
+            try:
+                results = self.collective_rpc(
+                    "restore_kv_blocks",
+                    args=(req_id, target_block_ids, False),
+                )
+                tokens_restored = (
+                    results[0] if results and results[0] else 0
+                )
+            except Exception:
+                logger.exception(
+                    "FT overlap: restore_kv_blocks(sync=False) failed "
+                    "for %s; falling back to recompute next step",
+                    req_id,
+                )
+                tokens_restored = 0
+
+            if tokens_restored <= 0:
+                # Restore failed (no checkpoint or RPC error). Don't
+                # add to inflight. Scheduler_output stays as-is, model
+                # runner does full prefill normally.
+                logger.info(
+                    "FT overlap: %s restore returned 0; "
+                    "will recompute fully",
+                    req_id,
+                )
+                continue
+
+            # Remove X from this step's batch entirely (not just
+            # num_sched=0; see comment in Stage 1 above).
+            self._ft_overlap_remove_from_batch(
+                scheduler_output, req_id
+            )
+
+            # Track for next step's query.
+            self._ft_inflight_restores[req_id] = {
+                "tokens_restored": tokens_restored,
+                "num_ckpt_tokens": num_ckpt_tokens,
+                "steps_waited": 1,
+                "enqueue_time": time.time(),
+            }
+            logger.info(
+                "FT overlap restore enqueued: %s, %d tokens, "
+                "deferring forward to next step",
+                req_id, tokens_restored,
+            )
+
+        self._ft_pending_restores = still_pending
+
+    def _ft_overlap_remove_from_batch(
+        self,
+        scheduler_output: "SchedulerOutput",
+        req_id: str,
+    ) -> None:
+        """Remove a request entirely from this step's forward batch.
+
+        Used by overlap mode when reload hasn't completed yet — we
+        mustn't let model_runner try to forward this req with stale or
+        partial KV. Setting num_scheduled_tokens=0 isn't enough because
+        the req is still in scheduled_new_reqs / scheduled_running_reqs
+        lists, causing batch shape inconsistencies.
+
+        After removal, scheduler will re-add the req in a future step
+        (it's still in the running/waiting queue with status PREEMPTED).
+        """
+        old = scheduler_output.num_scheduled_tokens.pop(req_id, 0)
+        if old > 0:
+            scheduler_output.total_num_scheduled_tokens -= old
+
+        # Remove from scheduled_new_reqs (list of NewRequestData).
+        if hasattr(scheduler_output, "scheduled_new_reqs"):
+            scheduler_output.scheduled_new_reqs = [
+                nrd for nrd in scheduler_output.scheduled_new_reqs
+                if getattr(nrd, "req_id", None) != req_id
+            ]
+
+        # Remove from scheduled_running_reqs if present.
+        if hasattr(scheduler_output, "scheduled_running_reqs"):
+            scheduler_output.scheduled_running_reqs = [
+                rrd for rrd in scheduler_output.scheduled_running_reqs
+                if getattr(rrd, "req_id", None) != req_id
+            ]
+
+        # Some vLLM versions also have scheduled_resumed_reqs.
+        if hasattr(scheduler_output, "scheduled_resumed_reqs"):
+            scheduler_output.scheduled_resumed_reqs = [
+                r for r in scheduler_output.scheduled_resumed_reqs
+                if getattr(r, "req_id", None) != req_id
+            ]
+
     def _get_ft_target_block_ids(
         self,
         request_id: str,
@@ -980,6 +1412,12 @@ class EngineCore:
         # queue so they are processed after schedule() like cross-engine
         # rerouted reqs. No-op when FT_SLO_PREEMPT is off.
         self._drain_slo_preempted_restores()
+
+        # Phase 2 C-mode (queue-based): manage overlap reload side queue.
+        # Starts new async reloads on copy stream + checks completion of
+        # in-flight ones; admits completed ones into vLLM waiting queue.
+        # No-op when FT_CAPACITY_PREEMPT_RELOAD_OVERLAP is off.
+        self._process_overlap_reload_queue()
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -1490,6 +1928,10 @@ class EngineCore:
 
         # M3 SLO-aware preemption drain: see step() for rationale.
         self._drain_slo_preempted_restores()
+
+        # Phase 2 C-mode (queue-based): manage overlap reload side queue.
+        # See step() for rationale.
+        self._process_overlap_reload_queue()
 
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.

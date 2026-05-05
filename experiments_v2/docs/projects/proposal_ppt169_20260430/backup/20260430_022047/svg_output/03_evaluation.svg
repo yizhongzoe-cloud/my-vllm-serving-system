@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720">
+  <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+
+  <!-- Title -->
+  <text x="60" y="80" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#000000">Evaluation: isolating FT vs. scheduling contributions</text>
+  <line x1="60" y1="100" x2="1220" y2="100" stroke="#D1D5DB" stroke-width="1"/>
+
+  <!-- Q1: Baselines (top-left) -->
+  <rect x="60" y="120" width="565" height="240" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="80" y="153" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Baselines</text>
+  <text x="80" y="180" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">4 configurations on the same vLLM substrate</text>
+
+  <text x="80" y="215" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="80" dy="0">①  No-FT + FCFS — vanilla; in-flight lost on failure</tspan>
+    <tspan x="80" dy="28">②  Reprefill + FCFS — reroute and re-prefill</tspan>
+    <tspan x="80" dy="28">③  Checkpoint + FCFS — KV restore, vanilla scheduling</tspan>
+  </text>
+  <text x="80" y="305" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" font-weight="bold" fill="#DC2626">
+    <tspan x="80" dy="0">④  Checkpoint + SLO-aware (ours)</tspan>
+  </text>
+  <text x="80" y="340" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">
+    <tspan x="80" dy="0">③ vs ④ isolates scheduling; ④ vs ② isolates fault tolerance</tspan>
+  </text>
+
+  <!-- Q2: Workloads & Faults (top-right) -->
+  <rect x="655" y="120" width="565" height="240" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="675" y="153" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Workloads &amp; Faults</text>
+
+  <text x="675" y="190" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="675" dy="0">•  ShareGPT — short-context chat traffic</tspan>
+    <tspan x="675" dy="28">•  LongBench — NarrativeQA, QMSum, MuSiQue</tspan>
+    <tspan x="675" dy="28">•  Azure LLM trace — production arrivals</tspan>
+    <tspan x="675" dy="28">•  Poisson arrivals, 3 random seeds</tspan>
+  </text>
+  <text x="675" y="328" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="675" dy="0">•  Fault: single engine failure at </tspan><tspan font-weight="bold" fill="#DC2626">350 s</tspan><tspan> into 700 s cell</tspan>
+  </text>
+
+  <!-- Q3: Metrics (bottom-left) -->
+  <rect x="60" y="380" width="565" height="240" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="80" y="413" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Metrics</text>
+
+  <text x="80" y="450" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="80" dy="0">Primary:  </tspan><tspan font-weight="bold" fill="#DC2626">Goodput</tspan><tspan> — SLO-met output tokens/sec</tspan>
+  </text>
+  <text x="80" y="490" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="80" dy="0">Secondary:</tspan>
+    <tspan x="80" dy="28">•  Recovery success rate</tspan>
+    <tspan x="80" dy="28">•  TTFT &amp; TPOT distributions</tspan>
+    <tspan x="80" dy="28">•  System-wide GPU utilization</tspan>
+  </text>
+
+  <!-- Q4: Hypothesis (bottom-right, accent border) -->
+  <rect x="655" y="380" width="565" height="240" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1"/>
+  <rect x="655" y="380" width="6" height="240" fill="#DC2626"/>
+  <text x="685" y="413" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Hypothesis</text>
+
+  <text x="685" y="450" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <tspan x="685" dy="0">Tight TTFT (&lt;2 s for 15K-token prompts):</tspan>
+    <tspan x="685" dy="26">  ③ beats ② mechanically, but advantage is</tspan>
+    <tspan x="685" dy="26">  hidden by surviving-engine queueing.</tspan>
+    <tspan x="685" dy="26">  ④ preserves it by letting recovery requests</tspan>
+    <tspan x="685" dy="26">  preempt non-urgent work.</tspan>
+    <tspan x="685" dy="26">Loose SLO: all FT configurations converge.</tspan>
+  </text>
+
+  <!-- Bottom strip: Resources -->
+  <line x1="60" y1="650" x2="1220" y2="650" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="60" y="678" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">
+    <tspan x="60" dy="0">Resources: 2+ GPUs (data-parallel) · Llama-3.1-8B-Instruct · ~50 GPU-hours main sweep + 20 GPU-hours sensitivity</tspan>
+  </text>
+
+  <!-- Footer -->
+  <text x="1220" y="700" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280" text-anchor="end">p.3 / 3</text>
+</svg>

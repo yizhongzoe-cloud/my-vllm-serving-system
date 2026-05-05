@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720">
+  <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+
+  <!-- Title -->
+  <text x="60" y="80" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#000000">Long-context RAG serving has a disruption problem</text>
+  <line x1="60" y1="100" x2="1220" y2="100" stroke="#D1D5DB" stroke-width="1"/>
+
+  <!-- Top half: motivation -->
+  <text x="60" y="155" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">The problem</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="60" y="195" text-anchor="start">•  Production LLM serving now sees very long prompts (32K–128K tokens, long-context RAG).</text>
+    <text x="60" y="225" text-anchor="start">•  Lots of things can break serving: engines crash, load spikes, queues build up.</text>
+    <text x="60" y="255" text-anchor="start">•  When that happens, recovery is expensive — a single request can lose tens of seconds of work.</text>
+    <text x="60" y="285" text-anchor="start">•  Re-running prefill on another engine blows past any reasonable TTFT SLO.</text>
+    <text x="60" y="315" text-anchor="start">•  Today, recovery systems (Mooncake) and SLO schedulers (QLM, Scorpio, JITServe, SLOs-Serve)</text>
+    <text x="78" y="341" text-anchor="start">don&apos;t talk to each other.</text>
+    <text x="60" y="395" text-anchor="start" font-weight="bold" fill="#000000">•  But here is the thing.</text>
+    <text x="78" y="425" text-anchor="start">Recovery already keeps a copy of every request&apos;s KV state in host memory.</text>
+    <text x="78" y="451" text-anchor="start">That copy is exactly what an SLO scheduler needs to preempt long-context cheaply.</text>
+    <text x="78" y="477" text-anchor="start">Nobody has connected the two.</text>
+  </g>
+
+  <!-- Bottom: Research Question box with red left border -->
+  <rect x="60" y="510" width="1160" height="150" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1"/>
+  <rect x="60" y="510" width="6" height="150" fill="#DC2626"/>
+
+  <text x="90" y="548" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Research Question</text>
+
+  <text x="90" y="588" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">Can the same KV-state copy do double duty —</text>
+  <text x="90" y="616" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">fast restore after a disruption, AND cheap preemption during normal serving?</text>
+  <text x="90" y="644" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#6B7280">Especially when the surviving engine is busy and fast restore alone can&apos;t hide the queueing.</text>
+
+  <!-- Footer -->
+  <text x="1220" y="700" text-anchor="end" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">p.1 / 3</text>
+</svg>

@@ -600,6 +600,21 @@ class Worker(WorkerBase):
         if callable(fn):
             fn()
 
+    def query_restore_done(
+        self,
+        request_id: str,
+        steps_waited: int = 1,
+    ) -> bool:
+        """Phase 2 C-mode: delegate async restore completion query to
+        the model runner. Returns True if the async restore for
+        request_id has completed.
+        """
+        fn = getattr(self.model_runner, "query_restore_done", None)
+        if not callable(fn):
+            # Defensive: model runner doesn't support query → treat as done.
+            return True
+        return fn(request_id, steps_waited)
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.

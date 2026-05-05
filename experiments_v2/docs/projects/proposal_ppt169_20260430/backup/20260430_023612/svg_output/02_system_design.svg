@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720">
+  <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+
+  <!-- Title -->
+  <text x="60" y="80" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#000000">System Design: KV checkpoint as dual-purpose primitive</text>
+  <line x1="60" y1="100" x2="1220" y2="100" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="60" y="128" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#6B7280">Built on vLLM v0.16. Three components.</text>
+
+  <!-- Column 1: KV Cache Checkpointing -->
+  <rect x="60" y="155" width="360" height="335" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="80" y="195" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#DC2626">1.</text>
+  <text x="115" y="195" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="20" font-weight="bold" fill="#000000">KV cache checkpointing</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="80" y="240" text-anchor="start">Async-copy each request&apos;s KV blocks</text>
+    <text x="80" y="266" text-anchor="start">from GPU to host pinned memory,</text>
+    <text x="80" y="292" text-anchor="start">on a regular cadence.</text>
+    <text x="80" y="335" text-anchor="start">Publish to /dev/shm via atomic write</text>
+    <text x="80" y="361" text-anchor="start">so other engines can read it.</text>
+    <text x="80" y="404" text-anchor="start">An online cost model decides</text>
+    <text x="80" y="430" text-anchor="start">how often to checkpoint.</text>
+  </g>
+
+  <!-- Column 2: Cross-engine Restore -->
+  <rect x="450" y="155" width="360" height="335" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="470" y="195" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#DC2626">2.</text>
+  <text x="505" y="195" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="20" font-weight="bold" fill="#000000">Cross-engine restore</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="470" y="240" text-anchor="start">Engine dies → displaced requests</text>
+    <text x="470" y="266" text-anchor="start">get rerouted to a live engine.</text>
+    <text x="470" y="309" text-anchor="start">The live engine pulls KV blocks</text>
+    <text x="470" y="335" text-anchor="start">from /dev/shm into freshly allocated</text>
+    <text x="470" y="361" text-anchor="start">GPU blocks.</text>
+    <text x="470" y="404" text-anchor="start">Resume decoding with</text>
+    <text x="470" y="430" text-anchor="start" font-weight="bold" fill="#DC2626">no re-prefill.</text>
+  </g>
+
+  <!-- Column 3: Preemption-aware Scheduler -->
+  <rect x="840" y="155" width="360" height="335" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="860" y="195" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="32" font-weight="bold" fill="#DC2626">3.</text>
+  <text x="895" y="195" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="20" font-weight="bold" fill="#000000">Preemption-aware scheduler</text>
+
+  <g font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">
+    <text x="860" y="240" text-anchor="start">Each step: compute every request&apos;s</text>
+    <text x="860" y="266" text-anchor="start">SLO slack, sort tightest first.</text>
+    <text x="860" y="309" text-anchor="start">Preempt a running request when</text>
+    <text x="860" y="335" text-anchor="start">its slack is comfortably bigger</text>
+    <text x="860" y="361" text-anchor="start">than the top pending one.</text>
+    <text x="860" y="404" text-anchor="start">After a fault, reschedule</text>
+    <text x="860" y="430" text-anchor="start">everyone immediately.</text>
+  </g>
+
+  <!-- Key insight callout -->
+  <rect x="60" y="520" width="1160" height="140" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1"/>
+  <rect x="60" y="520" width="6" height="140" fill="#DC2626"/>
+
+  <text x="90" y="558" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="22" font-weight="bold" fill="#000000">Key insight</text>
+
+  <text x="90" y="595" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">SLO schedulers can&apos;t preempt long-context cheaply — mid-prefill state is too expensive to throw away.</text>
+  <text x="90" y="623" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151">FT systems already keep that state around for crash recovery.</text>
+  <text x="90" y="651" text-anchor="start" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="18" fill="#374151" font-weight="bold">Share the checkpoint, and preemption becomes free.</text>
+
+  <!-- Footer -->
+  <text x="1220" y="700" text-anchor="end" font-family='Arial, "Microsoft YaHei", sans-serif' font-size="14" fill="#6B7280">p.2 / 3</text>
+</svg>
