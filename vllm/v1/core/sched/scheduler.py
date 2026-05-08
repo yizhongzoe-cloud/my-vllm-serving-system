@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -577,6 +578,16 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     continue
 
+                # FT V3 capacity-preempt: req's KV is being asynchronously
+                # reloaded from host checkpoint. Engine flips status to
+                # PREEMPTED + patches num_computed_tokens once reload
+                # completes; until then we just skip-and-prepend like
+                # other WAITING_FOR_* states.
+                if request.status == RequestStatus.WAITING_FOR_RELOAD:
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -906,6 +917,19 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+
+        # V3 capacity-preempt: when FT_CAPACITY_PREEMPT_RELOAD=1 and a
+        # checkpoint exists for this request, route the preempt through
+        # _preempt_for_slo, which marks the request WAITING_FOR_RELOAD
+        # and queues a reload entry. This causes the resume path to
+        # asynchronously load KV from the host checkpoint instead of
+        # full reprefilling.
+        if (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD") == "1"
+            and getattr(request, "num_checkpointed_tokens", 0) > 0
+        ):
+            return self._preempt_for_slo(request, timestamp)
+
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
@@ -917,6 +941,49 @@ class Scheduler(SchedulerInterface):
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
+        self.waiting.prepend_request(request)
+
+    def _preempt_for_slo(self, request: Request, timestamp: float) -> None:
+        """V3 capacity-preempt + reload path.
+
+        Released blocks go back to the free pool so other reqs can
+        admit. The preempted request sits in vLLM's standard waiting
+        queue with status WAITING_FOR_RELOAD while the engine
+        asynchronously alloc's fresh blocks + reloads KV from host
+        checkpoint. Once reload completes, engine flips status to
+        PREEMPTED and patches num_computed_tokens to ckpt_tokens; the
+        standard admit path then resumes the request via the
+        resumed_req_ids path (no full reprefill).
+
+        The side list slo_preempted_for_overlap_reload is a
+        producer→consumer handoff so engine knows which reqs need
+        reload work — queue *membership* is owned by the waiting queue.
+        """
+        assert request.status == RequestStatus.RUNNING, (
+            "Only running requests can be preempted"
+        )
+        # Caller (_preempt_request) only routes here when
+        # num_checkpointed_tokens > 0, so we know a host ckpt exists.
+        ckpt_tokens = request.num_checkpointed_tokens
+
+        self.kv_cache_manager.free(request)
+        self.encoder_cache_manager.free(request)
+        request.status = RequestStatus.WAITING_FOR_RELOAD
+        request.is_rerouted = True
+        request.num_computed_tokens = 0
+        if request.spec_token_ids:
+            request.spec_token_ids = []
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+        if not hasattr(self, "slo_preempted_for_overlap_reload"):
+            self.slo_preempted_for_overlap_reload: list[
+                tuple["Request", int]
+            ] = []
+        self.slo_preempted_for_overlap_reload.append(
+            (request, ckpt_tokens)
+        )
         self.waiting.prepend_request(request)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:

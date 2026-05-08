@@ -397,6 +397,12 @@ class EngineCore:
         if self._scheduler_paused:
             return {}, False
 
+        # V3 capacity-preempt: drive in-flight reload state machine
+        # before schedule(). When a reload completes, this flips the
+        # request's status from WAITING_FOR_RELOAD to PREEMPTED so the
+        # waiting loop will admit it this step.
+        self._process_overlap_reload_queue()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -419,7 +425,257 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # V3 capacity-preempt: save fresh KV to host after each forward
+        # so a future preempted req can reload from host rather than
+        # full-reprefill.
+        self._save_checkpoints_if_needed()
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _process_overlap_reload_queue(self) -> None:
+        """V3 capacity-preempt reload driver.
+
+        The req sits in vLLM's waiting queue with status=
+        WAITING_FOR_RELOAD throughout this state machine; we don't
+        manage queue membership here. We only drive:
+          waiting_for_blocks → reloading → done
+        and once done we patch num_computed_tokens + flip status to
+        PREEMPTED. vLLM's standard waiting-loop admit (resumed_req_ids
+        path) takes over from there.
+
+        Called every step BEFORE scheduler.schedule().
+        """
+        use_overlap = (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
+        )
+        if not use_overlap:
+            return
+
+        base = self.scheduler
+
+        if not hasattr(self, "_overlap_reload_inflight"):
+            self._overlap_reload_inflight: dict[str, dict] = {}
+
+        # Drain new entries from scheduler-side handoff list.
+        pending_list = getattr(
+            base, "slo_preempted_for_overlap_reload", None
+        )
+        if pending_list:
+            for request, ckpt_tokens in list(pending_list):
+                req_id = request.request_id
+                self._overlap_reload_inflight[req_id] = {
+                    "request": request,
+                    "ckpt_tokens": ckpt_tokens,
+                    "state": "waiting_for_blocks",
+                    "steps_waited": 0,
+                    "enqueue_time": time.time(),
+                }
+                logger.info(
+                    "FT overlap V3: %s queued, waiting for "
+                    "%d-token block allocation",
+                    req_id, ckpt_tokens,
+                )
+            pending_list.clear()
+
+        if not self._overlap_reload_inflight:
+            return
+
+        kv_cache_mgr = base.kv_cache_manager
+
+        # Stage A: try alloc for waiting_for_blocks entries.
+        for req_id, state in list(
+            self._overlap_reload_inflight.items()
+        ):
+            if state["state"] != "waiting_for_blocks":
+                continue
+            request = state["request"]
+            ckpt_tokens = state["ckpt_tokens"]
+            try:
+                kv_blocks = kv_cache_mgr.allocate_slots(
+                    request,
+                    num_new_tokens=ckpt_tokens,
+                )
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: allocate_slots crashed for %s",
+                    req_id,
+                )
+                kv_blocks = None
+
+            if kv_blocks is None:
+                state["steps_waited"] += 1
+                continue
+
+            try:
+                block_ids_tuple = kv_cache_mgr.get_block_ids(req_id)
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: get_block_ids failed for %s "
+                    "after allocate_slots succeeded",
+                    req_id,
+                )
+                state["steps_waited"] += 1
+                continue
+            target_block_ids: list[int] = []
+            for grp in block_ids_tuple:
+                target_block_ids.extend(int(b) for b in grp)
+            if not target_block_ids:
+                state["steps_waited"] += 1
+                continue
+
+            try:
+                results = self.collective_rpc(
+                    "restore_kv_blocks",
+                    args=(req_id, target_block_ids, False),  # sync=False
+                )
+                tokens_started = (
+                    results[0] if results and results[0] else 0
+                )
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: restore RPC failed for %s",
+                    req_id,
+                )
+                tokens_started = 0
+
+            if tokens_started <= 0:
+                # No checkpoint or RPC failed. Drop the alloc'd blocks
+                # and fall back to full reprefill: vLLM admit will see
+                # PREEMPTED with num_computed_tokens=0 and treat it
+                # like a vanilla preempt resume.
+                try:
+                    kv_cache_mgr.free(request)
+                except Exception:
+                    pass
+                request.num_computed_tokens = 0
+                request.status = RequestStatus.PREEMPTED
+                logger.info(
+                    "FT overlap V3: %s reload skipped (no ckpt); "
+                    "fell back to full reprefill",
+                    req_id,
+                )
+                del self._overlap_reload_inflight[req_id]
+                continue
+
+            state["state"] = "reloading"
+            state["tokens_started"] = tokens_started
+            state["reload_started_step"] = state.get(
+                "steps_waited", 0
+            )
+            logger.info(
+                "FT overlap V3: %s alloc'd %d blocks (after "
+                "%d step(s) wait), reload started",
+                req_id, len(target_block_ids),
+                state.get("steps_waited", 0),
+            )
+
+        # Stage B: query reloading entries; flip status when done.
+        for req_id, state in list(
+            self._overlap_reload_inflight.items()
+        ):
+            if state["state"] != "reloading":
+                continue
+            steps_in_reload = state.get("steps_in_reload", 0) + 1
+            state["steps_in_reload"] = steps_in_reload
+            try:
+                results = self.collective_rpc(
+                    "query_restore_done",
+                    args=(req_id, steps_in_reload),
+                )
+                done = bool(results[0]) if results else True
+            except Exception:
+                logger.exception(
+                    "FT overlap V3: query failed for %s "
+                    "(treating as not-done)",
+                    req_id,
+                )
+                done = False
+
+            if not done:
+                continue
+
+            # Reload done — patch request state and flip status.
+            # vLLM waiting loop will admit it via the resumed path
+            # next iteration.
+            request = state["request"]
+            tokens_started = state["tokens_started"]
+            request.num_computed_tokens = tokens_started
+            request.num_checkpointed_tokens = tokens_started
+            request.status = RequestStatus.PREEMPTED
+            logger.info(
+                "FT overlap V3: %s done — alloc waited %d step(s), "
+                "reload took %d step(s), %d tokens restored",
+                req_id,
+                state.get("steps_waited", 0),
+                steps_in_reload,
+                tokens_started,
+            )
+            del self._overlap_reload_inflight[req_id]
+
+    def _save_checkpoints_if_needed(self) -> None:
+        """Trigger ckpt save for running reqs with new full block(s).
+
+        Single-cadence policy: when a req accumulates >= fixed_blocks
+        new full blocks since last save, send a checkpoint_kv_blocks RPC.
+        Default fixed_blocks = 1 (save every new full block) — same
+        cadence we use in V3 experiments.
+
+        No-op unless FT_CAPACITY_PREEMPT_RELOAD=1 (V3 path enabled).
+        """
+        if os.environ.get("FT_CAPACITY_PREEMPT_RELOAD") != "1":
+            return
+
+        base = self.scheduler
+        kv_mgr = base.kv_cache_manager
+        block_size = base.block_size
+        try:
+            fixed_blocks = int(
+                os.environ.get("FT_CKPT_FIXED_BLOCKS", "1")
+            )
+        except ValueError:
+            fixed_blocks = 1
+        if fixed_blocks <= 0:
+            return
+        required_tokens = fixed_blocks * block_size
+
+        # Build list of (req, save_args, target_published_tokens) so we
+        # can update each req's num_checkpointed_tokens AFTER the RPC
+        # returns successfully (not before — if RPC fails we'd otherwise
+        # claim a save that didn't happen, breaking V3 reload later).
+        candidates: list[tuple[Request, tuple[str, list[int], int], int]] = []
+        for req in list(base.running):
+            stable_full_tokens = (
+                (req.num_computed_tokens // block_size) * block_size
+            )
+            published_tokens = req.num_checkpointed_tokens
+            if (stable_full_tokens - published_tokens) < required_tokens:
+                continue
+            all_ids = kv_mgr.get_block_ids(req.request_id)
+            block_ids = list(all_ids[0]) if all_ids else []
+            if not block_ids:
+                continue
+            candidates.append((
+                req,
+                (req.request_id, block_ids, req.num_computed_tokens),
+                stable_full_tokens,
+            ))
+
+        if not candidates:
+            return
+        request_block_map = [args for _, args, _ in candidates]
+        try:
+            self.collective_rpc(
+                "checkpoint_kv_blocks",
+                args=(request_block_map,),
+            )
+        except Exception:
+            logger.exception("ckpt save RPC failed")
+            return  # Don't update num_checkpointed_tokens on failure.
+
+        # RPC returned (and worker side has synced the copy stream).
+        # Now safe to mark these tokens as checkpointed on host.
+        for req, _, target in candidates:
+            req.num_checkpointed_tokens = target
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -450,6 +706,10 @@ class EngineCore:
         # If paused, don't schedule any work.
         if self._scheduler_paused:
             return {}, False
+
+        # V3 capacity-preempt: drive in-flight reload state machine
+        # before schedule() (same hook as the non-batched step()).
+        self._process_overlap_reload_queue()
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
@@ -524,6 +784,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # V3 capacity-preempt: save fresh KV to host after forward.
+        self._save_checkpoints_if_needed()
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is

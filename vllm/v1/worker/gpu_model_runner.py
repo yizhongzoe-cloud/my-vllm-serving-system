@@ -6260,6 +6260,119 @@ class GPUModelRunner(
                     stats.encoder_forward_time += per_request_time
                     stats.num_encoder_calls += 1
 
+    # ── V3 capacity-preempt: KV checkpoint save / async reload ──
+    # save_checkpoint copies KV from GPU to host pinned memory.
+    # restore_kv_blocks copies KV from host back to a fresh set of GPU
+    # blocks (potentially asynchronously on a copy stream).
+    # query_restore_done lets the engine poll for async restore
+    # completion before re-admitting the request.
+
+    def checkpoint_kv_blocks(
+        self,
+        request_block_map: list[tuple[str, list[int], int]],
+    ) -> list[tuple[str, int, int]]:
+        """Copy the KV blocks listed in `request_block_map` from GPU to
+        host pinned memory via the V3 checkpoint pool.
+
+        Called via collective_rpc from EngineCore each step (or every
+        N steps depending on cadence policy). Returns one tuple per
+        successfully-saved request: (request_id, size_bytes, num_tokens).
+        """
+        if not self.kv_caches:
+            return []
+
+        from vllm.v1.core.kv_checkpoint_pool import KVCheckpointPool
+
+        if not hasattr(self, "_ft_checkpoint_pool"):
+            pool_bytes = getattr(
+                self.vllm_config.scheduler_config,
+                "checkpoint_pool_bytes",
+                8 * 1024 * 1024 * 1024,
+            )
+            self._ft_checkpoint_pool = KVCheckpointPool(
+                max_memory_bytes=pool_bytes,
+            )
+
+        entries: list[tuple[str, "Any", int]] = []
+        for request_id, block_ids, num_tokens in request_block_map:
+            entry = self._ft_checkpoint_pool.save_checkpoint(
+                request_id=request_id,
+                gpu_kv_caches=self.kv_caches,
+                block_ids=block_ids,
+                num_tokens=num_tokens,
+                async_copy=True,
+            )
+            if entry is not None:
+                entries.append((request_id, entry, num_tokens))
+
+        if not entries:
+            return []
+
+        # Sync the copy stream once for the whole batch so the host
+        # pinned tensors are valid before the RPC returns.
+        if torch.cuda.is_available():
+            copy_stream = getattr(
+                self._ft_checkpoint_pool, "_copy_stream", None
+            )
+            if copy_stream is not None:
+                copy_stream.synchronize()
+
+        return [
+            (req_id, int(entry.size_bytes), int(num_tokens))
+            for req_id, entry, num_tokens in entries
+        ]
+
+    def restore_kv_blocks(
+        self,
+        request_id: str,
+        target_block_ids: list[int],
+        sync: bool = True,
+    ) -> int:
+        """Restore checkpointed KV from the host pool back to GPU.
+
+        sync=True blocks until the copy completes (used by FT recovery
+        path). sync=False enqueues the copy on the pool's copy stream
+        and returns immediately — caller must use query_restore_done()
+        to detect completion before reading the restored KV.
+
+        Returns the number of tokens restored, or 0 if no checkpoint.
+        """
+        if not self.kv_caches:
+            return 0
+        if not hasattr(self, "_ft_checkpoint_pool"):
+            return 0
+        return self._ft_checkpoint_pool.restore_checkpoint(
+            request_id=request_id,
+            gpu_kv_caches=self.kv_caches,
+            target_block_ids=target_block_ids,
+            sync=sync,
+        )
+
+    def query_restore_done(
+        self,
+        request_id: str,
+        steps_waited: int = 1,
+    ) -> bool:
+        """V3 capacity-preempt: check whether a previously-enqueued
+        async restore for `request_id` has completed. Engine calls this
+        once per pending restore per step.
+        """
+        if hasattr(self, "_ft_checkpoint_pool"):
+            try:
+                return bool(
+                    self._ft_checkpoint_pool.query_async_restore(
+                        request_id, steps_waited=steps_waited,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "query_async_restore failed for %s; "
+                    "treating as complete (defensive)",
+                    request_id,
+                )
+                return True
+        return True
+
 
 @dataclass
 class EncoderTimingStats:

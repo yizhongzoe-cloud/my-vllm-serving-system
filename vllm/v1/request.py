@@ -162,6 +162,16 @@ class Request:
         # The number of tokens that have been computed remotely.
         self.num_external_computed_tokens = 0
 
+        # FT V3: number of tokens whose KV is checkpointed to host memory.
+        # Driven by ckpt save side; read by V3 capacity-preempt path to
+        # know how many tokens to reload via restore_kv_blocks.
+        self.num_checkpointed_tokens = 0
+
+        # FT: marks a request that came back from a fault recovery /
+        # capacity-preempt reroute. Used by SLO priority preempt picker
+        # to skip rerouted reqs (they are already in a recovery flow).
+        self.is_rerouted = False
+
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
@@ -300,6 +310,10 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     WAITING_FOR_STREAMING_REQ = enum.auto()
+    # FT V3 capacity-preempt: req sits in waiting queue with this
+    # status while engine asynchronously alloc'd blocks + reloads KV
+    # from host checkpoint. Engine flips to PREEMPTED once reload done.
+    WAITING_FOR_RELOAD = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

@@ -570,6 +570,46 @@ class Worker(WorkerBase):
         """Get encoder timing stats from model runner."""
         return self.model_runner.get_encoder_timing_stats()
 
+    def checkpoint_kv_blocks(
+        self,
+        request_block_map: list[tuple[str, list[int], int]],
+    ) -> list[tuple[str, int, int]]:
+        """Delegate FT KV checkpoint RPCs to the model runner."""
+        checkpoint_fn = getattr(self.model_runner, "checkpoint_kv_blocks", None)
+        if not callable(checkpoint_fn):
+            raise NotImplementedError(
+                "checkpoint_kv_blocks is not supported by this model runner"
+            )
+        return checkpoint_fn(request_block_map)
+
+    def restore_kv_blocks(
+        self,
+        request_id: str,
+        target_block_ids: list[int],
+        sync: bool = True,
+    ) -> int:
+        """Delegate FT KV restore RPCs to the model runner."""
+        restore_fn = getattr(self.model_runner, "restore_kv_blocks", None)
+        if not callable(restore_fn):
+            raise NotImplementedError(
+                "restore_kv_blocks is not supported by this model runner"
+            )
+        return restore_fn(request_id, target_block_ids, sync)
+
+    def query_restore_done(
+        self,
+        request_id: str,
+        steps_waited: int = 1,
+    ) -> bool:
+        """V3 capacity-preempt: delegate async restore completion
+        query to the model runner. Returns True if the async restore
+        for request_id has completed.
+        """
+        fn = getattr(self.model_runner, "query_restore_done", None)
+        if not callable(fn):
+            return True
+        return fn(request_id, steps_waited)
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.
