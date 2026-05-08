@@ -682,16 +682,12 @@ class EngineCore:
           - This achieves true overlap: copy stream runs reload while
             default stream concurrently runs forward of OTHER reqs.
         """
-        # ──────────────────────────────────────────────────────────────
-        # Phase 2 C-mode (queue-based): when overlap is enabled, X has
-        # NOT been added to vLLM waiting queue. It's parked in
-        # scheduler.slo_preempted_for_overlap_reload while reload runs
-        # on the copy stream. _process_overlap_reload_queue() handles
-        # this side queue from step() (called BEFORE schedule()), so
-        # by the time _process_ft_pending_restores runs, no overlap-
-        # related entries are in _ft_pending_restores. We return early
-        # here to keep the code path clean.
-        # ──────────────────────────────────────────────────────────────
+        # When overlap is enabled, V3 capacity-preempted reqs are
+        # parked in the waiting queue with WAITING_FOR_RELOAD status,
+        # and _process_overlap_reload_queue() drives their reload state
+        # machine from step() (called BEFORE schedule()). They never
+        # enter _ft_pending_restores, so this function is a no-op for
+        # the V3 path — return early.
         use_overlap = (
             os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
         )
@@ -970,34 +966,17 @@ class EngineCore:
         base.slo_preempted_retained = new_retained
 
     def _process_overlap_reload_queue(self) -> None:
-        """Phase 2 C-mode (queue-based, V3): manage the side queue of
-        capacity-preempted reqs through three stages: waiting for KV
-        pool capacity, async reload in progress, then admit to vLLM.
+        """V3 capacity-preempt reload driver.
+
+        The req sits in vLLM's waiting queue with status=
+        WAITING_FOR_RELOAD throughout this state machine; we don't
+        manage queue membership here. We only drive:
+          waiting_for_blocks → reloading → done
+        and once done we patch num_computed_tokens + flip status to
+        PREEMPTED. vLLM's standard waiting-loop admit (resumed_req_ids
+        path) takes over from there.
 
         Called every step BEFORE scheduler.schedule().
-
-        IMPORTANT — preempt type vs release rule:
-        This method serves capacity-driven preempt (triggered by KV
-        pool pressure). Scheduler-side _preempt_for_slo has already
-        released the blocks. This method handles re-allocation and
-        reload. SLO-driven preempt should follow a different path
-        (retain blocks); see paper_design_notes.md.
-
-        State machine per request:
-          waiting_for_blocks → reloading → done (then removed)
-
-        Stage A (drain new): drain scheduler.slo_preempted_for_overlap_reload,
-            initialize each entry with state=waiting_for_blocks.
-        Stage B (try alloc): for each waiting_for_blocks entry, try
-            kv_cache_manager.allocate_slots(request, num_new_tokens=
-            ckpt_tokens). If success, transition to reloading + start
-            async restore. If fail (KV pool full), keep waiting.
-        Stage C (query done): for each reloading entry, query worker.
-            Done → prepend to vLLM waiting queue (with num_computed_
-            tokens patched to ckpt_tokens) so vLLM standard admit picks
-            it up. Block_ids are owned by the request from our alloc;
-            vLLM's admit will see existing blocks and skip its own
-            allocation.
         """
         use_overlap = (
             os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
@@ -1010,7 +989,7 @@ class EngineCore:
         if not hasattr(self, "_overlap_reload_inflight"):
             self._overlap_reload_inflight: dict[str, dict] = {}
 
-        # ── Stage A: drain new preempts (init waiting_for_blocks) ──
+        # Drain new entries from scheduler-side handoff list.
         pending_list = getattr(
             base, "slo_preempted_for_overlap_reload", None
         )
@@ -1036,7 +1015,7 @@ class EngineCore:
 
         kv_cache_mgr = base.kv_cache_manager
 
-        # ── Stage B: try alloc for waiting_for_blocks ──────────────
+        # Stage A: try alloc for waiting_for_blocks entries.
         for req_id, state in list(
             self._overlap_reload_inflight.items()
         ):
@@ -1057,12 +1036,9 @@ class EngineCore:
                 kv_blocks = None
 
             if kv_blocks is None:
-                # KV pool doesn't have enough free blocks. Wait for
-                # other reqs to finish/free.
                 state["steps_waited"] += 1
                 continue
 
-            # Got blocks. Extract block_ids for the reload target.
             try:
                 block_ids_tuple = kv_cache_mgr.get_block_ids(req_id)
             except Exception:
@@ -1080,7 +1056,11 @@ class EngineCore:
                 state["steps_waited"] += 1
                 continue
 
-            # Start async reload to the freshly-allocated blocks.
+            # NOTE: V3 debug logging removed for race-reproduction
+            # testing. Even a single light-weight log line here adds
+            # enough latency to potentially mask the race we are trying
+            # to reproduce. Restore log if needed for diagnosis.
+
             try:
                 results = self.collective_rpc(
                     "restore_kv_blocks",
@@ -1097,26 +1077,26 @@ class EngineCore:
                 tokens_started = 0
 
             if tokens_started <= 0:
-                # Reload couldn't start. Free the blocks we just alloc'd
-                # and fall back to vLLM standard reprefill path.
+                # No checkpoint or RPC failed. Drop the alloc'd blocks
+                # and fall back to full reprefill: vLLM admit will see
+                # PREEMPTED with num_computed_tokens=0 and treat it
+                # like a vanilla preempt resume.
                 try:
                     kv_cache_mgr.free(request)
                 except Exception:
                     pass
                 request.num_computed_tokens = 0
-                base.waiting.prepend_request(request)
+                request.status = RequestStatus.PREEMPTED
                 logger.info(
                     "FT overlap V3: %s reload skipped (no ckpt); "
-                    "freed alloc'd blocks and fell back to reprefill",
+                    "fell back to full reprefill",
                     req_id,
                 )
                 del self._overlap_reload_inflight[req_id]
                 continue
 
-            # Transition to reloading state.
             state["state"] = "reloading"
             state["tokens_started"] = tokens_started
-            state["block_ids"] = target_block_ids
             state["reload_started_step"] = state.get(
                 "steps_waited", 0
             )
@@ -1127,7 +1107,7 @@ class EngineCore:
                 state.get("steps_waited", 0),
             )
 
-        # ── Stage C: query reloading entries ──────────────────────
+        # Stage B: query reloading entries; flip status when done.
         for req_id, state in list(
             self._overlap_reload_inflight.items()
         ):
@@ -1152,12 +1132,14 @@ class EngineCore:
             if not done:
                 continue
 
-            # Reload done. Patch request state, prepend to vLLM waiting.
+            # Reload done — patch request state and flip status.
+            # vLLM waiting loop will admit it via the resumed path
+            # next iteration.
             request = state["request"]
             tokens_started = state["tokens_started"]
             request.num_computed_tokens = tokens_started
             request.num_checkpointed_tokens = tokens_started
-            base.waiting.prepend_request(request)
+            request.status = RequestStatus.PREEMPTED
             logger.info(
                 "FT overlap V3: %s done — alloc waited %d step(s), "
                 "reload took %d step(s), %d tokens restored",

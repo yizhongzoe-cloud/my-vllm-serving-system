@@ -1154,6 +1154,41 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+        # FT_V3_DEBUG: validate input_batch.block_table contents — find
+        # any OOB block_ids before they reach attention kernel and crash
+        # GPU. Only runs when FT_V3_DEBUG=1.
+        if os.environ.get("FT_V3_DEBUG") == "1":
+            try:
+                kv_shape = self.kv_caches[0].shape if self.kv_caches else None
+                num_gpu_blocks = int(kv_shape[1]) if kv_shape else -1
+                for grp_idx, bt in enumerate(self.input_batch.block_table.block_tables):
+                    bt_np = bt.block_table.np
+                    nbpr = bt.num_blocks_per_row
+                    for row_idx in range(self.input_batch.num_reqs):
+                        n = int(nbpr[row_idx])
+                        if n <= 0:
+                            continue
+                        row = bt_np[row_idx, :n]
+                        bad_mask = (row < 0) | (row >= num_gpu_blocks)
+                        if bool(bad_mask.any()):
+                            req_id_at_row = None
+                            for rid, ri in self.input_batch.req_id_to_index.items():
+                                if ri == row_idx:
+                                    req_id_at_row = rid
+                                    break
+                            bad_positions = [int(p) for p in bad_mask.nonzero()[0][:10]]
+                            bad_values = [int(row[p]) for p in bad_positions]
+                            logger.error(
+                                "FT_V3_DEBUG: OOB block_id detected "
+                                "grp=%d row=%d req=%s n_blocks=%d "
+                                "num_gpu_blocks=%d "
+                                "bad_positions=%s bad_values=%s",
+                                grp_idx, row_idx, req_id_at_row, n,
+                                num_gpu_blocks, bad_positions, bad_values,
+                            )
+            except Exception:
+                logger.exception("FT_V3_DEBUG: block_table scan crashed")
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:

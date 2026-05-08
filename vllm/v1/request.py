@@ -480,6 +480,10 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     WAITING_FOR_STREAMING_REQ = enum.auto()
+    # FT V3 capacity-preempt path: req sits in waiting queue with this
+    # status while engine asynchronously alloc'd blocks + reloads KV
+    # from host checkpoint. Engine flips to PREEMPTED once reload done.
+    WAITING_FOR_RELOAD = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
