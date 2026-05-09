@@ -403,6 +403,10 @@ class EngineCore:
         # waiting loop will admit it this step.
         self._process_overlap_reload_queue()
 
+        # SLO retain: tick down retain windows; expired ones are put
+        # back in waiting queue for the next admit.
+        self._process_slo_retained_queue()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -431,6 +435,54 @@ class EngineCore:
         self._save_checkpoints_if_needed()
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _process_slo_retained_queue(self) -> None:
+        """SLO retain path: tick down per-request retain_steps and drain
+        expired entries back into vLLM waiting queue.
+
+        Called every step BEFORE scheduler.schedule(). For each
+        retained request:
+          - Decrement retain_steps_remaining
+          - When it reaches 0, prepend the request to vLLM waiting
+            queue. Standard admit picks it up next step.
+          - The request's blocks were never freed and KV is intact,
+            so vLLM admit sees existing blocks + non-zero
+            num_computed_tokens, and forward continues from where it
+            stopped (zero reload cost).
+
+        Defensive: between preempt and resume, the request may have
+        transitioned to a FINISHED_* status (e.g. client disconnect,
+        request_timeout, abort). Re-adding such a request to the
+        waiting queue causes vLLM's schedule() to raise
+        "Invalid request status: FINISHED_*". Skip those.
+        """
+        if os.environ.get("SLO_PRIORITY_PREEMPT") != "1":
+            return
+        base = self.scheduler
+        retained = getattr(base, "slo_preempted_retained", None)
+        if not retained:
+            return
+        new_retained: list[tuple] = []
+        for request, steps_remaining in retained:
+            steps_remaining -= 1
+            if request.status != RequestStatus.PREEMPTED:
+                logger.info(
+                    "FT SLO retain: %s dropped from retain queue "
+                    "(status=%s, no resume)",
+                    request.request_id, request.status,
+                )
+                continue
+            if steps_remaining <= 0:
+                base.waiting.prepend_request(request)
+                logger.info(
+                    "FT SLO retain: %s resumed (KV preserved on "
+                    "GPU, num_computed_tokens=%d)",
+                    request.request_id,
+                    getattr(request, "num_computed_tokens", 0),
+                )
+            else:
+                new_retained.append((request, steps_remaining))
+        base.slo_preempted_retained = new_retained
 
     def _process_overlap_reload_queue(self) -> None:
         """V3 capacity-preempt reload driver.
@@ -710,6 +762,9 @@ class EngineCore:
         # V3 capacity-preempt: drive in-flight reload state machine
         # before schedule() (same hook as the non-batched step()).
         self._process_overlap_reload_queue()
+
+        # SLO retain: tick down retain windows.
+        self._process_slo_retained_queue()
 
         batch_queue = self.batch_queue
         assert batch_queue is not None

@@ -1,8 +1,80 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import math
 
 from vllm.v1.request import Request, RequestStatus
+
+
+def compute_slo_budgets(
+    request: Request, now_sec: float
+) -> dict[str, float]:
+    """Compute remaining SLO budgets (ms) for a request at time `now_sec`.
+
+    Returns dict with keys: ttft_ms, tpot_ms, gap_ms, min_ms, stage.
+    Negative budget means already in violation. Inapplicable budgets are inf.
+
+    Stage:
+      "waiting"  — not yet started (no GPU work done; ttft budget applies)
+      "prefill"  — has GPU work but no first output token yet
+      "decode"   — already produced first output token (tpot applies)
+      "recovery" — fault-affected, post-fault, awaiting first new token (gap applies)
+
+    Used by SLO priority preempt picker — preempt running req with
+    largest min_ms (most slack) when waiting head's min_ms is most
+    negative (most-violating).
+    """
+    # ttft budget: from arrival until first output token expected
+    if request.num_output_tokens == 0:
+        elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
+        if request.ttft_slo_ms is not None:
+            ttft_ms = request.ttft_slo_ms - elapsed_ms
+        else:
+            ttft_ms = math.inf
+    else:
+        ttft_ms = math.inf  # already passed first token
+
+    # tpot budget: average TPOT across decoded tokens vs SLO budget
+    if request.num_output_tokens > 0 and request.tpot_slo_ms is not None:
+        decode_elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
+        avg_tpot_ms = decode_elapsed_ms / max(1, request.num_output_tokens)
+        # Budget = how much slack before next-token must come
+        tpot_ms = request.tpot_slo_ms - avg_tpot_ms
+    else:
+        tpot_ms = math.inf
+
+    # gap budget: only for fault-rerouted reqs (recovery path)
+    if (
+        getattr(request, "is_rerouted", False)
+        and request.failure_gap_slo_ms is not None
+        and request.num_output_tokens == 0
+    ):
+        elapsed_since_reroute_ms = max(
+            0.0, (now_sec - request.arrival_time) * 1000.0
+        )
+        gap_ms = request.failure_gap_slo_ms - elapsed_since_reroute_ms
+    else:
+        gap_ms = math.inf
+
+    # Determine stage
+    if request.num_output_tokens > 0:
+        stage = "decode"
+    elif getattr(request, "is_rerouted", False):
+        stage = "recovery"
+    elif request.num_computed_tokens > 0:
+        stage = "prefill"
+    else:
+        stage = "waiting"
+
+    min_ms = min(ttft_ms, tpot_ms, gap_ms)
+
+    return {
+        "ttft_ms": ttft_ms,
+        "tpot_ms": tpot_ms,
+        "gap_ms": gap_ms,
+        "min_ms": min_ms,
+        "stage": stage,
+    }
 
 
 def remove_all(lst: list, items_to_remove: set) -> list:

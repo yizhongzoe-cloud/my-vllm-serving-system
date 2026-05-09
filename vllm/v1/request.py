@@ -74,12 +74,23 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        ttft_slo_ms: float | None = None,
+        tpot_slo_ms: float | None = None,
+        failure_gap_slo_ms: float | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
+
+        # SLO-related fields used by SLO priority preempt picker via
+        # compute_slo_budgets(). Default None means no SLO constraint
+        # (compute_slo_budgets returns inf budget for that dimension,
+        # so the picker won't fire).
+        self.ttft_slo_ms = ttft_slo_ms
+        self.tpot_slo_ms = tpot_slo_ms
+        self.failure_gap_slo_ms = failure_gap_slo_ms
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
@@ -209,6 +220,9 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            ttft_slo_ms=request.ttft_slo_ms,
+            tpot_slo_ms=request.tpot_slo_ms,
+            failure_gap_slo_ms=request.failure_gap_slo_ms,
         )
 
     def append_output_token_ids(
