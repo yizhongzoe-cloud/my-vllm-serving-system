@@ -610,6 +610,23 @@ class Worker(WorkerBase):
             return True
         return fn(request_id, steps_waited)
 
+    def register_rerouted_request(
+        self,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params,
+        num_computed_tokens: int,
+    ) -> bool:
+        """Cross-engine reroute: pre-register the request in the model
+        runner's CachedRequestState dict before its first scheduling.
+        """
+        fn = getattr(self.model_runner, "register_rerouted_request", None)
+        if not callable(fn):
+            raise NotImplementedError(
+                "register_rerouted_request not supported by this model runner"
+            )
+        return fn(req_id, prompt_token_ids, sampling_params, num_computed_tokens)
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.

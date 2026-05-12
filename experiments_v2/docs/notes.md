@@ -344,12 +344,10 @@ client → Router 进程 (CPU, 1 个)
 | **请求属性（user 传入）** | | |
 | `S_TTFT(r)` | 这个请求的 TTFT SLO 阈值（毫秒） | sampling_params.extra_args |
 | `S_TPOT(r)` | 这个请求的 TPOT SLO 阈值（毫秒） | sampling_params.extra_args |
-| `S_failure_gap(r)` | rerouted 请求的 failover-gap SLO（毫秒） | sampling_params.extra_args |
 | `arrival_time(r)` | 请求到达系统的时间戳 | router 记录 |
 | `is_rerouted(r)` | 是否是从死掉的 engine reroute 过来的 | router 派发时标记 |
 | **运行时测量** | | |
 | `e(r, t) = t − arrival_time(r)` | 自到达起经过的时间 | runtime |
-| `e_since_reroute(r, t)` | 自被 reroute 起经过的时间（仅 rerouted req） | runtime |
 | `num_output_tokens(r, t)` | 已生成的 output token 数 | vllm Request |
 | `decode_elapsed(r, t)` | 自第一个 token 出来后过了多久 | runtime |
 | `avg_TPOT(r, t) = decode_elapsed / num_output_tokens` | 至今平均 token 间隔 | runtime |
@@ -364,8 +362,8 @@ client → Router 进程 (CPU, 1 个)
 | `preempt ∈ {0,1}` | 这一步是否真踢 victim | engine picker |
 | `target_engine` | router 把请求派给哪个 engine | router |
 | **系统常数（可调参数）** | | |
-| `δ` | hysteresis 阈值，差距大于 δ 才踢人（防抖） | absolute 500ms 起步，paper ablate |
-| `cooldown` | 一个 req 被踢之后多久内不能再被踢（防抖） | ≈ 2s |
+| `δ` | hysteresis 阈值，差距大于 δ 才踢人（防抖） | **1000ms 起步（后续 sweep 调）** |
+| `cooldown` | 一个 req 被踢之后多久内不能再被踢（防抖） | **5s 起步（后续 sweep 调）** |
 | **硬件容量（vllm 底层管，scheduler 不显式建模）** | | |
 | `M_kv` | GPU KV pool 容量（block 数） | vllm 启动算 |
 | `kv_blocks(r)` | 请求当前占多少 KV block | vllm |
@@ -380,7 +378,7 @@ client → Router 进程 (CPU, 1 个)
 ---
 
 **目标函数**:
-`max Σ_r SLO_met(r) · output_tokens(r) / time` —— 系统级 SLO-达标 goodput（DistServe 风格）。`SLO_met(r) = 1` iff `TTFT(r) ≤ S_TTFT(r)` 且 `TPOT(r) ≤ S_TPOT(r)`（rerouted req 还要 `gap(r) ≤ S_failure_gap(r)`）。
+`max Σ_r SLO_met(r) · output_tokens(r) / time` —— 系统级 SLO-达标 goodput（DistServe 风格）。`SLO_met(r) = 1` iff `TTFT(r) ≤ S_TTFT(r)` 且 `TPOT(r) ≤ S_TPOT(r)`。Rerouted req 用同样的 TTFT/TPOT SLO（不引入 disruption-specific 的 SLO 阈值；disruption 影响通过 `failover_gap_p95` 这个测量量呈现）。
 
 **核心公式 (slack)** —— 两层共用，**分阶段定义**：
 
@@ -392,12 +390,7 @@ client → Router 进程 (CPU, 1 个)
     ttft_slack = +∞                         // first token 已出，TTFT 自动 satisfy
     tpot_slack = S_TPOT(r) − avg_TPOT(r,t)
 
-若 is_rerouted(r):
-    gap_slack = S_failure_gap(r) − e_since_reroute(r,t)
-否则:
-    gap_slack = +∞
-
-slack(r, t) = min(ttft_slack, tpot_slack, gap_slack)
+slack(r, t) = min(ttft_slack, tpot_slack)
 ```
 
 不分阶段会出 bug：first token 出来后 `S_TTFT − elapsed` 一直变负数（永远超时），picker 会以为这个 req 最急。所以 TTFT 出 first token 之后**从 min 里排除**（设 +∞）。
@@ -405,9 +398,28 @@ slack(r, t) = min(ttft_slack, tpot_slack, gap_slack)
 **决策变量**:
 
 Router 端（每个新请求到达 + engine 失联事件）：
-- `target_engine` —— 派发给哪个 engine。读 `/dev/shm/vllm_ft_engine_status/*.json`，选 `alive==true` 且 `running_count + waiting_count` 最小的（也可以加 `kv_usage` 权重，先做最简单的）
-- 健康检测: 读 status 文件的 `ts`，超过 N 秒没更新 → 标 dead
-- `reroute_target_engine` —— engine 失联时，找它所有 in-flight req（从 `/dev/shm/vllm_ft_req_map/*` 反查），用 internal_req_id 重发给某个 alive engine
+- `target_engine` —— 派发给哪个 engine。**分层 tuple 比较**：
+
+  ```
+  load_score(engine) = (
+      in_flight_count,   ← 主：router 自己派给这个 engine 还没回的请求数（实时，同进程 dict）
+      kv_usage,          ← tie-breaker 1：shm 报告的 KV 占用率，低优先
+      waiting,           ← tie-breaker 2：shm 报告的 engine 内部 waiting 数，低优先
+  )
+  pick = min(alive_engines, key=load_score)
+  ```
+
+  - **in_flight 为主**：router 自己派出去还没收响应的请求数，实时反映"engine 上有多少 router 派的活"。不能只用 shm 数据，因为 shm 滞后 200ms，并发 dispatch 时会全派给一个 engine（Test 3 一开始就撞过这个 bug）
+  - **shm 数据当 tie-breaker**：当 in_flight 相等时（比如两个 engine 都是 5 个 req 在跑），shm 提供细节区分 — 哪个 engine 的 KV 内存更紧、哪个内部排队更多。这正是 shm running/waiting/kv_usage 字段不可替代的价值（in_flight 推不出这些 internal state）
+
+- 健康检测: 读 status 文件的 `ts`，超过 2s 没更新 → 标 dead。这是 shm 真正不可替代的功能（in_flight 推不出 engine alive）
+- `reroute_target_engine` —— engine 失联时，找它所有 in-flight req（router 自己的 in_flight 表 + `/dev/shm/vllm_ft_req_map/<router_req_id>` 拿 internal_req_id），用 internal_req_id 重发给某个 alive engine
+
+**实现踩坑（值得记）**:
+
+- **vllm OpenAI handler 会 mangle `X-Request-Id` 加 `cmpl-...-0` 前后缀**，router 没法预测这种 mangling。所以 router 不用 X-Request-Id 当 dispatch 控制 id，改用 `vllm_xargs.router_req_id`（一个 opaque uuid，router 自己生成 + engine 端透传到 Request.router_req_id）。`req_map` shm 文件名用 `router_req_id`（router 知道这个值），不用 external_req_id。
+
+- **engine 写 status 必须用独立 daemon thread**，不能 piggyback 在 `step()` 里。理由：vllm 的 EngineCore.run_busy_loop 在 idle 时阻塞在 `input_queue.get()`，**不调 step()**。如果 status 写在 step() 里，engine 一闲下来就停止心跳，router 会误判 dead。当前实现：daemon thread 每 200ms 强制写一次 status（FT_STATUS_WRITE_INTERVAL_MS 可调）。
 
 Engine 端（每次 `schedule()`）：
 - `head = argmin_{r ∈ waiting} slack(r)` —— 队列里最急的，下一个上
@@ -417,13 +429,13 @@ Engine 端（每次 `schedule()`）：
 
 **约束**:
 - per-req SLO 软约束（违反不会 crash 但算 SLO_met=0）：
-  - `TTFT(r) ≤ S_TTFT(r)`，`TPOT(r) ≤ S_TPOT(r)`，rerouted 加 `gap(r) ≤ S_failure_gap(r)`
+  - `TTFT(r) ≤ S_TTFT(r)`，`TPOT(r) ≤ S_TPOT(r)`（rerouted req 同样用这两个 SLO，不另设阈值）
 - KV pool 硬约束: `Σ_{r ∈ running} kv_blocks(r) ≤ M_kv`
 - **无 admission 约束**：所有请求都入系统（不像 QLM 用 backpressure 拒、不像 Scorpio 用 TTFT guard 拒）
 - **踢人触发条件（engine 端核心）** —— 三条都满足才踢：
-  - `slack(victim) − slack(head) > δ + replay_cost(victim)`（hysteresis，δ ≈ 500ms 防 slack 接近时抖动；加上 replay_cost 才能真正算"踢了划不划算"）
+  - `slack(victim) − slack(head) > δ + replay_cost(victim)`（hysteresis，δ ≈ 1000ms 起步，paper ablate；加上 replay_cost 才能真正算"踢了划不划算"）
   - `num_checkpointed_tokens(victim) > 0`（必须有 checkpoint 兜底，否则降级走 vanilla preempt = recompute）
-  - `now − last_preempted_at(victim) > cooldown`（cooldown ≈ 2s，防同一个 req 被反复踢）
+  - `now − last_preempted_at(victim) > cooldown`（cooldown ≈ 5s 起步，防同一个 req 被反复踢）
 - shm publish 一致性: `published_blocks ≤ stable_full_blocks`（不 publish 还没稳的 block，避免 reader 读半成品）
 - Cross-engine restore 前提: shm `latest_rank0` + manifest + chunk 三件套都 visible（atomic write 保证）
 
@@ -520,7 +532,7 @@ paper 措辞：
 要把"两个东西放一起"升级成"两个东西必须放一起"，思路上要加一个机制 × 策略真正耦合的点。几个方向：
 
 Checkpoint cadence 跟 slack 联动：紧 SLO 的请求 checkpoint 更频繁（preempt 不丢工作），松 SLO 的请求 checkpoint 稀疏（省 PCIe）。这样 mechanism 直接被 policy 驱动
-Disruption-aware slack 计算：rerouted 请求的 slack 不只看 TTFT/TPOT，要加上 "recovery gap"（你 utils.py 里已经有 failure_gap_slo_ms，但只在 stage 判断里用，没在 scheduling 决策里用），让 disruption-recovery 路径在 SLO 优先级上有特殊地位
+Disruption-aware slack 计算：rerouted 请求在 scheduler 优先级上让位（比如把它当成 "TTFT 已经烧掉一截"，等效 ttft_slack 起步就是负的一个 disruption penalty），让 reroute 后的请求在 SLO 优先级上优先恢复。这条不需要新 SLO 阈值，只是在 slack 公式里对 is_rerouted 加一项 penalty。
 跨 engine 的 SLO scheduling：当一台 engine 接收 rerouted 请求时，本地正在跑的低 slack 请求要不要主动让位 —— 一个跨 engine 的 slack 协调
 任意加一个就能从"组合"变成"协同"，故事质感能提一档。有了协同点，SoCC / EuroSys 的成功率会显著高，但还到不了顶会。
 

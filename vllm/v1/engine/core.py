@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import queue
 import signal
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -213,6 +215,62 @@ class EngineCore:
         # Pause state for "keep" mode - freezes requests in queue.
         self._scheduler_paused = False
 
+        # ── Router-engine shm bus (disruption / SLO scheduling paper) ──
+        # When FT_ROUTER_SHM_BUS=1, this engine periodically writes its
+        # status to /dev/shm/vllm_ft_engine_status/engine_<id>.json so a
+        # CPU-side router process can dispatch by reading these files,
+        # without HTTP polling. The same engine also writes a per-request
+        # user→internal id mapping to /dev/shm/vllm_ft_req_map/<user_id>
+        # so the router can reroute by internal_req_id (which is what
+        # KV checkpoint shm directories are keyed on) when an engine dies.
+        self._ft_engine_id = int(os.environ.get("VLLM_FT_ENGINE_ID", "0"))
+        self._ft_router_shm_bus = (
+            os.environ.get("FT_ROUTER_SHM_BUS") == "1"
+        )
+        self._ft_status_dir = Path("/dev/shm/vllm_ft_engine_status")
+        self._ft_req_map_dir = Path("/dev/shm/vllm_ft_req_map")
+        self._ft_status_path = (
+            self._ft_status_dir / f"engine_{self._ft_engine_id}.json"
+        )
+        # Status write cadence (milliseconds). Independent of vllm step
+        # frequency since we write from a background thread (see below).
+        self._ft_status_write_interval_s = (
+            float(os.environ.get("FT_STATUS_WRITE_INTERVAL_MS", "200")) / 1000.0
+        )
+        if self._ft_router_shm_bus:
+            try:
+                self._ft_status_dir.mkdir(parents=True, exist_ok=True)
+                self._ft_req_map_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                logger.exception(
+                    "FT_ROUTER_SHM_BUS: failed to create shm dirs %s / %s",
+                    self._ft_status_dir, self._ft_req_map_dir,
+                )
+            # Background writer thread. We can't piggyback on step()
+            # because step() doesn't run when the engine is idle
+            # (input_queue.get() blocks); router would then see no
+            # status updates from a live idle engine and mark it dead.
+            self._ft_status_writer_stop = threading.Event()
+
+            def _writer_loop():
+                while not self._ft_status_writer_stop.is_set():
+                    try:
+                        self._ft_write_engine_status()
+                    except Exception:
+                        logger.exception(
+                            "FT_ROUTER_SHM_BUS: status writer iteration failed"
+                        )
+                    self._ft_status_writer_stop.wait(
+                        self._ft_status_write_interval_s
+                    )
+
+            self._ft_status_writer_thread = threading.Thread(
+                target=_writer_loop,
+                daemon=True,
+                name="ft_router_shm_status_writer",
+            )
+            self._ft_status_writer_thread.start()
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -297,6 +355,50 @@ class EngineCore:
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
+        # Router → engine plumbing: lift router-supplied control fields out
+        # of sampling_params.extra_args into first-class Request attributes
+        # so the scheduler/picker can read them directly. The router (or any
+        # OpenAI client) passes these via `vllm_xargs` on the HTTP request,
+        # which vllm's OpenAI handler routes to sampling_params.extra_args.
+        if (
+            request.sampling_params is not None
+            and request.sampling_params.extra_args
+        ):
+            ea = request.sampling_params.extra_args
+            if "is_rerouted" in ea:
+                request.is_rerouted = bool(ea["is_rerouted"])
+            if "num_checkpointed_tokens" in ea:
+                request.num_checkpointed_tokens = int(
+                    ea["num_checkpointed_tokens"]
+                )
+            if "original_internal_req_id" in ea:
+                request.original_internal_req_id = str(
+                    ea["original_internal_req_id"]
+                )
+            if "router_req_id" in ea:
+                request.router_req_id = str(ea["router_req_id"])
+            for k in ("ttft_slo_ms", "tpot_slo_ms"):
+                if k in ea:
+                    setattr(request, k, float(ea[k]))
+            if (
+                request.router_req_id
+                or request.is_rerouted
+                or request.ttft_slo_ms is not None
+            ):
+                # DEBUG level: hot path, every router-mediated request hits
+                # this. Enable with VLLM_LOGGING_LEVEL=DEBUG when testing
+                # wire-up; default INFO keeps it out of paper-experiment logs.
+                logger.debug(
+                    "FT_ROUTER_SHM_BUS: request %s control fields lifted "
+                    "from extra_args — ttft_slo_ms=%s tpot_slo_ms=%s "
+                    "is_rerouted=%s router_req_id=%s "
+                    "original_internal_req_id=%s num_checkpointed_tokens=%s",
+                    request.request_id, request.ttft_slo_ms,
+                    request.tpot_slo_ms, request.is_rerouted,
+                    request.router_req_id, request.original_internal_req_id,
+                    request.num_checkpointed_tokens,
+                )
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
@@ -317,6 +419,129 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
+
+        # Cross-engine reroute: if router marked this request as rerouted
+        # and supplied an original_internal_req_id, divert it into the V3
+        # reload state machine instead of letting it run as a fresh prefill.
+        # The state machine will allocate fresh blocks on this engine and
+        # restore_kv_blocks from /dev/shm (keyed on original_internal_req_id).
+        #
+        # Simplification: clamp num_checkpointed_tokens to the prompt
+        # boundary, block-aligned, with at least 1 token left to prefill.
+        # Rationale: KV chunks may cover prompt + partial output tokens
+        # the dead engine generated, but we don't ship the output token
+        # ids cross-engine — only the KV is in shm. The new engine can't
+        # continue decode from a token id it doesn't know, so we discard
+        # the partial-output KV and re-decode from prompt end. Prefill is
+        # the expensive part for long contexts; re-decoding a handful of
+        # output tokens is negligible.
+        if (
+            request.is_rerouted
+            and request.original_internal_req_id is not None
+            and request.num_checkpointed_tokens > 0
+        ):
+            prompt_tokens = len(request.prompt_token_ids or [])
+            block_size = self.vllm_config.cache_config.block_size
+            # Largest block-aligned size that leaves >= 1 token to forward.
+            max_safe = ((prompt_tokens - 1) // block_size) * block_size
+            safe_ckpt = min(request.num_checkpointed_tokens, max_safe)
+            if safe_ckpt > 0:
+                request.num_checkpointed_tokens = safe_ckpt
+                request.status = RequestStatus.WAITING_FOR_RELOAD
+                if not hasattr(
+                    self.scheduler, "slo_preempted_for_overlap_reload"
+                ):
+                    self.scheduler.slo_preempted_for_overlap_reload = []
+                self.scheduler.slo_preempted_for_overlap_reload.append(
+                    (request, request.num_checkpointed_tokens)
+                )
+                logger.info(
+                    "Cross-engine reroute: %s diverted to V3 reload state "
+                    "machine (original_internal_req_id=%s, ckpt_tokens=%d, "
+                    "prompt_tokens=%d)",
+                    request.request_id,
+                    request.original_internal_req_id,
+                    request.num_checkpointed_tokens,
+                    prompt_tokens,
+                )
+            else:
+                logger.info(
+                    "Cross-engine reroute: %s prompt too short for "
+                    "checkpoint reuse (prompt_tokens=%d, block_size=%d); "
+                    "falling back to vanilla prefill",
+                    request.request_id, prompt_tokens, block_size,
+                )
+
+        # Router-engine shm bus: publish router_req_id → internal_req_id
+        # mapping so the router can reroute this request when this engine
+        # dies. Keyed on router_req_id (an opaque id the router controls),
+        # not external_req_id (which vllm's OpenAI handler mangles with
+        # "cmpl-..." / "-0" prefixes the router doesn't know about).
+        if self._ft_router_shm_bus and request.router_req_id:
+            self._ft_write_req_map(request)
+
+    def _ft_write_req_map(self, request: "Request") -> None:
+        """Atomically write a router_req_id → internal_req_id mapping file
+        at /dev/shm/vllm_ft_req_map/<router_req_id>. Caller already
+        guaranteed request.router_req_id is non-empty.
+        """
+        payload = json.dumps(
+            {
+                "internal_req_id": request.request_id,
+                "external_req_id": request.external_req_id,
+                "engine_id": self._ft_engine_id,
+                "start_ts": time.time(),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        final_path = self._ft_req_map_dir / request.router_req_id
+        tmp_path = Path(f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}")
+        try:
+            tmp_path.write_bytes(payload)
+            os.replace(tmp_path, final_path)
+        except OSError:
+            logger.exception(
+                "FT_ROUTER_SHM_BUS: failed to write req_map for %s",
+                request.router_req_id,
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _ft_write_engine_status(self) -> None:
+        """Atomically write current engine status to
+        /dev/shm/vllm_ft_engine_status/engine_<id>.json. Fields:
+            engine_id, alive, running, waiting, kv_usage, ts.
+        Called every FT_STATUS_WRITE_EVERY_N_STEPS engine steps when
+        FT_ROUTER_SHM_BUS=1.
+        """
+        payload = json.dumps(
+            {
+                "engine_id": self._ft_engine_id,
+                "alive": True,
+                "running": len(self.scheduler.running),
+                "waiting": len(self.scheduler.waiting),
+                "kv_usage": float(self.scheduler.kv_cache_manager.usage),
+                "ts": time.time(),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        tmp_path = Path(
+            f"{self._ft_status_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        )
+        try:
+            tmp_path.write_bytes(payload)
+            os.replace(tmp_path, self._ft_status_path)
+        except OSError:
+            logger.exception(
+                "FT_ROUTER_SHM_BUS: failed to write engine status to %s",
+                self._ft_status_path,
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -575,18 +800,28 @@ class EngineCore:
                 state["steps_waited"] += 1
                 continue
 
+            # Cross-engine reroute: if this is a request that came from
+            # another (dead) engine, its checkpoint shm dir is named by
+            # the *original* engine's internal_req_id, not by req_id
+            # (which is the local UUID we just assigned). Use that as
+            # the lookup key for restore_kv_blocks; same-engine V3 falls
+            # through to request.request_id == req_id.
+            restore_req_id = (
+                request.original_internal_req_id or req_id
+            )
             try:
                 results = self.collective_rpc(
                     "restore_kv_blocks",
-                    args=(req_id, target_block_ids, False),  # sync=False
+                    args=(restore_req_id, target_block_ids, False),  # sync=False
                 )
                 tokens_started = (
                     results[0] if results and results[0] else 0
                 )
             except Exception:
                 logger.exception(
-                    "FT overlap V3: restore RPC failed for %s",
-                    req_id,
+                    "FT overlap V3: restore RPC failed for %s "
+                    "(restore_req_id=%s)",
+                    req_id, restore_req_id,
                 )
                 tokens_started = 0
 
@@ -653,6 +888,18 @@ class EngineCore:
             tokens_started = state["tokens_started"]
             request.num_computed_tokens = tokens_started
             request.num_checkpointed_tokens = tokens_started
+
+            # Cross-engine reroute: the request is brand-new to this
+            # engine's model_runner, so the resumed-from-preempt path
+            # (scheduled_cached_reqs) would KeyError on lookup. Pre-
+            # register it in model_runner.requests so the lookup works.
+            if request.is_rerouted:
+                self.collective_rpc(
+                    "register_rerouted_request",
+                    args=(req_id, request.prompt_token_ids,
+                          request.sampling_params, tokens_started),
+                )
+
             request.status = RequestStatus.PREEMPTED
             logger.info(
                 "FT overlap V3: %s done — alloc waited %d step(s), "

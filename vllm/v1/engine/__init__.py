@@ -88,7 +88,6 @@ class EngineCoreRequest(
     # via sampling_params.extra_args (or left None).
     ttft_slo_ms: float | None = None
     tpot_slo_ms: float | None = None
-    failure_gap_slo_ms: float | None = None
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned

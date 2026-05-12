@@ -92,7 +92,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingType
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
@@ -7611,6 +7611,43 @@ class GPUModelRunner(
                     request_id,
                 )
                 return True
+        return True
+
+    def register_rerouted_request(
+        self,
+        req_id: str,
+        prompt_token_ids: list[int],
+        sampling_params: SamplingParams,
+        num_computed_tokens: int,
+    ) -> bool:
+        """Pre-register a cross-engine rerouted request in self.requests
+        so the resumed-from-preempt path (scheduled_cached_reqs) can
+        find it. Intra-engine V3 reload doesn't need this — the req was
+        already in self.requests from its first scheduling — but cross-
+        engine reroute creates a brand-new req on this engine that the
+        model_runner has never seen.
+
+        block_ids are placeholder (empty per-group lists); the scheduler's
+        resumed admit path overwrites them with `req_state.block_ids =
+        new_block_ids` before the first step uses them.
+        """
+        if req_id in self.requests:
+            return True
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        block_ids: tuple[list[int], ...] = tuple([] for _ in range(num_groups))
+        self.requests[req_id] = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=prompt_token_ids,
+            prompt_embeds=None,
+            mm_features=[],
+            sampling_params=sampling_params,
+            pooling_params=None,
+            generator=None,
+            block_ids=block_ids,
+            num_computed_tokens=num_computed_tokens,
+            output_token_ids=[],
+            lora_request=None,
+        )
         return True
 
 

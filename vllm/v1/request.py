@@ -76,9 +76,14 @@ class Request:
         reasoning_ended: bool | None = None,
         ttft_slo_ms: float | None = None,
         tpot_slo_ms: float | None = None,
-        failure_gap_slo_ms: float | None = None,
+        external_req_id: str | None = None,
     ) -> None:
         self.request_id = request_id
+        # User-supplied request id (from X-Request-Id header or
+        # InputProcessor.assign_request_id default). Used by the
+        # router-engine shm bus to key the req_map file. None if the
+        # client did not supply one.
+        self.external_req_id = external_req_id
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
@@ -90,7 +95,6 @@ class Request:
         # so the picker won't fire).
         self.ttft_slo_ms = ttft_slo_ms
         self.tpot_slo_ms = tpot_slo_ms
-        self.failure_gap_slo_ms = failure_gap_slo_ms
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
@@ -183,6 +187,21 @@ class Request:
         # to skip rerouted reqs (they are already in a recovery flow).
         self.is_rerouted = False
 
+        # Cross-engine reroute: when a router reroutes this request from
+        # a dead engine, this is the internal_req_id the *original* engine
+        # used to name its /dev/shm checkpoint directory. The V3 reload
+        # state machine uses this id (instead of self.request_id) to look
+        # up the checkpoint, since this engine assigned its own new
+        # request_id with a fresh UUID. None for same-engine V3 preempt.
+        self.original_internal_req_id: str | None = None
+
+        # Router-supplied opaque id. Used by the engine to key
+        # /dev/shm/vllm_ft_req_map/<router_req_id>. Decouples the req_map
+        # filename from vllm's external_req_id (which is mangled with
+        # "cmpl-...-0" by the OpenAI handler — the router doesn't know
+        # that mangling). None for non-router-mediated requests.
+        self.router_req_id: str | None = None
+
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
@@ -222,7 +241,7 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             ttft_slo_ms=request.ttft_slo_ms,
             tpot_slo_ms=request.tpot_slo_ms,
-            failure_gap_slo_ms=request.failure_gap_slo_ms,
+            external_req_id=request.external_req_id,
         )
 
     def append_output_token_ids(

@@ -1013,11 +1013,13 @@ class Scheduler(SchedulerInterface):
         Gates (env-tunable):
           SLO_PRIORITY_PREEMPT_MIN_INTERVAL_MS (default 2000): global
             rate limit between back-to-back priority preempts.
-          SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS (default 30000):
+          SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS (default 5000):
             same victim cannot be picked twice within this window.
-          SLO_PRIORITY_PREEMPT_MIN_GAP_MS (default 3000): victim's SLO
-            slack must exceed waiting head's slack by at least this
-            much to justify the preempt.
+          SLO_PRIORITY_PREEMPT_MIN_GAP_MS (default 1000): victim's SLO
+            slack must exceed (waiting head's slack + replay_cost) by
+            at least this much to justify the preempt. replay_cost is
+            the decode-replay time the victim will pay on resume due
+            to checkpoint lag (see compute_replay_cost).
         """
         if not self.running or not self.waiting:
             return None
@@ -1049,7 +1051,10 @@ class Scheduler(SchedulerInterface):
         if getattr(head, "is_rerouted", False):
             return None
 
-        from vllm.v1.core.sched.utils import compute_slo_budgets
+        from vllm.v1.core.sched.utils import (
+            compute_replay_cost,
+            compute_slo_budgets,
+        )
         try:
             head_slack = compute_slo_budgets(head, now)["min_ms"]
         except Exception:
@@ -1060,11 +1065,11 @@ class Scheduler(SchedulerInterface):
             cooldown_ms = float(
                 os.environ.get(
                     "SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS",
-                    "30000.0",
+                    "5000.0",
                 )
             )
         except ValueError:
-            cooldown_ms = 30000.0
+            cooldown_ms = 5000.0
         history = getattr(self, "_priority_preempt_history", None)
         if history is None:
             self._priority_preempt_history = {}
@@ -1087,17 +1092,24 @@ class Scheduler(SchedulerInterface):
         # Pick loosest-SLO running req (largest slack).
         victim, victim_slack = max(candidates, key=lambda t: t[1])
 
-        # Slack gap gate: only preempt if victim is significantly looser
-        # than the waiting head.
+        # Replay cost: how many ms of decode the victim will have to
+        # re-do on resume because its checkpoint lags behind its decode
+        # head. Adds to the hysteresis threshold so we only preempt
+        # victims whose slack advantage actually exceeds the replay
+        # penalty.
+        replay_cost_ms = compute_replay_cost(victim, now)
+
+        # Slack gap gate: only preempt if victim's slack exceeds
+        # (head_slack + min_gap_ms + replay_cost_ms).
         try:
             min_gap_ms = float(
                 os.environ.get(
-                    "SLO_PRIORITY_PREEMPT_MIN_GAP_MS", "3000.0"
+                    "SLO_PRIORITY_PREEMPT_MIN_GAP_MS", "1000.0"
                 )
             )
         except ValueError:
-            min_gap_ms = 3000.0
-        if (victim_slack - head_slack) < min_gap_ms:
+            min_gap_ms = 1000.0
+        if (victim_slack - head_slack) < (min_gap_ms + replay_cost_ms):
             return None
 
         # All checks passed. Record state and return.
@@ -1108,11 +1120,13 @@ class Scheduler(SchedulerInterface):
         )
         logger.info(
             "SLO_PRIORITY_PREEMPT #%d: victim=%s (slack=%.0fms) "
-            "for waiting head=%s (slack=%.0fms), gap=%.0fms",
+            "for waiting head=%s (slack=%.0fms), gap=%.0fms, "
+            "replay_cost=%.0fms",
             self._priority_preempt_count,
             victim.request_id, victim_slack,
             head.request_id, head_slack,
             victim_slack - head_slack,
+            replay_cost_ms,
         )
         return victim
 
