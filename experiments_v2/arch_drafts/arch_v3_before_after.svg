@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 520" width="820" height="520" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker>
+    <marker id="ag2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f855a"/></marker>
+    <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker>
+  </defs>
+
+  <text x="410" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">Two pain points, two outcomes</text>
+
+  <!-- row labels -->
+  <text x="20" y="92" font-size="13" font-weight="600" fill="#742a2a">Baseline</text>
+  <text x="20" y="108" font-size="11" fill="#742a2a">(QLM, Scorpio</text>
+  <text x="20" y="122" font-size="11" fill="#742a2a">+ vanilla vLLM)</text>
+
+  <text x="20" y="312" font-size="13" font-weight="600" fill="#22543d">Ours</text>
+  <text x="20" y="328" font-size="11" fill="#22543d">(host KV ckpt</text>
+  <text x="20" y="342" font-size="11" fill="#22543d">+ slack sched)</text>
+
+  <!-- column labels -->
+  <text x="240" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="#1a202c">Engine fails mid-prefill</text>
+  <text x="600" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="#1a202c">Tight-SLO request arrives</text>
+
+  <!-- separator lines -->
+  <line x1="420" y1="64" x2="420" y2="500" stroke="#cbd5e0" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="100" y1="240" x2="820" y2="240" stroke="#cbd5e0" stroke-width="1" stroke-dasharray="3 3"/>
+
+  <!-- =================== TL: baseline + fail =================== -->
+  <g transform="translate(100,72)">
+    <rect x="0" y="0" width="280" height="44" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="140" y="20" text-anchor="middle" font-weight="600" fill="#2b4365">Engine A · R1 prefill 44k/64k tok</text>
+    <text x="140" y="36" text-anchor="middle" font-size="10" fill="#2b4365">GPU KV only, no host ckpt</text>
+    <line x1="10" y1="4" x2="270" y2="40" stroke="#c53030" stroke-width="3"/>
+    <line x1="270" y1="4" x2="10" y2="40" stroke="#c53030" stroke-width="3"/>
+
+    <text x="140" y="68" text-anchor="middle" font-size="11" fill="#c53030" font-weight="600">R1 reroutes to Engine B</text>
+
+    <rect x="40" y="80" width="200" height="44" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="140" y="98" text-anchor="middle" font-weight="600" fill="#2b4365">Engine B</text>
+    <text x="140" y="114" text-anchor="middle" font-size="10" fill="#2b4365">re-prefill R1 from scratch</text>
+
+    <text x="140" y="148" text-anchor="middle" font-size="12" fill="#c53030">↻ ~20s GPU work redone</text>
+  </g>
+
+  <!-- =================== TR: baseline + tight SLO =================== -->
+  <g transform="translate(460,72)">
+    <rect x="0" y="0" width="280" height="44" rx="6" fill="#e2d8f3" stroke="#6b46c1" stroke-width="1.5"/>
+    <text x="140" y="20" text-anchor="middle" font-weight="600" fill="#553c9a">Scheduler: R_urgent slack 0.2s</text>
+    <text x="140" y="36" text-anchor="middle" font-size="10" fill="#553c9a">won't preempt running R7 (too expensive)</text>
+
+    <rect x="0" y="56" width="280" height="44" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="140" y="74" text-anchor="middle" font-weight="600" fill="#2b4365">Engine B · R7 keeps running</text>
+    <text x="140" y="90" text-anchor="middle" font-size="10" fill="#2b4365">R_urgent queued behind</text>
+
+    <text x="140" y="124" text-anchor="middle" font-size="12" fill="#c53030">✗ R_urgent misses SLO</text>
+    <text x="140" y="146" text-anchor="middle" font-size="11" fill="#742a2a" font-style="italic">long ctx requests are "untouchable"</text>
+  </g>
+
+  <!-- =================== BL: ours + fail =================== -->
+  <g transform="translate(100,272)">
+    <rect x="0" y="0" width="280" height="44" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="140" y="20" text-anchor="middle" font-weight="600" fill="#2b4365">Engine A · R1 prefill 44k/64k tok</text>
+    <text x="140" y="36" text-anchor="middle" font-size="10" fill="#2b4365">ckpts to host every 16 tok</text>
+    <line x1="10" y1="4" x2="270" y2="40" stroke="#c53030" stroke-width="3"/>
+    <line x1="270" y1="4" x2="10" y2="40" stroke="#c53030" stroke-width="3"/>
+
+    <rect x="0" y="56" width="280" height="36" rx="6" fill="#c6e8d0" stroke="#2f855a" stroke-width="1.5"/>
+    <text x="140" y="75" text-anchor="middle" font-weight="600" font-size="11" fill="#22543d">/dev/shm  R1 KV [0..2750] survives</text>
+
+    <line x1="140" y1="92" x2="140" y2="108" stroke="#2f855a" stroke-width="1.6" marker-end="url(#ag2)"/>
+
+    <rect x="40" y="112" width="200" height="44" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="140" y="130" text-anchor="middle" font-weight="600" fill="#2b4365">Engine B reloads + continues</text>
+    <text x="140" y="146" text-anchor="middle" font-size="10" fill="#2b4365">starts at tok 44k, not 0</text>
+
+    <text x="140" y="180" text-anchor="middle" font-size="12" fill="#2f855a" font-weight="600">✓ saves ~20s re-prefill</text>
+  </g>
+
+  <!-- =================== BR: ours + tight SLO =================== -->
+  <g transform="translate(460,272)">
+    <rect x="0" y="0" width="280" height="44" rx="6" fill="#e2d8f3" stroke="#6b46c1" stroke-width="1.5"/>
+    <text x="140" y="20" text-anchor="middle" font-weight="600" fill="#553c9a">Scheduler: preempt is cheap → kick R7</text>
+    <text x="140" y="36" text-anchor="middle" font-size="10" fill="#553c9a">R_urgent (slack 0.2s) bumps R7 (slack 1.5s)</text>
+
+    <rect x="0" y="56" width="135" height="44" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="67" y="74" text-anchor="middle" font-weight="600" fill="#2b4365">Engine B</text>
+    <text x="67" y="90" text-anchor="middle" font-size="10" fill="#2b4365">runs R_urgent</text>
+
+    <rect x="145" y="56" width="135" height="44" rx="6" fill="#c6e8d0" stroke="#2f855a" stroke-width="1.5"/>
+    <text x="212" y="74" text-anchor="middle" font-weight="600" font-size="11" fill="#22543d">/dev/shm</text>
+    <text x="212" y="90" text-anchor="middle" font-size="10" fill="#22543d">R7 KV [0..2750] intact</text>
+
+    <line x1="212" y1="100" x2="212" y2="116" stroke="#2f855a" stroke-width="1.6" marker-end="url(#ag2)"/>
+
+    <rect x="80" y="120" width="200" height="36" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+    <text x="180" y="138" text-anchor="middle" font-weight="600" font-size="11" fill="#2b4365">later: R7 resumes from KV</text>
+    <text x="180" y="150" text-anchor="middle" font-size="10" fill="#2b4365">on whichever engine has room</text>
+
+    <text x="140" y="180" text-anchor="middle" font-size="12" fill="#2f855a" font-weight="600">✓ both meet SLO</text>
+  </g>
+
+  <!-- key insight callout -->
+  <rect x="100" y="460" width="640" height="50" rx="6" fill="#fef9e7" stroke="#b7791f" stroke-width="1.5"/>
+  <text x="116" y="480" font-weight="600" fill="#744210" font-size="12">Key insight</text>
+  <text x="116" y="498" font-size="11" fill="#744210">Once preempt is cheap (KV survives), the scheduler can finally make slack-based decisions on long-context requests —</text>
+  <text x="116" y="512" font-size="11" fill="#744210">recovery is a free byproduct of the same checkpoint.</text>
+</svg>

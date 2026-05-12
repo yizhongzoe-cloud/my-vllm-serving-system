@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 520" width="860" height="520" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker>
+  </defs>
+
+  <text x="430" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">Evaluation configurations · four baselines along a capability ladder</text>
+
+  <!-- ============ Row 1: config boxes ============ -->
+  <!-- box 1: Vanilla + FCFS -->
+  <rect x="20" y="58" width="180" height="68" rx="6" fill="#edf2f7" stroke="#4a5568" stroke-width="1.4"/>
+  <text x="110" y="80" text-anchor="middle" font-weight="600" fill="#1a202c">Vanilla + FCFS</text>
+  <text x="110" y="98" text-anchor="middle" font-size="10" fill="#4a5568">no checkpoint</text>
+  <text x="110" y="112" text-anchor="middle" font-size="10" fill="#4a5568">no rerouting · FCFS</text>
+
+  <!-- arrow 1 -> 2 -->
+  <line x1="204" y1="92" x2="232" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#ak)"/>
+  <text x="218" y="80" text-anchor="middle" font-size="10" fill="#1a202c" font-weight="600">+ reroute</text>
+
+  <!-- box 2: Reprefill + FCFS -->
+  <rect x="236" y="58" width="180" height="68" rx="6" fill="#edf2f7" stroke="#4a5568" stroke-width="1.4"/>
+  <text x="326" y="80" text-anchor="middle" font-weight="600" fill="#1a202c">Reprefill + FCFS</text>
+  <text x="326" y="98" text-anchor="middle" font-size="10" fill="#4a5568">no checkpoint</text>
+  <text x="326" y="112" text-anchor="middle" font-size="10" fill="#4a5568">reroute, redo prefill · FCFS</text>
+
+  <!-- arrow 2 -> 3 -->
+  <line x1="420" y1="92" x2="448" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#ak)"/>
+  <text x="434" y="80" text-anchor="middle" font-size="10" fill="#1a202c" font-weight="600">+ checkpoint</text>
+
+  <!-- box 3: Ckpt + FCFS -->
+  <rect x="452" y="58" width="180" height="68" rx="6" fill="#fde7c4" stroke="#c05621" stroke-width="1.4"/>
+  <text x="542" y="80" text-anchor="middle" font-weight="600" fill="#7b341e">Checkpoint + FCFS</text>
+  <text x="542" y="98" text-anchor="middle" font-size="10" fill="#7b341e">host KV ckpt + restore</text>
+  <text x="542" y="112" text-anchor="middle" font-size="10" fill="#7b341e">FCFS scheduling</text>
+
+  <!-- arrow 3 -> 4 -->
+  <line x1="636" y1="92" x2="664" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#ak)"/>
+  <text x="650" y="80" text-anchor="middle" font-size="10" fill="#1a202c" font-weight="600">+ SLO-aware</text>
+
+  <!-- box 4: Ours -->
+  <rect x="668" y="58" width="180" height="68" rx="6" fill="#c6f6d5" stroke="#2f855a" stroke-width="1.8"/>
+  <text x="758" y="80" text-anchor="middle" font-weight="700" fill="#22543d">Checkpoint + SLO-aware</text>
+  <text x="758" y="96" text-anchor="middle" font-size="10" fill="#22543d" font-style="italic">(ours)</text>
+  <text x="758" y="112" text-anchor="middle" font-size="10" fill="#22543d">ckpt + slack-priority + preempt</text>
+
+  <!-- ============ Row 2: on engine fail ============ -->
+  <text x="20" y="156" font-weight="600" font-size="12" fill="#742a2a">Scenario A · engine fails at t=350s mid-prefill</text>
+
+  <rect x="20" y="166" width="180" height="80" rx="4" fill="#fff5f5" stroke="#cbd5e0"/>
+  <text x="30" y="184" font-size="11" fill="#c53030" font-weight="600">✗ request lost</text>
+  <text x="30" y="200" font-size="11" fill="#1a202c">no recovery mechanism;</text>
+  <text x="30" y="214" font-size="11" fill="#1a202c">client must retry.</text>
+  <text x="30" y="234" font-size="10" fill="#742a2a" font-style="italic">~20s of prefill wasted</text>
+
+  <rect x="236" y="166" width="180" height="80" rx="4" fill="#fff5f5" stroke="#cbd5e0"/>
+  <text x="246" y="184" font-size="11" fill="#c53030" font-weight="600">↻ re-prefill from scratch</text>
+  <text x="246" y="200" font-size="11" fill="#1a202c">on surviving engine;</text>
+  <text x="246" y="214" font-size="11" fill="#1a202c">queues behind existing load.</text>
+  <text x="246" y="234" font-size="10" fill="#742a2a" font-style="italic">~20s redone + queue wait</text>
+
+  <rect x="452" y="166" width="180" height="80" rx="4" fill="#f0fff4" stroke="#cbd5e0"/>
+  <text x="462" y="184" font-size="11" fill="#2f855a" font-weight="600">✓ restore from host KV</text>
+  <text x="462" y="200" font-size="11" fill="#1a202c">resume mid-prefill;</text>
+  <text x="462" y="214" font-size="11" fill="#1a202c">but FCFS queues recover</text>
+  <text x="462" y="228" font-size="11" fill="#1a202c">behind low-urgency work.</text>
+  <text x="462" y="242" font-size="10" fill="#7b341e" font-style="italic">queueing delay still hurts</text>
+
+  <rect x="668" y="166" width="180" height="80" rx="4" fill="#f0fff4" stroke="#2f855a" stroke-width="1.4"/>
+  <text x="678" y="184" font-size="11" fill="#2f855a" font-weight="600">✓ restore + slack-preempt</text>
+  <text x="678" y="200" font-size="11" fill="#1a202c">recovered request enters</text>
+  <text x="678" y="214" font-size="11" fill="#1a202c">queue with tight slack;</text>
+  <text x="678" y="228" font-size="11" fill="#1a202c">preempts non-urgent work.</text>
+  <text x="678" y="242" font-size="10" fill="#22543d" font-style="italic">SLO preserved</text>
+
+  <!-- ============ Row 3: on tight SLO ============ -->
+  <text x="20" y="278" font-weight="600" font-size="12" fill="#742a2a">Scenario B · tight-TTFT request arrives during a long-context prefill</text>
+
+  <rect x="20" y="288" width="180" height="76" rx="4" fill="#fff5f5" stroke="#cbd5e0"/>
+  <text x="30" y="306" font-size="11" fill="#c53030" font-weight="600">✗ new request waits</text>
+  <text x="30" y="322" font-size="11" fill="#1a202c">FCFS lets running</text>
+  <text x="30" y="336" font-size="11" fill="#1a202c">long-ctx finish first.</text>
+  <text x="30" y="356" font-size="10" fill="#742a2a" font-style="italic">tight SLO missed</text>
+
+  <rect x="236" y="288" width="180" height="76" rx="4" fill="#fff5f5" stroke="#cbd5e0"/>
+  <text x="246" y="306" font-size="11" fill="#c53030" font-weight="600">✗ new request waits</text>
+  <text x="246" y="322" font-size="11" fill="#1a202c">same as Vanilla;</text>
+  <text x="246" y="336" font-size="11" fill="#1a202c">no preempt mechanism.</text>
+  <text x="246" y="356" font-size="10" fill="#742a2a" font-style="italic">tight SLO missed</text>
+
+  <rect x="452" y="288" width="180" height="76" rx="4" fill="#fff5f5" stroke="#cbd5e0"/>
+  <text x="462" y="306" font-size="11" fill="#c53030" font-weight="600">✗ new request waits</text>
+  <text x="462" y="322" font-size="11" fill="#1a202c">ckpt exists but scheduler</text>
+  <text x="462" y="336" font-size="11" fill="#1a202c">doesn't use it for preempt.</text>
+  <text x="462" y="356" font-size="10" fill="#742a2a" font-style="italic">tight SLO missed</text>
+
+  <rect x="668" y="288" width="180" height="76" rx="4" fill="#f0fff4" stroke="#2f855a" stroke-width="1.4"/>
+  <text x="678" y="306" font-size="11" fill="#2f855a" font-weight="600">✓ preempt long-ctx</text>
+  <text x="678" y="322" font-size="11" fill="#1a202c">slack-priority kicks</text>
+  <text x="678" y="336" font-size="11" fill="#1a202c">running req; KV in host</text>
+  <text x="678" y="350" font-size="11" fill="#1a202c">stays, resumed later.</text>
+  <text x="678" y="370" font-size="10" fill="#22543d" font-style="italic">both SLOs met</text>
+
+  <!-- ============ Comparisons key ============ -->
+  <rect x="20" y="404" width="828" height="96" rx="6" fill="#fef9e7" stroke="#b7791f" stroke-width="1.4"/>
+  <text x="34" y="424" font-weight="600" fill="#744210" font-size="13">What each comparison tests</text>
+
+  <text x="34" y="444" font-size="11" fill="#744210"><tspan font-weight="600">(2) Reprefill</tspan> vs <tspan font-weight="600">(3) Checkpoint+FCFS</tspan>:</text>
+  <text x="34" y="458" font-size="11" fill="#744210">value of host-side KV checkpointing — avoid redoing ~20s of prefill on recovery.</text>
+
+  <text x="34" y="478" font-size="11" fill="#744210"><tspan font-weight="600">(3) Checkpoint+FCFS</tspan> vs <tspan font-weight="600">(4) Checkpoint + SLO-aware (ours)</tspan>:</text>
+  <text x="34" y="492" font-size="11" fill="#744210">value of slack-priority scheduling on top — the saved KV state lets the scheduler preempt cheaply, which is what unlocks tight-SLO compliance.</text>
+</svg>

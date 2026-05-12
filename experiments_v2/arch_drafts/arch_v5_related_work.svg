@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 470" width="820" height="470" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker>
+    <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker>
+  </defs>
+
+  <text x="410" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">Two adjacent lines of work, one missing combination</text>
+
+  <!-- column separators -->
+  <line x1="280" y1="50" x2="280" y2="370" stroke="#cbd5e0" stroke-width="1"/>
+  <line x1="540" y1="50" x2="540" y2="370" stroke="#cbd5e0" stroke-width="1"/>
+
+  <!-- column headers -->
+  <rect x="20" y="56" width="240" height="32" rx="4" fill="#fed7d7" stroke="#c53030" stroke-width="1.2"/>
+  <text x="140" y="76" text-anchor="middle" font-weight="600" font-size="13" fill="#742a2a">Mooncake (KV-pool side)</text>
+
+  <rect x="290" y="56" width="240" height="32" rx="4" fill="#fed7d7" stroke="#c53030" stroke-width="1.2"/>
+  <text x="410" y="76" text-anchor="middle" font-weight="600" font-size="13" fill="#742a2a">QLM / Scorpio (scheduler side)</text>
+
+  <rect x="560" y="56" width="240" height="32" rx="4" fill="#c6f6d5" stroke="#2f855a" stroke-width="1.2"/>
+  <text x="680" y="76" text-anchor="middle" font-weight="600" font-size="13" fill="#22543d">Ours</text>
+
+  <!-- =========== Mooncake column =========== -->
+  <g transform="translate(20,108)">
+    <rect x="0" y="0" width="240" height="40" rx="4" fill="#c7e3f5" stroke="#2b6cb0"/>
+    <text x="120" y="18" text-anchor="middle" font-size="11" fill="#2b4365">engines + GPU KV</text>
+    <text x="120" y="32" text-anchor="middle" font-size="10" fill="#2b4365">no slack-aware scheduling</text>
+
+    <rect x="0" y="56" width="240" height="38" rx="4" fill="#fde7c4" stroke="#c05621"/>
+    <text x="120" y="74" text-anchor="middle" font-size="11" fill="#7b341e">host KV pool</text>
+    <text x="120" y="88" text-anchor="middle" font-size="10" fill="#7b341e">used for prefix cache reuse</text>
+
+    <line x1="120" y1="48" x2="120" y2="54" stroke="#888" stroke-width="1.2" marker-end="url(#ag)"/>
+
+    <rect x="0" y="108" width="240" height="88" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>
+    <text x="12" y="126" font-size="11" font-weight="600" fill="#1a202c">capabilities</text>
+    <text x="12" y="144" font-size="11" fill="#2f855a">✓ prefix cache hit reuse</text>
+    <text x="12" y="160" font-size="11" fill="#c53030">✗ engine-fail recovery (not goal)</text>
+    <text x="12" y="176" font-size="11" fill="#c53030">✗ slack-based preempt</text>
+    <text x="12" y="192" font-size="11" fill="#c53030">✗ scheduler reads host KV</text>
+  </g>
+
+  <!-- =========== QLM / Scorpio column =========== -->
+  <g transform="translate(290,108)">
+    <rect x="0" y="0" width="240" height="40" rx="4" fill="#e2d8f3" stroke="#6b46c1"/>
+    <text x="120" y="18" text-anchor="middle" font-size="11" fill="#553c9a">slack-priority scheduler</text>
+    <text x="120" y="32" text-anchor="middle" font-size="10" fill="#553c9a">gates entry by SLO slack</text>
+
+    <rect x="0" y="56" width="240" height="38" rx="4" fill="#c7e3f5" stroke="#2b6cb0"/>
+    <text x="120" y="74" text-anchor="middle" font-size="11" fill="#2b4365">engines + GPU KV</text>
+    <text x="120" y="88" text-anchor="middle" font-size="10" fill="#2b4365">no host ckpt → preempt = lose work</text>
+
+    <line x1="120" y1="48" x2="120" y2="54" stroke="#1a202c" stroke-width="1" marker-end="url(#ak)"/>
+
+    <rect x="0" y="108" width="240" height="88" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>
+    <text x="12" y="126" font-size="11" font-weight="600" fill="#1a202c">capabilities</text>
+    <text x="12" y="144" font-size="11" fill="#2f855a">✓ slack-aware admission</text>
+    <text x="12" y="160" font-size="11" fill="#c53030">✗ preempt running long-ctx req</text>
+    <text x="12" y="176" font-size="11" fill="#c53030">✗ engine-fail recovery</text>
+    <text x="12" y="192" font-size="11" fill="#c53030">✗ no host KV pool</text>
+  </g>
+
+  <!-- =========== Ours column =========== -->
+  <g transform="translate(560,108)">
+    <rect x="0" y="0" width="240" height="40" rx="4" fill="#e2d8f3" stroke="#6b46c1"/>
+    <text x="120" y="18" text-anchor="middle" font-size="11" fill="#553c9a">slack-priority scheduler</text>
+    <text x="120" y="32" text-anchor="middle" font-size="10" fill="#553c9a">may preempt running requests</text>
+
+    <rect x="0" y="56" width="240" height="38" rx="4" fill="#c7e3f5" stroke="#2b6cb0"/>
+    <text x="120" y="74" text-anchor="middle" font-size="11" fill="#2b4365">engines + GPU KV</text>
+    <text x="120" y="88" text-anchor="middle" font-size="10" fill="#2b4365">ckpt to host every 16 tok</text>
+
+    <rect x="0" y="106" width="240" height="36" rx="4" fill="#fde7c4" stroke="#c05621"/>
+    <text x="120" y="122" text-anchor="middle" font-size="11" fill="#7b341e">host pinned mem</text>
+    <text x="120" y="136" text-anchor="middle" font-size="10" fill="#7b341e">→ /dev/shm shared pool</text>
+
+    <line x1="120" y1="48" x2="120" y2="54" stroke="#1a202c" stroke-width="1" marker-end="url(#ak)"/>
+    <line x1="120" y1="96" x2="120" y2="104" stroke="#888" stroke-width="1.2" marker-end="url(#ag)"/>
+
+    <rect x="0" y="156" width="240" height="106" rx="4" fill="#f0fff4" stroke="#2f855a"/>
+    <text x="12" y="174" font-size="11" font-weight="600" fill="#1a202c">capabilities</text>
+    <text x="12" y="192" font-size="11" fill="#2f855a">✓ slack-aware admission</text>
+    <text x="12" y="208" font-size="11" fill="#2f855a">✓ cheap preempt of long-ctx</text>
+    <text x="12" y="224" font-size="11" fill="#2f855a">✓ engine-fail recovery</text>
+    <text x="12" y="240" font-size="11" fill="#2f855a">✓ resume on any engine</text>
+    <text x="12" y="256" font-size="10" fill="#22543d" font-style="italic">scheduler ↔ host KV are coupled</text>
+  </g>
+
+  <!-- bottom takeaway -->
+  <rect x="20" y="386" width="780" height="64" rx="6" fill="#fef9e7" stroke="#b7791f" stroke-width="1.5"/>
+  <text x="36" y="408" font-weight="600" fill="#744210" font-size="13">Position</text>
+  <text x="36" y="426" font-size="11" fill="#744210">Mooncake built the host KV pool but only uses it for prefix reuse. QLM/Scorpio do slack-aware scheduling but stop at the gate.</text>
+  <text x="36" y="442" font-size="11" fill="#744210">We connect the two: a per-request, frequently-refreshed host checkpoint lets the scheduler preempt long-context requests cheaply, and gets recovery for free.</text>
+</svg>

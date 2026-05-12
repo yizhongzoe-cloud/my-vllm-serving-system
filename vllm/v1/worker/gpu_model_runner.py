@@ -4,6 +4,8 @@
 import functools
 import gc
 import itertools
+import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -12,7 +14,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from functools import reduce
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -197,6 +199,56 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+@dataclass
+class SharedCheckpointManifest:
+    req_id: str
+    generation: int
+    covered_tokens: int
+    num_blocks: int
+    block_map: dict[int, tuple[str, int]]
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "req_id": self.req_id,
+            "generation": self.generation,
+            "covered_tokens": self.covered_tokens,
+            "num_blocks": self.num_blocks,
+            "block_map": {
+                str(logical_idx): [chunk_filename, chunk_slot_idx]
+                for logical_idx, (chunk_filename, chunk_slot_idx)
+                in self.block_map.items()
+            },
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: dict[str, Any]) -> "SharedCheckpointManifest":
+        raw_block_map = data.get("block_map", {})
+        block_map: dict[int, tuple[str, int]] = {}
+        for logical_idx, location in raw_block_map.items():
+            if not isinstance(location, (list, tuple)) or len(location) != 2:
+                raise ValueError(
+                    f"Invalid chunk location for logical block {logical_idx}: "
+                    f"{location!r}"
+                )
+            block_map[int(logical_idx)] = (str(location[0]), int(location[1]))
+        return cls(
+            req_id=str(data["req_id"]),
+            generation=int(data["generation"]),
+            covered_tokens=int(data["covered_tokens"]),
+            num_blocks=int(data["num_blocks"]),
+            block_map=block_map,
+        )
+
+
+@dataclass
+class SharedCheckpointState:
+    current_generation: int
+    published_full_blocks: int
+    request_dir: str
+    latest_manifest_filename: str | None
+    block_map: dict[int, tuple[str, int]]
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -416,6 +468,10 @@ class GPUModelRunner(
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+
+        # Cross-engine shared checkpoint state keyed by request_id.
+        self._shared_ckpt_states: dict[str, SharedCheckpointState] = {}
+        self._shared_ckpt_dir_swept = False
 
         self.eplb_state: EplbState | None = None
         """
@@ -885,6 +941,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self._shared_ckpt_states.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -6260,6 +6317,1109 @@ class GPUModelRunner(
                     stats.encoder_forward_time += per_request_time
                     stats.num_encoder_calls += 1
 
+    # ---- Fault-tolerant KV checkpoint support ----
+
+    # Shared checkpoint directory — all engines on the same node write
+    # here so that a surviving engine can restore another engine's
+    # checkpoints after failover.  Uses /dev/shm (tmpfs, RAM-backed)
+    # for performance parity with host pinned memory.
+    _SHARED_CKPT_DIR = "/dev/shm/vllm_ft_checkpoints"
+
+    def _get_worker_rank(self) -> int:
+        """Get a unique rank for this worker across TP and PP dimensions."""
+        tp_rank = get_tp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_size = get_tp_group().world_size
+        return pp_rank * tp_size + tp_rank
+
+    def _shared_rank_tag(self) -> str:
+        return f"rank{self._get_worker_rank()}"
+
+    def _shared_request_dir(self, request_id: str) -> str:
+        return os.path.join(self._SHARED_CKPT_DIR, request_id)
+
+    def _shared_latest_path(self, request_id: str) -> str:
+        return os.path.join(
+            self._shared_request_dir(request_id),
+            f"latest_{self._shared_rank_tag()}",
+        )
+
+    def _shared_manifest_filename(self, generation: int) -> str:
+        return f"manifest_{self._shared_rank_tag()}_{generation}.json"
+
+    def _shared_manifest_path(self, request_id: str, generation: int) -> str:
+        return os.path.join(
+            self._shared_request_dir(request_id),
+            self._shared_manifest_filename(generation),
+        )
+
+    def _shared_chunk_filename(self, generation: int) -> str:
+        return f"chunk_{self._shared_rank_tag()}_{generation}.pt"
+
+    def _shared_chunk_path(self, request_id: str, generation: int) -> str:
+        return os.path.join(
+            self._shared_request_dir(request_id),
+            self._shared_chunk_filename(generation),
+        )
+
+    def _ensure_shared_ckpt_dir(self) -> str:
+        """Create and lightly sweep the shared checkpoint directory."""
+        os.makedirs(self._SHARED_CKPT_DIR, exist_ok=True)
+        if not self._shared_ckpt_dir_swept:
+            self._sweep_shared_ckpt_dir()
+            self._shared_ckpt_dir_swept = True
+        return self._SHARED_CKPT_DIR
+
+    def _sweep_shared_ckpt_dir(self) -> None:
+        """Best-effort cleanup of temp files and broken rank-local state."""
+        rank_tag = self._shared_rank_tag()
+        try:
+            request_dirs = list(os.scandir(self._SHARED_CKPT_DIR))
+        except FileNotFoundError:
+            return
+
+        for entry in request_dirs:
+            if not entry.is_dir():
+                continue
+            request_dir = entry.path
+            try:
+                filenames = os.listdir(request_dir)
+            except FileNotFoundError:
+                continue
+            rank_local_files = [name for name in filenames if rank_tag in name]
+
+            # Only remove tmp files owned by a DEAD process. Tmp naming
+            # scheme: "{final}.tmp.{pid}.{time_ns}".
+            #
+            # Earlier fix (2026-04-13) skipped other-live-PID tmps but still
+            # deleted own-PID tmps. Warmup-scan bug (2026-04-14) showed that
+            # warmup values create "save bursts" where many reqs queue their
+            # first save simultaneously — if sweep runs mid-burst, it can
+            # delete our OWN in-flight tmp (from another thread) and race
+            # our os.replace. Result: FileNotFoundError → subsequent OOM
+            # from leaked GPU buffers.
+            #
+            # Safe rule: a tmp file with a live owner (self OR sibling)
+            # should never be deleted here. Only dead-PID orphans are swept.
+            own_pid = os.getpid()
+            for name in filenames:
+                if ".tmp" not in name:
+                    continue
+                tmp_path = os.path.join(request_dir, name)
+                # Parse pid from "<final>.tmp.<pid>.<time_ns>".
+                tmp_pid = None
+                try:
+                    tail = name.rsplit(".tmp.", 1)[1]
+                    tmp_pid = int(tail.split(".", 1)[0])
+                except (IndexError, ValueError):
+                    pass
+                if tmp_pid is not None:
+                    if tmp_pid == own_pid:
+                        # Own in-flight write (another thread in same
+                        # process) — never delete.
+                        continue
+                    try:
+                        os.kill(tmp_pid, 0)  # signal 0 = check existence
+                        # Sibling worker in flight — skip.
+                        continue
+                    except ProcessLookupError:
+                        pass  # dead process, safe to remove
+                    except PermissionError:
+                        # Different user — not ours; leave it alone.
+                        continue
+                try:
+                    os.remove(tmp_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.warning(
+                        "Failed to remove orphan temp checkpoint file %s",
+                        tmp_path,
+                    )
+
+            latest_path = os.path.join(request_dir, f"latest_{rank_tag}")
+            if os.path.exists(latest_path):
+                try:
+                    with open(latest_path, encoding="utf-8") as f:
+                        manifest_filename = f.read().strip()
+                    manifest_path = os.path.join(request_dir, manifest_filename)
+                    if not manifest_filename or not os.path.exists(manifest_path):
+                        logger.warning(
+                            "Shared checkpoint dir %s has broken latest pointer %s",
+                            request_dir,
+                            latest_path,
+                        )
+                        self._remove_rank_local_checkpoint_files(request_dir)
+                except OSError:
+                    logger.warning(
+                        "Failed to inspect shared checkpoint latest pointer %s",
+                        latest_path,
+                    )
+            elif rank_local_files:
+                logger.warning(
+                    "Shared checkpoint dir %s has rank-local files but no latest "
+                    "pointer for %s",
+                    request_dir,
+                    rank_tag,
+                )
+                self._remove_rank_local_checkpoint_files(request_dir)
+
+            try:
+                if not os.listdir(request_dir):
+                    os.rmdir(request_dir)
+            except OSError:
+                pass
+
+    def _remove_rank_local_checkpoint_files(self, request_dir: str) -> None:
+        rank_tag = self._shared_rank_tag()
+        try:
+            filenames = os.listdir(request_dir)
+        except FileNotFoundError:
+            return
+        for name in filenames:
+            if rank_tag not in name:
+                continue
+            try:
+                os.remove(os.path.join(request_dir, name))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(
+                    "Failed to remove broken shared checkpoint artifact %s",
+                    os.path.join(request_dir, name),
+                )
+
+    def _atomic_write_bytes(self, final_path: str, data: bytes) -> None:
+        tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+                # FT_FAST_TMPFS_WRITE: skip flush+fsync when the
+                # checkpoint store is on tmpfs (/dev/shm is RAM-backed,
+                # so fsync is provably useless and only adds latency).
+                # Default off to preserve original semantics for
+                # non-tmpfs deployments. See overnight_2026-04-09.md
+                # follow-up "stream blocking root cause".
+                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _atomic_torch_save(self, final_path: str, data: Any) -> None:
+        tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        try:
+            with open(tmp_path, "wb") as f:
+                torch.save(data, f)
+                # Same FT_FAST_TMPFS_WRITE bypass as _atomic_write_bytes.
+                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    # ── Fast checkpoint chunk format (FT_FAST_CHUNK_FORMAT env var) ──────
+    #
+    # Skips torch.save / pickle entirely. Writes raw tensor bytes prefixed
+    # by a small fixed-size struct header. Restore reads the header and
+    # reconstructs torch tensors via torch.frombuffer + reshape.
+    #
+    # Format (little-endian):
+    #   8  bytes  magic     "VLMCKPT\0"
+    #   4  bytes  version   uint32 (=1)
+    #   4  bytes  generation uint32
+    #   4  bytes  num_layers uint32
+    #   4  bytes  dim0       uint32  (always 2 for K,V)
+    #   4  bytes  dim1       uint32  (num_blocks_in_chunk)
+    #   4  bytes  dim2       uint32  (block_size)
+    #   4  bytes  dim3       uint32  (num_kv_heads)
+    #   4  bytes  dim4       uint32  (head_size)
+    #   4  bytes  dtype_id   uint32  (0=fp16, 1=bf16, 2=fp32)
+    #   N  × 4 bytes  layer_indices  uint32 each (sorted)
+    #   <padding to 8-byte align>
+    #   <raw tensor bytes for each layer in layer_indices order>
+    #
+    # All tensors share dim0..dim4 (verified at write time). Restore returns
+    # the same dict-of-tensors structure that torch.save produced, so the
+    # caller (_restore_shared_checkpoint) doesn't need to change.
+    _FAST_CKPT_MAGIC = b"VLMCKPT\x00"
+    # Version 1: header + tensors only.  Manifest written to a separate
+    #            JSON file by _publish_shared_checkpoint.
+    # Version 2: header + inlined manifest JSON + tensors.  When set, the
+    #            manifest + latest pointer files are skipped entirely;
+    #            restore scans the request directory for chunk files
+    #            and picks the highest generation.  Enabled when
+    #            FT_INLINE_MANIFEST=1 is set together with FAST_CHUNK.
+    _FAST_CKPT_VERSION_BASIC = 1
+    _FAST_CKPT_VERSION_INLINE_MANIFEST = 2
+    _FAST_CKPT_DTYPE_MAP = {
+        torch.float16: 0,
+        torch.bfloat16: 1,
+        torch.float32: 2,
+    }
+    _FAST_CKPT_DTYPE_REV = {v: k for k, v in _FAST_CKPT_DTYPE_MAP.items()}
+
+    @classmethod
+    def _fast_chunk_header(
+        cls,
+        generation: int,
+        layer_indices: list[int],
+        sample_tensor: torch.Tensor,
+        manifest_bytes_len: int = 0,
+    ) -> bytes:
+        """Build the 48-byte fixed header + per-layer index list.
+
+        Slot 9 of the fixed header is `manifest_bytes_len` (was reserved
+        in v1). When non-zero, it indicates that an inlined manifest
+        JSON of that length follows the header (after 8-byte align)
+        before the raw tensor bytes.
+        """
+        import struct
+        shape = tuple(sample_tensor.shape)
+        if len(shape) != 5:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT expects 5-D KV tensors, got {shape}"
+            )
+        dtype_id = cls._FAST_CKPT_DTYPE_MAP.get(sample_tensor.dtype)
+        if dtype_id is None:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT unsupported dtype: {sample_tensor.dtype}"
+            )
+        version = (
+            cls._FAST_CKPT_VERSION_INLINE_MANIFEST
+            if manifest_bytes_len > 0
+            else cls._FAST_CKPT_VERSION_BASIC
+        )
+        # 8 + 4*10 = 48 bytes fixed, then 4*N for layer indices
+        head = (
+            cls._FAST_CKPT_MAGIC
+            + struct.pack(
+                "<10I",
+                version,
+                int(generation),
+                len(layer_indices),
+                int(shape[0]),
+                int(shape[1]),
+                int(shape[2]),
+                int(shape[3]),
+                int(shape[4]),
+                dtype_id,
+                int(manifest_bytes_len),
+            )
+            + struct.pack(f"<{len(layer_indices)}I", *layer_indices)
+        )
+        # Pad to 8-byte alignment for cleaner mmap
+        pad = (-len(head)) % 8
+        if pad:
+            head += b"\x00" * pad
+        return head
+
+    def _fast_save_chunk(
+        self,
+        final_path: str,
+        chunk_tensors: dict[int, torch.Tensor],
+        generation: int,
+        manifest: Optional[dict] = None,
+    ) -> None:
+        """Save chunk_tensors to a single binary file with raw bytes.
+
+        ~5-10x faster than torch.save for typical KV chunks because it
+        skips pickle/zipfile overhead. The caller is responsible for
+        atomicity (rename) and parent directory creation.
+
+        If `manifest` is provided (a JSON-serializable dict), it is
+        embedded into the chunk file (v2 format). When the inline
+        manifest is present, callers can skip writing the separate
+        manifest + latest-pointer files and the restore path can
+        scan the request directory for chunks instead of reading
+        the latest pointer.
+        """
+        if not chunk_tensors:
+            raise ValueError("FT_FAST_CHUNK_FORMAT: chunk_tensors is empty")
+
+        layer_indices = sorted(chunk_tensors.keys())
+        sample = chunk_tensors[layer_indices[0]]
+
+        # Verify all tensors share shape + dtype.
+        for li in layer_indices:
+            t = chunk_tensors[li]
+            if t.shape != sample.shape or t.dtype != sample.dtype:
+                raise ValueError(
+                    f"FT_FAST_CHUNK_FORMAT: layer {li} has shape "
+                    f"{tuple(t.shape)}/dtype {t.dtype} but layer "
+                    f"{layer_indices[0]} has {tuple(sample.shape)}/"
+                    f"{sample.dtype}"
+                )
+
+        manifest_payload: bytes = b""
+        if manifest is not None:
+            manifest_payload = json.dumps(
+                manifest, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+
+        header = self._fast_chunk_header(
+            generation, layer_indices, sample, len(manifest_payload),
+        )
+
+        tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+        # FT_NOGIL_WRITE=1 (default OFF): use ctypes-based GIL-free
+        # write path. All file IO goes through libc write() via ctypes,
+        # which releases GIL during the syscall. The 32-layer for-loop
+        # and .tobytes() memcpy are eliminated — tensor data_ptr() is
+        # passed directly to write(). This removes ~2-3ms of GIL hold
+        # time per checkpoint cycle that causes main thread delays.
+        if os.environ.get("FT_NOGIL_WRITE") == "1":
+            from vllm.v1.worker.checkpoint_write_ext import fast_write_chunk
+
+            # Prepare manifest padded bytes
+            manifest_padded = b""
+            if manifest_payload:
+                pad = (-len(manifest_payload)) % 8
+                manifest_padded = manifest_payload + (b"\x00" * pad if pad else b"")
+
+            # Prepare layer tensors (contiguous, handle bf16)
+            tensors = []
+            for li in layer_indices:
+                t = chunk_tensors[li]
+                if not t.is_contiguous():
+                    t = t.contiguous()
+                if t.dtype == torch.bfloat16:
+                    t = t.view(torch.int16)
+                tensors.append(t)
+
+            fast_write_chunk(tmp_path, final_path, header, manifest_padded, tensors)
+            return
+
+        # FT_MERGE_LAYER_WRITE=1: concatenate all 32 layers into one
+        # tensor, then 1× tobytes + 1× write instead of 32× each.
+        # Reduces GIL acquire/release from 96 ops to ~35 ops per chunk.
+        if os.environ.get("FT_MERGE_LAYER_WRITE") == "1":
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(header)
+                    if manifest_payload:
+                        f.write(manifest_payload)
+                        pad = (-len(manifest_payload)) % 8
+                        if pad:
+                            f.write(b"\x00" * pad)
+                    # Prepare all layers (handle bf16 + contiguous)
+                    prepared = []
+                    for li in layer_indices:
+                        t = chunk_tensors[li]
+                        if not t.is_contiguous():
+                            t = t.contiguous()
+                        if t.dtype == torch.bfloat16:
+                            t = t.view(torch.int16)
+                        prepared.append(t.reshape(-1))
+                    # 1× cat + 1× tobytes + 1× write (vs 32× each)
+                    all_data = torch.cat(prepared)
+                    f.write(all_data.numpy().tobytes())
+                    if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                        f.flush()
+                        os.fsync(f.fileno())
+                os.replace(tmp_path, final_path)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+            return
+
+        # Original Python path (fallback)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(header)
+                if manifest_payload:
+                    f.write(manifest_payload)
+                    pad = (-len(manifest_payload)) % 8
+                    if pad:
+                        f.write(b"\x00" * pad)
+                for li in layer_indices:
+                    t = chunk_tensors[li]
+                    if not t.is_contiguous():
+                        t = t.contiguous()
+                    if t.dtype == torch.bfloat16:
+                        np_view = t.view(torch.int16).numpy()
+                    else:
+                        np_view = t.numpy()
+                    f.write(np_view.tobytes())
+                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.replace(tmp_path, final_path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    @classmethod
+    def _fast_load_chunk(cls, chunk_path: str) -> dict[str, Any]:
+        """Read a fast-format chunk file and return the same dict shape
+        that torch.save produced (for backward compat with restore code):
+            {"kv_tensors": {layer_idx: tensor},
+             "generation": int,
+             "manifest": dict | None}
+
+        Auto-detects v1 (no inlined manifest) vs v2 (inlined manifest)
+        via the manifest_bytes slot in the header.
+        """
+        import struct
+        with open(chunk_path, "rb") as f:
+            data = f.read()
+
+        if not data.startswith(cls._FAST_CKPT_MAGIC):
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT: bad magic in {chunk_path}"
+            )
+        offset = len(cls._FAST_CKPT_MAGIC)
+        (
+            version, generation, num_layers,
+            d0, d1, d2, d3, d4, dtype_id, manifest_bytes_len,
+        ) = struct.unpack_from("<10I", data, offset)
+        offset += 4 * 10
+        if version not in (
+            cls._FAST_CKPT_VERSION_BASIC,
+            cls._FAST_CKPT_VERSION_INLINE_MANIFEST,
+        ):
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT: unknown version {version}"
+            )
+        layer_indices = list(
+            struct.unpack_from(f"<{num_layers}I", data, offset)
+        )
+        offset += 4 * num_layers
+        # Pad to 8-byte alignment
+        offset = (offset + 7) & ~7
+
+        manifest: Optional[dict] = None
+        if manifest_bytes_len > 0:
+            manifest_bytes = data[offset:offset + manifest_bytes_len]
+            try:
+                manifest = json.loads(manifest_bytes.decode("utf-8"))
+            except Exception as exc:
+                raise ValueError(
+                    f"FT_FAST_CHUNK_FORMAT: failed to parse inlined "
+                    f"manifest in {chunk_path}: {exc}"
+                ) from exc
+            offset += manifest_bytes_len
+            offset = (offset + 7) & ~7
+
+        dtype = cls._FAST_CKPT_DTYPE_REV.get(dtype_id)
+        if dtype is None:
+            raise ValueError(
+                f"FT_FAST_CHUNK_FORMAT: unknown dtype id {dtype_id}"
+            )
+        shape = (d0, d1, d2, d3, d4)
+        per_tensor_elems = d0 * d1 * d2 * d3 * d4
+        # Element size from a probe tensor.
+        probe = torch.empty(0, dtype=dtype)
+        per_tensor_bytes = per_tensor_elems * probe.element_size()
+
+        kv_tensors: dict[int, torch.Tensor] = {}
+        for li in layer_indices:
+            tensor_bytes = data[offset:offset + per_tensor_bytes]
+            if len(tensor_bytes) != per_tensor_bytes:
+                raise ValueError(
+                    f"FT_FAST_CHUNK_FORMAT: truncated chunk at layer {li} "
+                    f"(want {per_tensor_bytes}, got {len(tensor_bytes)})"
+                )
+            # Use frombuffer to wrap the bytes without copying. Then
+            # reshape and clone so we own the memory (the bytes object
+            # may be GC'd).
+            t = torch.frombuffer(
+                bytearray(tensor_bytes), dtype=dtype
+            ).reshape(shape).clone()
+            kv_tensors[li] = t
+            offset += per_tensor_bytes
+
+        return {
+            "kv_tensors": kv_tensors,
+            "generation": int(generation),
+            "manifest": manifest,
+        }
+
+    @classmethod
+    def _is_fast_chunk(cls, chunk_path: str) -> bool:
+        """Peek the first 8 bytes of a chunk file to detect fast format."""
+        try:
+            with open(chunk_path, "rb") as f:
+                magic = f.read(len(cls._FAST_CKPT_MAGIC))
+            return magic == cls._FAST_CKPT_MAGIC
+        except (OSError, ValueError):
+            return False
+
+    def _atomic_write_json(self, final_path: str, data: dict[str, Any]) -> None:
+        payload = json.dumps(data, sort_keys=True).encode("utf-8")
+        self._atomic_write_bytes(final_path, payload)
+
+    def _atomic_write_latest(self, final_path: str, manifest_filename: str) -> None:
+        self._atomic_write_bytes(
+            final_path, f"{manifest_filename}\n".encode("utf-8")
+        )
+
+    def _estimate_kv_bytes_for_blocks(self, num_blocks: int) -> int:
+        if num_blocks <= 0 or not self.kv_caches:
+            return 0
+        sample = self.kv_caches[0]
+        per_block_bytes = (
+            2
+            * sample.shape[2]
+            * sample.shape[3]
+            * sample.shape[4]
+            * sample.element_size()
+        )
+        return int(per_block_bytes * num_blocks * len(self.kv_caches))
+
+    def _load_shared_manifest(
+        self,
+        request_id: str,
+        manifest_filename: str,
+    ) -> SharedCheckpointManifest:
+        manifest_path = os.path.join(
+            self._shared_request_dir(request_id), manifest_filename
+        )
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return SharedCheckpointManifest.from_json_dict(data)
+
+    def _scan_latest_inline_manifest(
+        self,
+        request_id: str,
+    ) -> Optional[SharedCheckpointManifest]:
+        """FT_INLINE_MANIFEST restore path: scan the request directory
+        for chunk files written by this rank, find the highest
+        generation, read its embedded manifest.
+
+        Returns None if no v2 (inline-manifest) chunks are found —
+        callers should fall back to the legacy manifest+latest path.
+        """
+        request_dir = self._shared_request_dir(request_id)
+        if not os.path.isdir(request_dir):
+            return None
+        rank_tag = self._shared_rank_tag()
+        chunk_prefix = f"chunk_{rank_tag}_"
+        suffix = ".pt"
+        # Find the chunk file with the highest generation written by
+        # this rank.
+        best_gen = -1
+        best_path: Optional[str] = None
+        try:
+            for entry in os.scandir(request_dir):
+                name = entry.name
+                if not (
+                    name.startswith(chunk_prefix) and name.endswith(suffix)
+                ):
+                    continue
+                try:
+                    gen_str = name[len(chunk_prefix):-len(suffix)]
+                    gen = int(gen_str)
+                except ValueError:
+                    continue
+                if gen > best_gen:
+                    best_gen = gen
+                    best_path = entry.path
+        except OSError:
+            return None
+        if best_path is None:
+            return None
+        if not self._is_fast_chunk(best_path):
+            return None
+        try:
+            chunk_data = self._fast_load_chunk(best_path)
+        except Exception:
+            logger.exception(
+                "FT_INLINE_MANIFEST restore: failed to load chunk %s",
+                best_path,
+            )
+            return None
+        manifest_dict = chunk_data.get("manifest")
+        if manifest_dict is None:
+            # v1 chunk (no inlined manifest) — caller should fall back.
+            return None
+        try:
+            return SharedCheckpointManifest.from_json_dict(manifest_dict)
+        except Exception:
+            logger.exception(
+                "FT_INLINE_MANIFEST restore: malformed inlined manifest "
+                "in %s", best_path,
+            )
+            return None
+
+    def _load_shared_ckpt_state(
+        self,
+        request_id: str,
+    ) -> SharedCheckpointState:
+        cached = self._shared_ckpt_states.get(request_id)
+        if cached is not None:
+            return cached
+
+        request_dir = self._shared_request_dir(request_id)
+        latest_path = self._shared_latest_path(request_id)
+        if os.path.exists(latest_path):
+            try:
+                with open(latest_path, encoding="utf-8") as f:
+                    latest_manifest_filename = f.read().strip()
+                manifest = self._load_shared_manifest(
+                    request_id, latest_manifest_filename
+                )
+                state = SharedCheckpointState(
+                    current_generation=manifest.generation,
+                    published_full_blocks=manifest.num_blocks,
+                    request_dir=request_dir,
+                    latest_manifest_filename=latest_manifest_filename,
+                    block_map=dict(manifest.block_map),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to load existing shared checkpoint state for %s",
+                    request_id,
+                )
+                state = SharedCheckpointState(
+                    current_generation=0,
+                    published_full_blocks=0,
+                    request_dir=request_dir,
+                    latest_manifest_filename=None,
+                    block_map={},
+                )
+        else:
+            state = SharedCheckpointState(
+                current_generation=0,
+                published_full_blocks=0,
+                request_dir=request_dir,
+                latest_manifest_filename=None,
+                block_map={},
+            )
+
+        self._shared_ckpt_states[request_id] = state
+        return state
+
+    def _publish_shared_checkpoint(
+        self,
+        request_id: str,
+        entry: Any,
+    ) -> tuple[int, int]:
+        """Publish new stable full blocks to the shared checkpoint store."""
+        # FT_CKPT_SKIP_PUBLISH=1: skip /dev/shm file writes.
+        # Ablation: isolate GPU gather+copy cost from file IO cost.
+        if os.environ.get("FT_CKPT_SKIP_PUBLISH") == "1":
+            block_size = self.cache_config.block_size
+            size = self._estimate_kv_bytes_for_blocks(len(entry.block_ids))
+            return size, entry.num_tokens
+
+        state = self._load_shared_ckpt_state(request_id)
+        block_size = self.cache_config.block_size
+        stable_full_blocks = min(
+            len(entry.block_ids),
+            max(0, int(entry.num_tokens) // block_size),
+        )
+        prev_covered_tokens = state.published_full_blocks * block_size
+        prev_size_bytes = self._estimate_kv_bytes_for_blocks(
+            state.published_full_blocks
+        )
+
+        if stable_full_blocks < state.published_full_blocks:
+            logger.warning(
+                "Checkpoint %s: stable_full_blocks regressed from %d to %d, "
+                "keeping published generation %d",
+                request_id,
+                state.published_full_blocks,
+                stable_full_blocks,
+                state.current_generation,
+            )
+            return prev_size_bytes, prev_covered_tokens
+
+        if stable_full_blocks == state.published_full_blocks:
+            return prev_size_bytes, prev_covered_tokens
+
+        delta_start = state.published_full_blocks
+        delta_end = stable_full_blocks
+        next_generation = state.current_generation + 1
+        chunk_filename = self._shared_chunk_filename(next_generation)
+        chunk_path = self._shared_chunk_path(request_id, next_generation)
+        manifest_filename = self._shared_manifest_filename(next_generation)
+        manifest_path = self._shared_manifest_path(request_id, next_generation)
+        latest_path = self._shared_latest_path(request_id)
+
+        logical_indices = list(range(delta_start, delta_end))
+        chunk_tensors: dict[int, torch.Tensor] = {}
+        for layer_idx, host_tensor in entry.kv_tensors.items():
+            chunk_tensors[layer_idx] = host_tensor[
+                :, delta_start:delta_end
+            ].contiguous()
+
+        # Build cumulative block_map (always needed for in-memory state).
+        new_block_map = dict(state.block_map)
+        for chunk_slot_idx, logical_idx in enumerate(logical_indices):
+            new_block_map[logical_idx] = (chunk_filename, chunk_slot_idx)
+
+        manifest = SharedCheckpointManifest(
+            req_id=request_id,
+            generation=next_generation,
+            covered_tokens=stable_full_blocks * block_size,
+            num_blocks=stable_full_blocks,
+            block_map=new_block_map,
+        )
+
+        # FT_INLINE_MANIFEST=1: when set together with FT_FAST_CHUNK_FORMAT,
+        # embed the cumulative manifest into the chunk header (v2 format)
+        # and skip the separate manifest JSON + latest pointer file writes.
+        # Restore must scan the request directory for chunk files and pick
+        # the highest generation. Saves 2 of 3 file ops per save (~2-5 ms
+        # per RPC). Requires FAST_CHUNK_FORMAT to be on; ignored otherwise.
+        use_fast_chunk = os.environ.get("FT_FAST_CHUNK_FORMAT") == "1"
+        inline_manifest = (
+            use_fast_chunk
+            and os.environ.get("FT_INLINE_MANIFEST") == "1"
+        )
+
+        try:
+            if use_fast_chunk:
+                self._fast_save_chunk(
+                    chunk_path,
+                    chunk_tensors,
+                    next_generation,
+                    manifest=(
+                        manifest.to_json_dict()
+                        if inline_manifest else None
+                    ),
+                )
+            else:
+                chunk_payload = {
+                    "req_id": request_id,
+                    "generation": next_generation,
+                    "logical_indices": logical_indices,
+                    "num_blocks": len(logical_indices),
+                    "kv_tensors": chunk_tensors,
+                }
+                self._atomic_torch_save(chunk_path, chunk_payload)
+        except Exception:
+            logger.exception(
+                "Checkpoint %s: failed to publish shared chunk %s",
+                request_id,
+                chunk_path,
+            )
+            return prev_size_bytes, prev_covered_tokens
+
+        if not inline_manifest:
+            # Legacy path: separate manifest + latest pointer files.
+            try:
+                self._atomic_write_json(
+                    manifest_path, manifest.to_json_dict(),
+                )
+                self._atomic_write_latest(latest_path, manifest_filename)
+            except Exception:
+                logger.exception(
+                    "Checkpoint %s: failed to publish shared manifest %s",
+                    request_id,
+                    manifest_path,
+                )
+                return prev_size_bytes, prev_covered_tokens
+
+        state.current_generation = next_generation
+        state.published_full_blocks = stable_full_blocks
+        state.latest_manifest_filename = manifest_filename
+        state.block_map = new_block_map
+
+        size_bytes = self._estimate_kv_bytes_for_blocks(stable_full_blocks)
+        logger.debug(
+            "Checkpoint %s: published generation %d (%d full blocks, %d tokens)",
+            request_id,
+            next_generation,
+            stable_full_blocks,
+            manifest.covered_tokens,
+        )
+        return size_bytes, manifest.covered_tokens
+
+    def _restore_shared_checkpoint(
+        self,
+        request_id: str,
+        target_block_ids: list[int],
+        sync: bool = True,
+    ) -> int:
+        """Restore the latest published shared checkpoint generation.
+
+        Tries the legacy manifest+latest path first. If the latest
+        pointer is missing (e.g. publisher used FT_INLINE_MANIFEST=1),
+        falls back to scanning the request directory for chunk files
+        and reading the embedded manifest from the highest-generation
+        chunk.
+
+        Args:
+            sync: If True (default), sync the CUDA stream before
+                returning, guaranteeing the restored KV is visible on
+                the next kernel launch. If False + FT_ASYNC_RESTORE=1,
+                use the shared restore stream and skip sync — caller
+                must invoke flush_pending_restore() before any kernel
+                that consumes the restored KV (before execute_model).
+        """
+        latest_path = self._shared_latest_path(request_id)
+        request_dir = self._shared_request_dir(request_id)
+
+        manifest: Optional[SharedCheckpointManifest] = None
+        if os.path.exists(latest_path):
+            try:
+                with open(latest_path, encoding="utf-8") as f:
+                    manifest_filename = f.read().strip()
+                if manifest_filename:
+                    manifest = self._load_shared_manifest(
+                        request_id, manifest_filename,
+                    )
+            except Exception:
+                logger.exception(
+                    "Restore %s: failed to load latest pointer at %s",
+                    request_id, latest_path,
+                )
+
+        if manifest is None:
+            # FT_INLINE_MANIFEST publisher path — scan the dir.
+            manifest = self._scan_latest_inline_manifest(request_id)
+
+        if manifest is None:
+            logger.warning(
+                "Restore %s: no manifest available (no latest pointer "
+                "and no v2 chunk in %s)",
+                request_id, request_dir,
+            )
+            return 0
+
+        try:
+            expected_indices = list(range(manifest.num_blocks))
+            if sorted(manifest.block_map) != expected_indices:
+                logger.warning(
+                    "Restore %s: manifest gen=%d has non-contiguous "
+                    "logical indices",
+                    request_id, manifest.generation,
+                )
+                return 0
+
+            num_checkpoint_blocks = min(manifest.num_blocks, len(target_block_ids))
+            if num_checkpoint_blocks <= 0:
+                return 0
+
+            device = self.kv_caches[0].device
+            num_kv_blocks = self.kv_caches[0].shape[1]
+            restore_plan_by_chunk: dict[str, list[tuple[int, int]]] = defaultdict(list)
+            for logical_idx in range(num_checkpoint_blocks):
+                target_block_id = target_block_ids[logical_idx]
+                if not 0 <= target_block_id < num_kv_blocks:
+                    logger.warning(
+                        "Restore %s: target block %d for logical block %d is out "
+                        "of range (num_kv_blocks=%d)",
+                        request_id,
+                        target_block_id,
+                        logical_idx,
+                        num_kv_blocks,
+                    )
+                    return 0
+                chunk_filename, chunk_slot_idx = manifest.block_map[logical_idx]
+                restore_plan_by_chunk[chunk_filename].append(
+                    (logical_idx, chunk_slot_idx)
+                )
+
+            loaded_chunks: dict[str, dict[str, Any]] = {}
+            for chunk_filename in restore_plan_by_chunk:
+                chunk_path = os.path.join(request_dir, chunk_filename)
+                if not os.path.exists(chunk_path):
+                    logger.warning(
+                        "Restore %s: shared checkpoint chunk missing at %s",
+                        request_id,
+                        chunk_path,
+                    )
+                    return 0
+                # Auto-detect format via magic bytes (FT_FAST_CHUNK_FORMAT
+                # writes a "VLMCKPT\0" header). Both formats round-trip
+                # to the same {"kv_tensors": ..., "generation": ...}
+                # dict shape, so the rest of restore is unchanged.
+                if self._is_fast_chunk(chunk_path):
+                    loaded_chunks[chunk_filename] = self._fast_load_chunk(
+                        chunk_path
+                    )
+                else:
+                    loaded_chunks[chunk_filename] = torch.load(
+                        chunk_path, weights_only=False
+                    )
+
+            if torch.cuda.is_available():
+                # FT_ASYNC_RESTORE=1: reuse a single shared restore stream
+                # across all restore_kv_blocks calls in a step, and skip
+                # the per-call sync. Caller must call flush_pending_restore()
+                # after the last restore in the batch, before reading the
+                # restored KV (i.e. before execute_model).
+                #
+                # Default OFF: each call creates its own stream and syncs,
+                # matching the original serial behavior.
+                use_async = (
+                    os.environ.get("FT_ASYNC_RESTORE") == "1" and not sync
+                )
+                if use_async:
+                    if getattr(self, "_ft_shared_restore_stream", None) is None:
+                        self._ft_shared_restore_stream = torch.cuda.Stream()
+                    stream = self._ft_shared_restore_stream
+                    self._ft_has_pending_restore = True
+                else:
+                    stream = torch.cuda.Stream()
+
+                # Parallel-restore safety: restore_kv_blocks_batch may
+                # invoke this method from multiple threads. CUDA enqueue
+                # (stream context, scatter writes, async H2D) is NOT
+                # thread-safe in PyTorch — concurrent enqueues on a
+                # shared stream triggered device-side asserts in
+                # flash_attn (KV cache corruption). Serialize the CUDA
+                # section via a per-runner lock. The CPU-heavy portion
+                # (file read + _fast_load_chunk / torch.load) already
+                # ran in parallel above, which is where the dominant
+                # cost lives.
+                cuda_lock = getattr(self, "_ft_restore_cuda_lock", None)
+                if cuda_lock is not None:
+                    cuda_lock.acquire()
+                try:
+                    with torch.cuda.stream(stream):
+                        for chunk_filename, assignments in restore_plan_by_chunk.items():
+                            chunk_data = loaded_chunks[chunk_filename]
+                            kv_tensors: dict[int, torch.Tensor] = chunk_data["kv_tensors"]
+                            slot_indices = [slot_idx for _, slot_idx in assignments]
+                            tgt_block_list = [
+                                target_block_ids[logical_idx]
+                                for logical_idx, _ in assignments
+                            ]
+                            # BOUNDS CHECK (fix for cuda_assert seen in
+                            # W5_reload_w16/42 and phase8 cuda_assert seeds).
+                            # Root cause: vectorized_gather_kernel fires
+                            # "index out of bounds" when either the src
+                            # slot_indices or dest target_block_ids
+                            # exceed the respective tensor's dim-1 size.
+                            # Once device-side assert fires, CUDA ctx is
+                            # corrupt and engine must die.
+                            # Preempt the crash by falling back to full
+                            # recompute (return 0) when any index is OOB.
+                            sample_host = next(iter(kv_tensors.values()), None)
+                            if sample_host is not None:
+                                max_slot = sample_host.shape[1]
+                                if any(si < 0 or si >= max_slot for si in slot_indices):
+                                    logger.warning(
+                                        "Restore %s: slot_indices OOB (max=%d, "
+                                        "slots=%s) — skip chunk, fall back",
+                                        request_id, max_slot, slot_indices[:8],
+                                    )
+                                    return 0
+                            max_tgt = self.kv_caches[0].shape[1]
+                            if any(t < 0 or t >= max_tgt for t in tgt_block_list):
+                                logger.warning(
+                                    "Restore %s: target_block_ids OOB (max=%d, "
+                                    "blocks=%s) — skip chunk, fall back",
+                                    request_id, max_tgt, tgt_block_list[:8],
+                                )
+                                return 0
+                            target_indices = torch.tensor(
+                                tgt_block_list,
+                                dtype=torch.int64,
+                                device=device,
+                            )
+                            for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                                host_tensor = kv_tensors.get(layer_idx)
+                                if host_tensor is None:
+                                    continue
+                                src = host_tensor[:, slot_indices].to(
+                                    device, non_blocking=True
+                                )
+                                gpu_tensor[:, target_indices, :, :, :] = src
+                    if not use_async:
+                        stream.synchronize()
+                    elif cuda_lock is not None and os.environ.get(
+                        "FT_RESTORE_PER_REQ_SYNC", "1"
+                    ) == "1":
+                        # Parallel batch restore: each req allocates
+                        # ~224 MB of temp src GPU tensors (32 layers ×
+                        # ~7 MB for 8B at 121 blocks). Under
+                        # FT_ASYNC_RESTORE these aren't freed until
+                        # flush_pending_restore; with 7-13 reqs that's
+                        # 1.5-3 GB, exceeding the ~2.5 GB headroom
+                        # after gpu_memory_utilization=0.9. Sync per
+                        # req so temp src tensors are released before
+                        # the next thread enters. Still overlaps CPU
+                        # chunk loads (the dominant cost). Disable via
+                        # FT_RESTORE_PER_REQ_SYNC=0 when headroom is
+                        # widened (gpu_util<=0.85 or concurrency<=2).
+                        stream.synchronize()
+                finally:
+                    if cuda_lock is not None:
+                        cuda_lock.release()
+            else:
+                for chunk_filename, assignments in restore_plan_by_chunk.items():
+                    chunk_data = loaded_chunks[chunk_filename]
+                    kv_tensors = chunk_data["kv_tensors"]
+                    slot_indices = [slot_idx for _, slot_idx in assignments]
+                    tgt_block_list = [
+                        target_block_ids[logical_idx]
+                        for logical_idx, _ in assignments
+                    ]
+                    # Same OOB guard as async path above.
+                    sample_host = next(iter(kv_tensors.values()), None)
+                    if sample_host is not None:
+                        max_slot = sample_host.shape[1]
+                        if any(si < 0 or si >= max_slot for si in slot_indices):
+                            logger.warning(
+                                "Restore %s: slot_indices OOB — fall back",
+                                request_id,
+                            )
+                            return 0
+                    max_tgt = self.kv_caches[0].shape[1]
+                    if any(t < 0 or t >= max_tgt for t in tgt_block_list):
+                        logger.warning(
+                            "Restore %s: target_block_ids OOB — fall back",
+                            request_id,
+                        )
+                        return 0
+                    target_indices = torch.tensor(
+                        tgt_block_list,
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                        host_tensor = kv_tensors.get(layer_idx)
+                        if host_tensor is None:
+                            continue
+                        src = host_tensor[:, slot_indices].to(device)
+                        gpu_tensor[:, target_indices, :, :, :] = src
+
+            block_size = self.cache_config.block_size
+            actual_tokens = min(
+                num_checkpoint_blocks * block_size, manifest.covered_tokens
+            )
+            logger.info(
+                "FAULT_EVENT kv_restore_done request=%s wall_time=%.6f "
+                "tokens=%d blocks=%d",
+                request_id,
+                time.time(),
+                actual_tokens,
+                num_checkpoint_blocks,
+            )
+            return actual_tokens
+        except Exception:
+            logger.exception(
+                "Restore %s: failed to load/apply shared checkpoint from %s",
+                request_id,
+                request_dir,
+            )
+            return 0
+
     # ── V3 capacity-preempt: KV checkpoint save / async reload ──
     # save_checkpoint copies KV from GPU to host pinned memory.
     # restore_kv_blocks copies KV from host back to a fresh set of GPU
@@ -6293,6 +7453,28 @@ class GPUModelRunner(
                 max_memory_bytes=pool_bytes,
             )
 
+        self._ensure_shared_ckpt_dir()
+
+        bg_publish = os.environ.get("FT_BG_PUBLISH") == "1"
+
+        # FT_BG_PUBLISH backpressure: wait for the previous batch's
+        # background publish to finish before starting a new RPC. This
+        # bounds in-flight publish work at 1 batch and ensures we don't
+        # overrun the executor queue under high checkpoint frequency.
+        # The wait time reflects how slow worker-side file writes are
+        # — if it's > 0, the next RPC's API-server-visible duration
+        # is dominated by this wait, providing natural backpressure.
+        if bg_publish:
+            prev = getattr(self, "_ft_bg_publish_future", None)
+            if prev is not None:
+                try:
+                    prev.result(timeout=30.0)
+                except Exception:
+                    logger.exception(
+                        "FT_BG_PUBLISH: previous batch publish failed"
+                    )
+                self._ft_bg_publish_future = None
+
         entries: list[tuple[str, "Any", int]] = []
         for request_id, block_ids, num_tokens in request_block_map:
             entry = self._ft_checkpoint_pool.save_checkpoint(
@@ -6317,10 +7499,56 @@ class GPUModelRunner(
             if copy_stream is not None:
                 copy_stream.synchronize()
 
-        return [
-            (req_id, int(entry.size_bytes), int(num_tokens))
-            for req_id, entry, num_tokens in entries
-        ]
+        if bg_publish:
+            # Stage 3a: build optimistic results immediately. The
+            # in-memory entry size is a faithful approximation of the
+            # final shared-checkpoint size (each layer's pinned bytes
+            # = the bytes that will be written to the chunk file).
+            results = [
+                (req_id, int(entry.size_bytes), int(num_tokens))
+                for req_id, entry, num_tokens in entries
+            ]
+
+            # Stage 3b: submit the publish work to a background thread.
+            # The thread keeps a reference to the entries so they aren't
+            # evicted from the pool before the file writes complete.
+            if not hasattr(self, "_ft_publish_executor"):
+                from concurrent.futures import ThreadPoolExecutor
+                self._ft_publish_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="ft_publish",
+                )
+            publish_args = [(req_id, entry) for req_id, entry, _ in entries]
+            self._ft_bg_publish_future = self._ft_publish_executor.submit(
+                self._bg_publish_batch, publish_args,
+            )
+            return results
+
+        # Inline publish (default).
+        results = []
+        for request_id, entry, _num_tokens in entries:
+            published_size_bytes, covered_tokens = (
+                self._publish_shared_checkpoint(request_id, entry)
+            )
+            results.append(
+                (request_id, published_size_bytes, covered_tokens)
+            )
+        return results
+
+    def _bg_publish_batch(
+        self,
+        publish_args: list[tuple[str, "Any"]],
+    ) -> None:
+        """FT_BG_PUBLISH background thread: publish each entry's
+        chunk + manifest + latest. Catches exceptions per-entry so a
+        single failure doesn't drop the rest of the batch.
+        """
+        for req_id, entry in publish_args:
+            try:
+                self._publish_shared_checkpoint(req_id, entry)
+            except Exception:
+                logger.exception(
+                    "FT_BG_PUBLISH: failed to publish %s", req_id,
+                )
 
     def restore_kv_blocks(
         self,
@@ -6335,17 +7563,29 @@ class GPUModelRunner(
         and returns immediately — caller must use query_restore_done()
         to detect completion before reading the restored KV.
 
+        First checks the local pool (same-engine restore). If no
+        checkpoint is found locally, falls back to the shared /dev/shm
+        directory (cross-engine restore path).
+
         Returns the number of tokens restored, or 0 if no checkpoint.
         """
         if not self.kv_caches:
             return 0
-        if not hasattr(self, "_ft_checkpoint_pool"):
-            return 0
-        return self._ft_checkpoint_pool.restore_checkpoint(
-            request_id=request_id,
-            gpu_kv_caches=self.kv_caches,
-            target_block_ids=target_block_ids,
-            sync=sync,
+
+        # Try local pool first (same-engine restore).
+        if hasattr(self, "_ft_checkpoint_pool"):
+            tokens = self._ft_checkpoint_pool.restore_checkpoint(
+                request_id=request_id,
+                gpu_kv_caches=self.kv_caches,
+                target_block_ids=target_block_ids,
+                sync=sync,
+            )
+            if tokens > 0:
+                return tokens
+
+        self._ensure_shared_ckpt_dir()
+        return self._restore_shared_checkpoint(
+            request_id, target_block_ids, sync=sync,
         )
 
     def query_restore_done(

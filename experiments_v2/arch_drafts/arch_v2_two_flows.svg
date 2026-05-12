@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 460" width="820" height="460" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2c5282"/></marker>
+  </defs>
+
+  <text x="410" y="24" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">One mechanism, two flows</text>
+
+  <!-- separator -->
+  <line x1="410" y1="50" x2="410" y2="440" stroke="#cbd5e0" stroke-width="1" stroke-dasharray="3 3"/>
+
+  <!-- LEFT: Recovery flow -->
+  <text x="200" y="62" text-anchor="middle" font-weight="600" font-size="14" fill="#c53030">(a) Recovery flow — engine fails</text>
+
+  <!-- Engine A with X -->
+  <rect x="50" y="80" width="140" height="74" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+  <text x="120" y="100" text-anchor="middle" font-weight="600" fill="#2b4365">Engine A</text>
+  <text x="120" y="118" text-anchor="middle" font-size="11" fill="#2b4365">R1 prefill 44k/64k</text>
+  <text x="120" y="138" text-anchor="middle" font-size="10" fill="#2b4365">GPU KV</text>
+  <line x1="60" y1="84" x2="180" y2="150" stroke="#c53030" stroke-width="3"/>
+  <line x1="180" y1="84" x2="60" y2="150" stroke="#c53030" stroke-width="3"/>
+  <text x="120" y="172" text-anchor="middle" font-size="11" fill="#c53030" font-weight="600">crash</text>
+
+  <!-- Engine C target -->
+  <rect x="220" y="80" width="140" height="74" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+  <text x="290" y="100" text-anchor="middle" font-weight="600" fill="#2b4365">Engine C</text>
+  <text x="290" y="118" text-anchor="middle" font-size="11" fill="#2b4365">idle</text>
+  <text x="290" y="138" text-anchor="middle" font-size="10" fill="#2b4365">GPU KV (empty)</text>
+
+  <!-- host band left -->
+  <rect x="50" y="200" width="310" height="44" rx="6" fill="#fde7c4" stroke="#c05621" stroke-width="1.5"/>
+  <text x="205" y="218" text-anchor="middle" font-weight="600" font-size="12" fill="#7b341e">Host pinned memory</text>
+  <text x="205" y="234" text-anchor="middle" font-size="10" fill="#7b341e">R1 was checkpointing every 16 tok</text>
+
+  <!-- shm left -->
+  <rect x="50" y="270" width="310" height="56" rx="6" fill="#c6e8d0" stroke="#2f855a" stroke-width="1.5"/>
+  <text x="205" y="290" text-anchor="middle" font-weight="600" font-size="12" fill="#22543d">/dev/shm shared pool</text>
+  <rect x="80" y="298" width="160" height="20" rx="3" fill="#fff" stroke="#2f855a"/>
+  <text x="160" y="312" text-anchor="middle" font-size="10" fill="#22543d">R1 KV [0..2750]  ← survives</text>
+
+  <!-- ckpt arrow A -> host (dashed gray, before crash) -->
+  <line x1="120" y1="154" x2="120" y2="198" stroke="#888" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ag)" opacity="0.6"/>
+  <line x1="120" y1="244" x2="120" y2="268" stroke="#888" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ag)" opacity="0.6"/>
+  <text x="128" y="180" font-size="10" fill="#888" opacity="0.8">(before crash)</text>
+
+  <!-- recovery arrow shm -> Engine C -->
+  <path d="M 340 298 Q 380 298 380 140 Q 380 80 340 80 L 360 80" fill="none" stroke="#c53030" stroke-width="1.8" marker-end="url(#ar)"/>
+  <text x="386" y="200" font-size="11" fill="#c53030" font-weight="600">reload</text>
+  <text x="386" y="214" font-size="11" fill="#c53030" font-weight="600">R1 → C</text>
+
+  <!-- bottom note left -->
+  <rect x="50" y="356" width="310" height="74" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>
+  <text x="62" y="376" font-size="11" fill="#1a202c" font-weight="600">Outcome:</text>
+  <text x="62" y="392" font-size="11" fill="#1a202c">R1 resumes on C at 44k tok, not 0.</text>
+  <text x="62" y="408" font-size="11" fill="#1a202c">Saves ~20s of re-prefill on a 64k req.</text>
+  <text x="62" y="424" font-size="11" fill="#1a202c" font-style="italic">cf. Mooncake reuse, no recovery.</text>
+
+  <!-- RIGHT: Preempt flow -->
+  <text x="620" y="62" text-anchor="middle" font-weight="600" font-size="14" fill="#2c5282">(b) Preempt flow — tight-SLO arrives</text>
+
+  <!-- scheduler small -->
+  <rect x="450" y="80" width="340" height="36" rx="6" fill="#e2d8f3" stroke="#6b46c1" stroke-width="1.5"/>
+  <text x="462" y="103" font-size="11" fill="#553c9a"><tspan font-weight="600">Scheduler:</tspan> new R_urgent slack 0.2s &gt; running R7 slack 1.5s → preempt R7</text>
+
+  <!-- Engine B running R7 -->
+  <rect x="470" y="138" width="140" height="74" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+  <text x="540" y="158" text-anchor="middle" font-weight="600" fill="#2b4365">Engine B</text>
+  <text x="540" y="176" text-anchor="middle" font-size="11" fill="#2b4365">R7 decode (slack 1.5s)</text>
+  <text x="540" y="196" text-anchor="middle" font-size="10" fill="#2b4365">→ kick, run R_urgent</text>
+
+  <!-- Engine C resumes R7 later -->
+  <rect x="640" y="138" width="140" height="74" rx="6" fill="#c7e3f5" stroke="#2b6cb0" stroke-width="1.5"/>
+  <text x="710" y="158" text-anchor="middle" font-weight="600" fill="#2b4365">Engine C (later)</text>
+  <text x="710" y="176" text-anchor="middle" font-size="11" fill="#2b4365">R7 resume from KV</text>
+  <text x="710" y="196" text-anchor="middle" font-size="10" fill="#2b4365">GPU KV (rehydrated)</text>
+
+  <!-- host band right -->
+  <rect x="450" y="232" width="340" height="44" rx="6" fill="#fde7c4" stroke="#c05621" stroke-width="1.5"/>
+  <text x="620" y="250" text-anchor="middle" font-weight="600" font-size="12" fill="#7b341e">Host pinned memory</text>
+  <text x="620" y="266" text-anchor="middle" font-size="10" fill="#7b341e">R7 last ckpt @ tok 2750</text>
+
+  <!-- shm right -->
+  <rect x="450" y="290" width="340" height="56" rx="6" fill="#c6e8d0" stroke="#2f855a" stroke-width="1.5"/>
+  <text x="620" y="310" text-anchor="middle" font-weight="600" font-size="12" fill="#22543d">/dev/shm shared pool</text>
+  <rect x="540" y="318" width="160" height="20" rx="3" fill="#fff" stroke="#2f855a"/>
+  <text x="620" y="332" text-anchor="middle" font-size="10" fill="#22543d">R7 KV [0..2750]  ← intact</text>
+
+  <!-- scheduler -> B preempt -->
+  <line x1="540" y1="116" x2="540" y2="136" stroke="#2c5282" stroke-width="1.6" marker-end="url(#ab)"/>
+
+  <!-- B -> host (last ckpt) gray -->
+  <line x1="540" y1="212" x2="540" y2="230" stroke="#888" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ag)" opacity="0.6"/>
+  <line x1="540" y1="276" x2="540" y2="288" stroke="#888" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ag)" opacity="0.6"/>
+
+  <!-- resume arrow shm -> Engine C -->
+  <path d="M 700 318 Q 750 318 750 220 Q 750 138 720 138 L 740 138" fill="none" stroke="#2c5282" stroke-width="1.8" marker-end="url(#ab)"/>
+  <text x="758" y="230" font-size="11" fill="#2c5282" font-weight="600">resume</text>
+
+  <!-- bottom note right -->
+  <rect x="450" y="356" width="340" height="74" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>
+  <text x="462" y="376" font-size="11" fill="#1a202c" font-weight="600">Outcome:</text>
+  <text x="462" y="392" font-size="11" fill="#1a202c">R_urgent meets SLO; R7's 44k of work is</text>
+  <text x="462" y="408" font-size="11" fill="#1a202c">preserved, not redone.</text>
+  <text x="462" y="424" font-size="11" fill="#1a202c" font-style="italic">cf. QLM gates entry, can't preempt running.</text>
+</svg>

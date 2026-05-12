@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 480" width="820" height="480" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker>
+    <marker id="ag2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f855a"/></marker>
+  </defs>
+
+  <text x="410" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">Timeline: tight-SLO arrives at t=15s during a 64k-token prefill</text>
+
+  <!-- Baseline panel -->
+  <text x="60" y="62" font-weight="600" font-size="13" fill="#742a2a">Baseline (no host ckpt, no preempt)</text>
+
+  <!-- baseline x-axis -->
+  <line x1="120" y1="170" x2="760" y2="170" stroke="#1a202c" stroke-width="1"/>
+  <line x1="120" y1="170" x2="120" y2="165" stroke="#1a202c"/>
+  <text x="120" y="186" text-anchor="middle" font-size="10" fill="#1a202c">0</text>
+  <line x1="248" y1="170" x2="248" y2="165" stroke="#1a202c"/>
+  <text x="248" y="186" text-anchor="middle" font-size="10" fill="#1a202c">10</text>
+  <line x1="312" y1="170" x2="312" y2="165" stroke="#1a202c"/>
+  <text x="312" y="186" text-anchor="middle" font-size="10" fill="#1a202c">15</text>
+  <line x1="376" y1="170" x2="376" y2="165" stroke="#1a202c"/>
+  <text x="376" y="186" text-anchor="middle" font-size="10" fill="#1a202c">20</text>
+  <line x1="504" y1="170" x2="504" y2="165" stroke="#1a202c"/>
+  <text x="504" y="186" text-anchor="middle" font-size="10" fill="#1a202c">30</text>
+  <line x1="632" y1="170" x2="632" y2="165" stroke="#1a202c"/>
+  <text x="632" y="186" text-anchor="middle" font-size="10" fill="#1a202c">40</text>
+  <line x1="760" y1="170" x2="760" y2="165" stroke="#1a202c"/>
+  <text x="760" y="186" text-anchor="middle" font-size="10" fill="#1a202c">50  t (s)</text>
+
+  <!-- baseline R1 long context prefill (12.8 units per second; 0-20s) -->
+  <text x="100" y="98" text-anchor="end" font-size="11" fill="#2b4365" font-weight="600">R1 long ctx</text>
+  <rect x="120" y="85" width="256" height="24" rx="3" fill="#c7e3f5" stroke="#2b6cb0"/>
+  <text x="248" y="101" text-anchor="middle" font-size="11" fill="#2b4365">prefill 64k (~20s)</text>
+
+  <!-- baseline R_urgent arrives at 15, waits till 20 -->
+  <text x="100" y="138" text-anchor="end" font-size="11" fill="#2b4365" font-weight="600">R_urgent</text>
+  <!-- waiting -->
+  <rect x="312" y="125" width="64" height="24" rx="3" fill="#cbd5e0" stroke="#a0aec0"/>
+  <text x="344" y="141" text-anchor="middle" font-size="10" fill="#4a5568">wait</text>
+  <!-- run after R1 done -->
+  <rect x="376" y="125" width="40" height="24" rx="3" fill="#c7e3f5" stroke="#2b6cb0"/>
+  <text x="396" y="141" text-anchor="middle" font-size="10" fill="#2b4365">run</text>
+
+  <!-- arrival marker -->
+  <line x1="312" y1="78" x2="312" y2="170" stroke="#c53030" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="312" y="78" text-anchor="middle" font-size="10" fill="#c53030" font-weight="600">↓ R_urgent arrives</text>
+
+  <!-- SLO deadline -->
+  <line x1="324" y1="115" x2="324" y2="155" stroke="#c53030" stroke-width="1.2" stroke-dasharray="2 2"/>
+  <text x="328" y="115" font-size="10" fill="#c53030">SLO deadline (slack 0.2s)</text>
+
+  <!-- missed marker -->
+  <text x="416" y="143" font-size="11" fill="#c53030" font-weight="600">✗ missed by ~5s</text>
+
+  <!-- separator -->
+  <line x1="50" y1="210" x2="780" y2="210" stroke="#cbd5e0" stroke-width="1" stroke-dasharray="3 3"/>
+
+  <!-- Ours panel -->
+  <text x="60" y="234" font-weight="600" font-size="13" fill="#22543d">Ours (host ckpt + cheap preempt)</text>
+
+  <!-- ours x-axis -->
+  <line x1="120" y1="380" x2="760" y2="380" stroke="#1a202c" stroke-width="1"/>
+  <line x1="120" y1="380" x2="120" y2="375" stroke="#1a202c"/>
+  <text x="120" y="396" text-anchor="middle" font-size="10" fill="#1a202c">0</text>
+  <line x1="248" y1="380" x2="248" y2="375" stroke="#1a202c"/>
+  <text x="248" y="396" text-anchor="middle" font-size="10" fill="#1a202c">10</text>
+  <line x1="312" y1="380" x2="312" y2="375" stroke="#1a202c"/>
+  <text x="312" y="396" text-anchor="middle" font-size="10" fill="#1a202c">15</text>
+  <line x1="376" y1="380" x2="376" y2="375" stroke="#1a202c"/>
+  <text x="376" y="396" text-anchor="middle" font-size="10" fill="#1a202c">20</text>
+  <line x1="504" y1="380" x2="504" y2="375" stroke="#1a202c"/>
+  <text x="504" y="396" text-anchor="middle" font-size="10" fill="#1a202c">30</text>
+  <line x1="632" y1="380" x2="632" y2="375" stroke="#1a202c"/>
+  <text x="632" y="396" text-anchor="middle" font-size="10" fill="#1a202c">40</text>
+  <line x1="760" y1="380" x2="760" y2="375" stroke="#1a202c"/>
+  <text x="760" y="396" text-anchor="middle" font-size="10" fill="#1a202c">50  t (s)</text>
+
+  <!-- ours R1: prefills 0-15, preempted, resumes 17, finishes ~22 -->
+  <text x="100" y="262" text-anchor="end" font-size="11" fill="#2b4365" font-weight="600">R1 long ctx</text>
+  <rect x="120" y="250" width="192" height="24" rx="3" fill="#c7e3f5" stroke="#2b6cb0"/>
+  <text x="216" y="266" text-anchor="middle" font-size="10" fill="#2b4365">prefill (44k tok done)</text>
+  <!-- preempted gap (15 to 17) -->
+  <rect x="312" y="250" width="26" height="24" rx="3" fill="none" stroke="#c53030" stroke-width="1.2" stroke-dasharray="3 2"/>
+  <text x="325" y="266" text-anchor="middle" font-size="9" fill="#c53030">preempt</text>
+  <!-- resume -->
+  <rect x="338" y="250" width="76" height="24" rx="3" fill="#c7e3f5" stroke="#2b6cb0"/>
+  <text x="376" y="266" text-anchor="middle" font-size="10" fill="#2b4365">resume + finish</text>
+
+  <!-- ckpt ticks beneath R1 -->
+  <g stroke="#888" stroke-width="1">
+    <line x1="130" y1="278" x2="130" y2="284"/>
+    <line x1="146" y1="278" x2="146" y2="284"/>
+    <line x1="162" y1="278" x2="162" y2="284"/>
+    <line x1="178" y1="278" x2="178" y2="284"/>
+    <line x1="194" y1="278" x2="194" y2="284"/>
+    <line x1="210" y1="278" x2="210" y2="284"/>
+    <line x1="226" y1="278" x2="226" y2="284"/>
+    <line x1="242" y1="278" x2="242" y2="284"/>
+    <line x1="258" y1="278" x2="258" y2="284"/>
+    <line x1="274" y1="278" x2="274" y2="284"/>
+    <line x1="290" y1="278" x2="290" y2="284"/>
+    <line x1="306" y1="278" x2="306" y2="284"/>
+  </g>
+  <text x="220" y="298" text-anchor="middle" font-size="10" fill="#666">↑ KV ckpt every 16 tok (~0.4s)</text>
+
+  <!-- ours R_urgent: arrives 15, runs 15-17 -->
+  <text x="100" y="320" text-anchor="end" font-size="11" fill="#2b4365" font-weight="600">R_urgent</text>
+  <rect x="312" y="308" width="26" height="24" rx="3" fill="#c7e3f5" stroke="#2b6cb0"/>
+  <text x="325" y="324" text-anchor="middle" font-size="10" fill="#2b4365">run</text>
+
+  <!-- arrival marker on ours -->
+  <line x1="312" y1="244" x2="312" y2="380" stroke="#c53030" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="312" y="244" text-anchor="middle" font-size="10" fill="#c53030" font-weight="600">↓ R_urgent arrives</text>
+
+  <!-- SLO deadline marker for R_urgent (at 15.2) -->
+  <line x1="324" y1="298" x2="324" y2="338" stroke="#c53030" stroke-width="1.2" stroke-dasharray="2 2"/>
+
+  <!-- met marker -->
+  <text x="342" y="326" font-size="11" fill="#2f855a" font-weight="600">✓ meets SLO</text>
+
+  <!-- R1 outcome -->
+  <text x="420" y="266" font-size="11" fill="#2f855a" font-weight="600">✓ R1 only loses ~2s, not 20s</text>
+
+  <!-- legend / annotation -->
+  <rect x="120" y="420" width="640" height="46" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>
+  <rect x="132" y="430" width="14" height="14" fill="#c7e3f5" stroke="#2b6cb0"/>
+  <text x="152" y="442" font-size="11" fill="#1a202c">GPU active</text>
+  <rect x="222" y="430" width="14" height="14" fill="#cbd5e0" stroke="#a0aec0"/>
+  <text x="242" y="442" font-size="11" fill="#1a202c">waiting in queue</text>
+  <rect x="342" y="430" width="14" height="14" fill="none" stroke="#c53030" stroke-dasharray="3 2"/>
+  <text x="362" y="442" font-size="11" fill="#1a202c">preempted (KV in shm)</text>
+  <line x1="482" y1="437" x2="496" y2="437" stroke="#888" stroke-width="1.2"/>
+  <text x="500" y="442" font-size="11" fill="#1a202c">checkpoint event</text>
+  <text x="132" y="460" font-size="10" fill="#4a5568" font-style="italic">Ours pays ~2s of round-trip cost (reload + replay last block) to save R_urgent's SLO.</text>
+</svg>
