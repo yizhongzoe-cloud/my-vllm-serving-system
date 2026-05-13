@@ -57,7 +57,13 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RESULTS_DIR = REPO_ROOT / "experiments_v2" / "eval" / "results"
+RESULTS_DIR = Path(
+    os.environ.get(
+        "EVAL_RESULTS_DIR",
+        REPO_ROOT / "experiments_v2" / "eval" / "results",
+    )
+)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Per-dataset SLO calibration metrics file. Each dataset has its own
 # baseline P95 because prompt-length distributions differ.
@@ -73,6 +79,12 @@ E_M1_MODULE = "experiments_v2.eval.scripts.e_m1_slo_sweep"
 def read_calibration(dataset: str) -> tuple[float, float]:
     """Read baseline P95 TTFT and P95 TPOT from the calibration run
     for the given dataset. Returns (ttft_p95_ms, tpot_p95_ms).
+
+    Searches for the calibration file in this order:
+      1. RESULTS_DIR (which may be a hardware-specific subdir if
+         EVAL_RESULTS_DIR is set, e.g. results/a6000/).
+      2. Project-default results dir (experiments_v2/eval/results/) —
+         historical SLO calibration files live there.
     """
     calib_name = _CALIB_FILES.get(dataset)
     if calib_name is None:
@@ -80,17 +92,26 @@ def read_calibration(dataset: str) -> tuple[float, float]:
             f"No calibration mapping for dataset {dataset!r}; pass "
             "--base-ttft-p95-ms / --base-tpot-p95-ms instead."
         )
-    calib_path = RESULTS_DIR / calib_name
-    if not calib_path.exists():
-        raise FileNotFoundError(
-            f"SLO calibration metrics not found at {calib_path}. "
-            "Run slo_calibration.py first or pass "
-            "--base-ttft-p95-ms / --base-tpot-p95-ms."
-        )
-    data = json.loads(calib_path.read_text())
-    ttft_p95 = data["ttft_ms"]["p95"]
-    tpot_p95 = data["tpot_ms"]["p95"]
-    return float(ttft_p95), float(tpot_p95)
+
+    default_dir = REPO_ROOT / "experiments_v2" / "eval" / "results"
+    search_paths = [RESULTS_DIR / calib_name]
+    if RESULTS_DIR != default_dir:
+        search_paths.append(default_dir / calib_name)
+
+    for calib_path in search_paths:
+        if calib_path.exists():
+            data = json.loads(calib_path.read_text())
+            return (
+                float(data["ttft_ms"]["p95"]),
+                float(data["tpot_ms"]["p95"]),
+            )
+
+    tried = "\n  ".join(str(p) for p in search_paths)
+    raise FileNotFoundError(
+        f"SLO calibration metrics for {dataset!r} not found. "
+        f"Tried:\n  {tried}\nRun slo_calibration.py first or pass "
+        "--base-ttft-p95-ms / --base-tpot-p95-ms."
+    )
 
 
 def tier_thresholds(
@@ -138,7 +159,15 @@ def run_one(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT)
     print(f"[E_M2] >>> {' '.join(cmd)}")
-    return subprocess.call(cmd, env=env)
+    ret = subprocess.call(cmd, env=env)
+    if ret != 0:
+        print(
+            f"[E_M2] WARNING: run failed with exit code {ret} "
+            f"(baseline={baseline} dataset={dataset} qps={qps} "
+            f"seed={seed}); continuing with next run.",
+            file=sys.stderr,
+        )
+    return ret
 
 
 def main() -> int:

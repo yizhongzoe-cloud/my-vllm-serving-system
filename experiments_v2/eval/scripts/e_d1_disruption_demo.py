@@ -45,7 +45,11 @@ REQ_MAP_DIR = Path("/dev/shm/vllm_ft_req_map")
 CKPT_DIR = Path("/dev/shm/vllm_ft_checkpoints")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-RESULTS_DIR = SCRIPT_DIR.parent / "results"
+RESULTS_DIR = Path(
+    os.environ.get(
+        "EVAL_RESULTS_DIR", SCRIPT_DIR.parent / "results"
+    )
+)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ENGINE_READY_TIMEOUT_S = 240

@@ -38,7 +38,13 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RESULTS_DIR = REPO_ROOT / "experiments_v2" / "eval" / "results"
+RESULTS_DIR = Path(
+    os.environ.get(
+        "EVAL_RESULTS_DIR",
+        REPO_ROOT / "experiments_v2" / "eval" / "results",
+    )
+)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 E_M1_MODULE = "experiments_v2.eval.scripts.e_m1_slo_sweep"
 
 
@@ -69,7 +75,15 @@ def run_one(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT)
     print(f"[E_M4] >>> {' '.join(cmd)}")
-    return subprocess.call(cmd, env=env)
+    ret = subprocess.call(cmd, env=env)
+    if ret != 0:
+        print(
+            f"[E_M4] WARNING: run failed with exit code {ret} "
+            f"(baseline={baseline} dataset={dataset} qps={qps} "
+            f"seed={seed}); continuing with next run.",
+            file=sys.stderr,
+        )
+    return ret
 
 
 def main() -> int:

@@ -59,7 +59,11 @@ REQ_MAP_DIR = Path("/dev/shm/vllm_ft_req_map")
 CKPT_DIR = Path("/dev/shm/vllm_ft_checkpoints")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-RESULTS_DIR = SCRIPT_DIR.parent / "results"
+RESULTS_DIR = Path(
+    os.environ.get(
+        "EVAL_RESULTS_DIR", SCRIPT_DIR.parent / "results"
+    )
+)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 SHAREGPT_PATH = (Path(__file__).resolve().parents[2]
                  / "datasets" / "cached" / "sharegpt_5000.jsonl")
