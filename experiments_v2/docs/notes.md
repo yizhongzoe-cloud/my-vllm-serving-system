@@ -536,3 +536,542 @@ Disruption-aware slack 计算：rerouted 请求在 scheduler 优先级上让位�
 跨 engine 的 SLO scheduling：当一台 engine 接收 rerouted 请求时，本地正在跑的低 slack 请求要不要主动让位 —— 一个跨 engine 的 slack 协调
 任意加一个就能从"组合"变成"协同"，故事质感能提一档。有了协同点，SoCC / EuroSys 的成功率会显著高，但还到不了顶会。
 
+---
+
+## Planned ablation: Disruption-aware slack penalty
+
+**做啥**：在 `compute_slo_budgets` 里给 rerouted 请求加一个 TTFT penalty——当作"被 disruption 烧掉一截 budget"，让 SLO picker 把它当成更急的 head 来处理。
+
+**机制**（极简，5 行）：
+```python
+if request.is_rerouted and request.num_output_tokens == 0:
+    disruption_penalty_ms = 2000   # 或 = engine A 上活过的时间（更精确）
+    ttft_ms = ttft_ms - disruption_penalty_ms
+```
+
+**因果链**：rerouted 请求 slack 看起来更小 → SLO picker 选它当 head → 同 engine 上 SLO 宽松的 running req 被踢出来让位 → rerouted 请求更快进 KV → 更快出 first token。
+
+**Ablation 设计**：
+- Workload：RULER 64K，target engine 在 reroute 发生时**已经满载**（必须制造 queue pressure，否则 penalty 没用武之地）
+- 两个 condition：with penalty vs without
+- 主 metric：rerouted 请求的 `failover_gap_p95`
+- 次要 metric：被踢让位的 victim 请求的 TTFT/TPOT SLO 达标率（penalty 让别人付出代价，要看代价多大）
+
+**何时砍**：如果 with/without 差距不显著，说明在我们这个 setup 下 reroute 目标 engine 基本不堵，penalty 是死知识——砍掉，paper 不提。
+如果差距显著，加进 contribution list：mechanism × policy 真正耦合的一个点（呼应"改进"那节里的耦合诉求）。
+
+**实现成本**：5 行代码 + 一个 ablation 实验 batch。低成本高信息量。
+
+---
+
+## 实验设计调研：8 篇 LLM serving paper 的 eval 配置
+
+调研对象（按 paper 分两组研究的）：
+- 组 A：QLM (SoCC'24)、Scorpio (arXiv'25)、JITServe (arXiv'25)、FastServe (arXiv'23)
+- 组 B：Llumnix (OSDI'24)、Andes (arXiv'24)、Niyama (arXiv'25)、TokenFlow (EuroSys'26)
+
+### 组 A 对照表（profile-heavy SLO scheduler）
+
+| 维度 | QLM | Scorpio | JITServe | FastServe |
+|---|---|---|---|---|
+| Hardware | 30x A10 + 50x A100（异构云） | 4x A100 80GB 单机 | 16x A100 cluster | 2x p4d.24xlarge (16x A100 40GB) |
+| Models | Mistral-7B / Vicuna-13B / Llama-70B | Llama3-8B (1 GPU) + Gemma2-27B (TP=4) | Llama3-8B / Qwen2.5-14B / Qwen3-30B-MoE / Llama3-70B | OPT-13B/66B/175B |
+| Workload | ShareGPT 3.5K req + 3 自定 scenario（WA/WB/MegaPrompt 3-4K tokens） | ShareGPT + LMSYS-Chat + Azure Inference Trace 20 分钟 | Azure trace + 4 应用（Chatbot/Math/Deep Research/Agentic Code），每 run > 10K req | ShareGPT + Alpaca（只用长度分布，无 timestamp）|
+| Arrival | Poisson | Poisson QPS sweep + 一次 Azure 重放 | scaled Azure trace + Poisson ablation | Poisson |
+| Metrics | SLO attainment % / req/s / P99 TTFT / 设备利用率 | Goodput / SLO adherence rate / TTFT / TPOT / 累计 SLO-met curve | Token goodput / request goodput / TTFT P50/P95 / TBT P50/P95 | Avg + P95 per-token latency / P95 goodput（5x/10x/20x SLO）|
+| Baselines | vLLM-FCFS / EDF / Shepherd | vLLM / S3 / Mooncake | vLLM / Sarathi-Serve / Autellix / Learn-to-Rank / oracle | FasterTransformer / vLLM / FastServe-FCFS（隔离 engine vs scheduling）|
+| Trials | 单 run，无 error bar | 单 run，无 error bar | **5 个 seed 平均**（唯一一个） | 单 run |
+| Eval 长度 | ~12-15 页 | ~4 页 | ~6-7 页 | ~4 页 |
+
+### 组 B 对照表（最近 / migration 相关）
+
+| 维度 | Llumnix | Andes | Niyama | TokenFlow |
+|---|---|---|---|---|
+| Hardware | 16x A10 24GB（4 VM x 4 卡），PCIe 4.0 + 64 Gb/s Ethernet（无 NVLink/IB）| A100 80GB / 4x A100 / A40 46GB，Chameleon Cloud | 1-2x A100 80GB | RTX 4090 / A6000 / H200 / Ascend 910B（异构）|
+| Models | Llama-7B / Llama-30B (TP=4)，**max seq len 2K** | OPT-13B/30B/66B/175B | Llama3-8B / Qwen-7B | Llama3-8B / Qwen2-7B / Qwen2.5-32B |
+| Workload | ShareGPT + BurstGPT + 合成 power-law（S/M/L 128/256/512 tokens），10K req | ShareGPT + Multi-Round ShareGPT（capped 1K）| ShareGPT + Azure Conv + Azure Code（含 3 QoS tier）| ShareGPT + BurstGPT + 私有生产 trace + 合成正态分布 |
+| Arrival | Poisson + Gamma（burst CV sweep） | Poisson + Gamma (CV=3) | Poisson + 4 小时 diurnal spike 重放 | Bursty (configurable b) + Poisson + 20 分钟 BurstGPT 压测 |
+| Metrics | Mean + P99 e2e latency / P99 prefill / P99 decode / preempt loss / **migration downtime (ms)** / KV 碎片率 | **QoE（主）**+ TTFT + TDS + capacity at QoE≥0.9 + preempt 频率 | TTFT / TBT / TTLT / deadline violation % / goodput / normalized GPUs needed | Mean+P99 TTFT / raw throughput / **effective throughput**（buffer-weighted）/ QoS |
+| Baselines | Round-robin / INFaaS++ / Llumnix-base | vLLM 0.2.7-FCFS / Round-Robin | Sarathi-Silo / Sarathi-FCFS / Sarathi-EDF / Sarathi-SRPF（无 vLLM 无 Llumnix）| SGLang / SGLang+chunked / Andes（无 Llumnix 无 vLLM 无 Sarathi）|
+| Trials | 单 run | 单 run | 单 run | 单 run |
+| **Disruption / fault injection** | **0 个**（Sec 5 有 fault-tolerance 架构描述，eval 里没注入实验）| **0 个** | **0 个** | **0 个**（虽然机制跟 preempt 相邻）|
+| Eval 长度 | ~12 页 | ~6-7 页 | ~7-8 页 | ~9-10 页 |
+
+### 8 篇里没人做过的（我们的差异化）
+
+1. **Failure injection / instance kill / disruption recovery：0 篇做过**。Llumnix paper 里 Sec 5 描述了 fault-tolerance 协议，但 eval 没注入实验。Llumnix 测过 migration downtime (ms) 但都是 healthy 状态下的 micro-bench
+2. **多 seed averaging：只有 JITServe（5 runs）有**。我们报 mean ± std over 3 seeds 直接超过 7/8 paper 的 rigor bar
+3. **真长上下文（64K+）：0 篇测过**。Llumnix 卡 2K，Andes 卡 1K。RULER 64K/128K 是没人对标过的区段（既是机会也是风险：没 baseline 镜子可照）
+
+### 可直接借用的设计模板
+
+- **SLO 校准方法**（JITServe）：用 "P95 of 1k DeepSeek API calls" 作为 SLO 阈值标定方法（别拍脑袋定数字）
+- **多 SLO class 报告**（Niyama）：每个 dataset 分 3 个 QoS tier，每 tier 独立 TTFT/TBT/TTLT，分别报 violation rate
+- **input:output ratio sweep**（FastServe）：0.25 - 256x 范围，是长上下文 stress 实验的现成模板
+- **Burst CV sweep**（Llumnix/Andes/TokenFlow）：Gamma 分布改 CV，测抗突发能力
+- **Diurnal 4-hour spike replay**（Niyama）：长时段真实负载模式
+- **20-min Azure trace replay**（Scorpio）：工作坊量级够用的 trace 实验
+
+### 工作坊 paper（APSys）eval 量级参考
+
+- **Scorpio（~4 页）/ Andes（~6-7 页）** 是 workshop 量级合理对照
+- **QLM（~12-15 页）/ TokenFlow（~9-10 页）** 是 conference 量级，不用对标
+- APSys 6-8 页 paper，eval 部分应占 3-4 页，4-6 张图
+
+### 给我们的建议实验清单（按价值排）
+
+1. **核心实验**：disruption scenario sweep（kill rate × workload load × SLO tightness）报 `failover_gap_p95` + SLO attainment。对手：vLLM-FCFS（地板）+ Llumnix-style "no checkpoint mirror, source must be alive"（直接竞争对手）
+2. **副 ablation**：disruption-aware slack penalty 的 with / without（呼应上节的 Planned ablation）
+3. **必备地板**：vLLM-FCFS baseline 跑同一组 workload，证明 disruption-free 场景下我们没把别的性能搞坏
+4. **可选增强**：burst CV sweep 看抗压性
+
+---
+
+## 实验计划（最终版）
+
+### Paper framing 决定
+
+**主线**：SLO scheduling for long-context serving（V3 reload + slack picker）
+**副线（demo only）**：cross-engine disruption recovery（host-side ckpt mirror）
+
+理由：两条技术线（SLO scheduling + disruption recovery）在 6-8 页 workshop paper 同时撑会 split-personality。但完全砍 disruption 会丢掉差异化（8 篇调研里 0 paper 做 failure injection）。折中：主轴 SLO scheduling，disruption 降级为一节 demo + 一张图，**不开 sweep**。
+
+### 硬件
+
+- 主：2x A6000（Ampere，48GB × 2，PCIe）
+- 副 portability check：2x L40S（Ada，48GB × 2，PCIe）
+- **不用租别的**。3+ engine 的 corner case 之前定了先不管
+
+### Model
+
+Qwen2.5-7B-Instruct（已在用）。FP16 模型 14GB，KV cache @ 64K 每请求 ~3.7GB → 每卡能塞 5-8 个并发，足够制造 queue pressure。
+
+### Workload / Dataset
+
+两个 dataset 一起跑，看效果再决定 paper 主图用哪个为主：
+- **RULER 64K**（合成长上下文 prompt + Poisson 到达）—— 测长上下文极端场景
+- **ShareGPT**（真实对话日志）—— 短上下文常规负载，跟主流 paper 同一地板
+
+候选（暂不跑，看主图效果再决定补不补）：
+- **Azure LLM Inference Trace**（真 production 时序）
+- BurstGPT 推后
+
+Arrival pattern：Poisson 不同 QPS sweep（SLO 校准 + 主图）。
+Bursty / Gamma CV sweep 推后。
+
+### SLO 校准（JITServe 风格，不拍脑袋）
+
+跑一次 vLLM-FCFS @ 1 req/s on RULER 64K → 测 baseline P95 TTFT / P95 TPOT → 设：
+- `S_TTFT = 2 × baseline_p95_TTFT`
+- `S_TPOT = 2 × baseline_p95_TPOT`
+
+三档 SLO tier（紧/中/松，参考 Niyama）：1.5x / 3x / 6x baseline P95。
+
+### Baselines（3 个，全自己实现）
+
+| Baseline | 描述 | 等价对应 |
+|---|---|---|
+| **vLLM-FCFS** | 上游 vLLM 原样，engine 死则客户端 5xx | 工业现状地板 |
+| **Reroute-no-ckpt** | 我们的 router + 跨 engine reroute，**禁用 V3 reload**（环境变量 off），目标 engine 全 reprefill | **Llumnix stand-in**：捕获 "live migration 失效后能退到什么程度"。Llumnix 真代码跑不动（v0.6 base 跟我们 v0.16 不兼容）。paper 里诚实声明 stand-in 身份 |
+| **Ours** | 完整系统：router + V3 reload + cross-engine restore via /dev/shm | — |
+
+### Metrics
+
+**主**：
+- SLO attainment % = `(TTFT ≤ S_TTFT) ∧ (TPOT ≤ S_TPOT)` 比例
+- TTFT P50 / P95
+- TPOT P50 / P95
+- Goodput tok/s
+
+**副（仅 demo 用）**：
+- `failover_gap_p95`：rerouted 请求子集上 TPOT P99（定义见下）
+
+### `failover_gap_p95` 定义（保留，仅 E_D1 用）
+
+- 测量方法：rerouted 请求从 engine A 失联时刻 到 first new token 收到时刻的墙钟差
+- 本质：rerouted 请求子集上 TPOT P99（renamed for paper marquee）
+- 测量方式：**顺便测**——复用 Test 4 框架（不动 smoke test，复制一份到 eval/），加 ~10 行 instrumentation 记 kill 时刻 + first-token-after-kill 时刻
+- 不开 sweep，单次 demo 即可
+
+### Experiment matrix（5 组）
+
+| ID | 实验 | Conditions | Workload | 价值 |
+|---|---|---|---|---|
+| **E_M1** | 主图：SLO attainment vs load | 3 system × QPS sweep | Azure trace 20-min 重放 | **核心 contribution** |
+| **E_M2** | SLO tightness sweep | 3 SLO tier × 3 system | Azure trace 固定 QPS | 紧 SLO 下优势放大 |
+| **E_M3** | System overhead (healthy) | 3 system，无 disruption，低 load | RULER healthy | 证明无副作用 |
+| **E_M4** | Picker ablation | ours w/ vs w/o slack picker | Azure trace | 隔离 picker 贡献 |
+| **E_D1** | Disruption demo | 3 system × 单次 engine SIGKILL | RULER + 注入 kill | demo only，1 图 |
+
+**3 个 seed mean ± std**，超过 7/8 baseline paper 的 rigor bar。
+
+### 输出图
+
+4-5 张图：
+- Fig 1: E_M1 主图（SLO attainment vs QPS）
+- Fig 2: E_M2 SLO tightness（3 tier bar chart）
+- Fig 3: E_M3 overhead bar
+- Fig 4: E_M4 picker ablation
+- Fig 5: E_D1 disruption demo（含 failover_gap_p95 + 恢复后 SLO 是否达标）
+
+### 时间预估
+
+- A6000 上：E_M1+2+3+4 共约 15 GPU-hour，E_D1 ~ 1 hour，加 buffer 3-4 整天 GPU
+- L40S portability check（重跑 E_M1）：~ 5 hour
+
+### 实验代码位置
+
+- 新建 `experiments_v2/eval/`，所有 paper 实验脚本放这
+- **不动 `experiments_v2/smoke/`**——smoke test 是 smoke test，跟 paper 实验解耦
+- E_D1 那个 disruption demo 是从 Test 4 复制改造，**不动原 Test 4**
+
+### 两个 critical 选择（已定）
+
+1. ✅ Workload：Azure trace 主 + Poisson 副，BurstGPT 推后
+2. ✅ Reroute-no-ckpt 作为 Llumnix stand-in，paper 里诚实声明
+
+---
+
+## 实验计划（草案）
+
+### Model & workload
+
+- **Model**：Qwen2.5-7B-Instruct（已在用）
+- **Long-context workload**：RULER 64K（lead workload，memory 里定的）
+- **Arrival pattern**：
+  - 主：**Azure LLM Inference Trace** 20-min 重放（4/8 paper 在用，最强 trace）
+  - 副：Poisson 不同 QPS（for SLO 校准、burst 敏感性）
+- **Disruption 注入**：`SIGKILL` engine subprocess at controlled wall-clock points（kill rate ∈ {0, 1/min, 1/30s}）
+
+### SLO 校准（JITServe 风格）
+
+跑一次 vLLM-FCFS @ 低负载（1 req/s）on RULER 64K，测 baseline P95 TTFT 和 P95 TPOT。设：
+- `S_TTFT = 2 × baseline_p95_TTFT`
+- `S_TPOT = 2 × baseline_p95_TPOT`
+
+不拍脑袋。
+
+### 三个 baseline（我们都能实现）
+
+| Baseline | 描述 | 等价对应 |
+|---|---|---|
+| **vLLM-FCFS** | 上游 vLLM，engine 死了客户端拿 5xx | 工业现状地板 |
+| **Reroute-no-ckpt** | 我们的 router + 跨 engine reroute，**但禁用 V3 reload**，目标 engine 全 reprefill | Llumnix-style "迁移但无 checkpoint 帮助"——直接竞争对手 |
+| **Ours** | router + V3 reload + cross-engine restore via /dev/shm | 完整系统 |
+
+注意：**没有真 Llumnix**（OSDI'24 代码 vLLM v0.6 base，跟我们 v0.16 不兼容，移植太贵）。Reroute-no-ckpt 是"功能上 Llumnix（迁移逻辑保留）但无 host checkpoint（Llumnix 用 GPU↔GPU copy 要求 source 活）"的合理 stand-in。这条要在 paper 里诚实写清楚。
+
+### Metrics
+
+主：
+- **`failover_gap_p95`**：engine 死到 rerouted 请求出 first new token 的墙钟差（lead metric）
+- **SLO attainment %**：`(TTFT ≤ S_TTFT) ∧ (TPOT ≤ S_TPOT)` 的请求比例
+- **`failover_gap_p95` per disruption** 分布
+
+副：
+- TTFT P50/P95，TPOT P50/P95（全体请求）
+- Goodput tok/s
+- 请求失败率（5xx）
+
+诊断：
+- PCIe ckpt 带宽占比（验证不是 bottleneck，省得审稿人质疑）
+
+### 实验矩阵（5 组）
+
+| ID | 实验 | Conditions | Workload | 价值 |
+|---|---|---|---|---|
+| E1 | 主图：disruption sweep | 3 kill rate × 3 system | Azure trace 20-min | 核心 contribution |
+| E2 | SLO 紧度 sweep | 3 SLO tier {tight/medium/loose} × 3 system | Azure trace + 固定 kill rate | 说明在紧 SLO 下我们优势放大 |
+| E3 | Disruption-aware slack penalty ablation | ours w/ penalty vs w/o，target engine 满载 | Poisson 高负载 + 注入 kill | 上节 planned ablation |
+| E4 | Healthy baseline | 3 system，**无 disruption** | Azure trace | 证明 disruption-free 我们没把性能搞坏 |
+| E5 | Hardware portability | 在 L40S 重跑 E1 | Azure trace | 一张图，跨硬件趋势一致 |
+
+每个实验 **3 个 seed，报 mean ± std**——超过 7/8 baseline paper 的 rigor bar。
+
+### 输出
+
+- 主文 4-6 张图：E1（核心）、E2、E3、E4、E5
+- Appendix 可选：原始数据 + 诊断 PCIe 带宽
+
+### 时间预估
+
+- 单次 20-min Azure trace 重放 × 3 seeds × 3 system = 9 runs × 20 min = 3 小时
+- E1+E2+E3+E4 主硬件 A6000 总计约 15-20 小时跑实验
+- E5 portability check 在 L40S 再来一遍 E1 = 3 小时
+- 加上 debug、bug fix、复跑：保守估计 **3-4 整天的 GPU 时间**
+
+### 两个 critical 选择要你拍板
+
+1. **Workload**：Azure LLM Trace 主 + Poisson 副，OK 吗？还是想换 BurstGPT 主（更突发，TokenFlow 在用）？
+2. **Reroute-no-ckpt baseline**：用我们自己的代码禁掉 V3 reload 那条 path 实现，作为 Llumnix 的 functional stand-in，paper 里说清楚是 stand-in 不是真 Llumnix——能接受吗？
+
+---
+
+## 每个实验干啥
+
+### E_M1：SLO attainment vs load（主图）
+
+**问题**：在不同负载下，每个 system 还能不能保 SLO？
+
+**Setup**：Azure trace 重放，每条请求都有 SLO（S_TTFT, S_TPOT）。改变 arrival rate（QPS sweep），三个 system 各跑一次。
+
+**测量**：每个 QPS 点上 `SLO_met` 请求比例 = `(TTFT ≤ S_TTFT) ∧ (TPOT ≤ S_TPOT)` 的比例。
+
+**输出图**：x = QPS，y = SLO attainment %，三条曲线（vLLM-FCFS / Reroute-no-ckpt / Ours）。我们的曲线应该撑得比对手高，且崩塌点出现得更晚。
+
+**故事**：paper 主轴。"我们在更高负载下还能保 SLO"。
+
+---
+
+### E_M2：SLO tightness sweep
+
+**问题**：SLO 越紧，我们的优势是不是越大？
+
+**Setup**：固定 QPS（取 E_M1 曲线膝盖那个点），换三档 SLO（tight / medium / loose = 1.5x / 3x / 6x baseline P95），三个 system 各跑一次。
+
+**测量**：每档 SLO 下的 attainment %。
+
+**输出图**：分组柱状图，3 档 × 3 system。
+
+**故事**：紧 SLO 下 V3 reload + slack picker 的价值放大；松 SLO 下大家差不多——这恰好是 slack picker 该 fire 的场景。
+
+---
+
+### E_M3：System overhead（健康基线）
+
+**问题**：在 disruption-free + 低负载场景下，我们是不是把性能搞慢了？
+
+**Setup**：三个 system，**完全不杀 engine**，低 QPS（不撑满，picker 不该触发 preempt）。
+
+**测量**：TTFT P50/P95、TPOT P50/P95、throughput tok/s。
+
+**输出图**：表格或者 3 个 system 的柱状对比。**期待**：三个 system 数字接近，证明我们的机制在不需要时不收税。
+
+**故事**：审稿人第一反应"加了这么多机制你日常是不是变慢了"——这张图先把这个 defensive 问题挡掉。
+
+---
+
+### E_M4：Picker ablation
+
+**问题**：V3 reload 机制和 slack picker 哪个出的力？
+
+**Setup**：两个 condition：
+- `ours-full`：V3 reload + slack picker 都开
+- `ours-no-picker`：V3 reload 开，slack picker 关（按 FCFS 顺序 admit，不主动 preempt）
+
+跑 E_M1 同一组 workload。
+
+**测量**：SLO attainment %。
+
+**输出图**：跟 E_M1 同一张图叠两条线，或者单独一张。
+
+**故事**：把"机制"和"策略"两个贡献剥开。如果 ours-no-picker 已经接近 ours-full，那 picker 是 marginal——paper 改主轴。如果 picker 加上去明显涨，那 picker 是核心贡献。
+
+---
+
+### E_D1：Disruption recovery demo（仅一张图，不开 sweep）
+
+**问题**：engine 死了，恢复要多久？
+
+**Setup**：N 个并发长请求，跑到 engine 都有活后 SIGKILL engine 0。三个 system 各跑一次。
+
+**测量**：对每个被 reroute 的请求，`failover_gap = first_new_token_ts − kill_ts`。报分布 + P50/P95。
+
+**输出图**：3 个 system 的 failover_gap CDF 或柱状图。
+
+**故事**：完整 paper 一节，我们的恢复是秒级，stand-in Llumnix 那条线得 reprefill 整个 64K 是几十秒。一图定胜负。
+
+---
+
+## E_D1 初步结果（demo 跑通，2026-05-12）
+
+**setup**：
+- 硬件：2x A6000
+- Model：Qwen2.5-7B-Instruct，FP16
+- Prompt：**合成的，不是真数据集**——`"The quick brown fox jumps over the lazy dog. " * N` 凑到 4096 token，末尾 " Request {idx}." 差异化
+- N=12 并发请求，--no-enable-prefix-caching
+- 每 baseline 跑 3 seeds
+- failover_gap 测法：engine 1 日志 `FT first_post_reroute_token req=... ts=...` 减 SIGKILL 时刻
+- 心跳/判死阈值用默认（200ms 写心跳 + 2s 判死），没调紧
+
+**数字**（单位 ms，列是 min / P50 / max）：
+
+| Baseline | seed 0 | seed 1 | seed 2 | 综合 |
+|---|---|---|---|---|
+| ours | 1367 / 1367 / 1368 | 1626 / 1626 / 1626 | 1539 / 1540 / 1540 | min 1367, P50 ~1540, max 1626 |
+| reroute_no_ckpt | 1032 / 2494 / 3730 | 1020 / 2486 / 3725 | 1024 / 2498 / 3745 | min 1020, P50 ~2493, max 3745 |
+
+**观察**：
+
+1. **均值差距：~1.7x P50，~2.3x max**。reroute_no_ckpt P50 2.49s vs ours P50 1.54s
+2. **方差天差地别**：
+   - ours：同 run 6 个请求几乎同时恢复（差 ~1ms）。state machine 一次性并行恢复 6 个
+   - reroute_no_ckpt：vanilla scheduler 串行 admit + prefill，1s 到 3.7s 一字排开，tail 是 mean 的 1.5x
+3. **跨 seed 重现性极强**：reroute_no_ckpt 三 seed min/P50/max 差 < 20ms
+
+**为什么差距没到预期 10x**：
+
+4096 token prefill 在 7B 模型 + A6000 上本来就快（1-3s）。短上下文下"重新 prefill"不是大头。**这套对比的卖点要到 RULER 64K 才显出来**——64K reprefill 几十秒，那时候我们 ~1s 恢复对比才是碾压级。
+
+**两个潜在 paper point**：
+
+1. Mean failover_gap 1.7-2.3x improvement（在 4K 短上下文已经能看出来，64K 会被放大）
+2. **方差/tail 这条独立的故事**：ours 保证可预测的 tail（所有受影响请求同步恢复）。reroute_no_ckpt 的 tail 是 mean 的 1.5x。审稿人能 buy
+
+**下一步**：
+- 长上下文版（4K → 64K）才是正式 paper 数字
+- 心跳/判死调紧（50ms/500ms）能把 ours 的 1.5s 压到 ~0.7s
+- 当前 sanity 跑通即可，不再调
+
+数据文件：`experiments_v2/eval/results/e_d1_{ours,reroute_no_ckpt}_n12_seed{0,1,2}_metrics.json`
+
+---
+
+## Picker preempt 之后请求的状态机（Option B）
+
+picker 是 engine 层的，每个 engine 的 scheduler 自己跑自己的 picker，只看自己的 waiting / running 队列。router 不参与。
+
+**触发**：engine A 的 picker 发现自己 waiting 头有 tight-SLO 请求 T、自己 running 里有 loose-SLO 请求 V（V.slack - T.slack > min_gap + replay_cost），把 V 踢出去：
+1. 释放 V 在 GPU 上的 KV
+2. V 状态改成 `WAITING_FOR_REDISPATCH`
+3. V prepend 回 engine A 的 waiting 队列头
+4. 同步往 `slo_preempted_for_redispatch` 这个 side queue 加一条 (V, preempt_ts)
+
+`WAITING_FOR_REDISPATCH` 是我们自己加的状态，vllm 原生不认识。engine A 的 admit loop 看到这个状态会 skip-prepend，所以 V 永远不会被这个 engine 的 admit 自动 admit 回 running。
+
+**engine A 自己每步要做的事**（在 `_process_slo_redispatch_queue` 里）：
+
+- 第一次看到 V：把 V 的元数据（engine_id、internal_req_id、num_checkpointed_tokens、router_req_id、preempt_ts）写到 `/dev/shm/vllm_ft_preempt_queue/<req>.json`，加进自己的 in-flight 跟踪表
+- 之后每步检查 V 的状态：
+  - 如果 V.status > PREEMPTED（说明 HTTP 被 router 关掉，vllm 自己 abort 了 V）→ 清理 shm 文件、丢出 in-flight 表
+  - 如果 V 状态没变 + 离 preempt_ts 已经超过 `FT_REDISPATCH_TIMEOUT_S`（默认 5 秒）→ timeout fallback 路径
+
+**V 的两条出路**：
+
+**出路 1：router 接走**
+
+1. router 每 200ms 扫一次 `/dev/shm/vllm_ft_preempt_queue/`，看到 V 的条目
+2. router 调 `pick_engine(exclude=A)`——硬排除原 engine、在剩下的 alive engine 里挑最闲的（按 in_flight count + KV usage + waiting count）
+3. 找到 engine B，把 engine A 上 V 对应的 HTTP forward task `cancel()`——httpx 关 socket，vllm 看到 client disconnect，abort 本地 V
+4. router 给 engine B 发新 HTTP，body 里夹带 `is_rerouted=True`、`original_internal_req_id`、`num_checkpointed_tokens`
+5. engine B 的 `add_request` 看到 `is_rerouted=True`，把请求塞进 `WAITING_FOR_RELOAD` 状态
+6. engine B 的 `_process_overlap_reload_queue` 推进 V3 reload 状态机：分一组新 block → 从 host 内存复制 KV 过来 → `num_computed_tokens` 设成恢复的 token 数 → 状态改成 vllm 原生的 `PREEMPTED`
+7. engine B 自己的 admit loop 看到 `PREEMPTED` 当 resume 处理，塞进 running、status 改 RUNNING、继续 forward 剩下的 token
+
+**注意**：router 不会发回原 engine A。设计上是故意排除 origin 的（绕一圈又回 A 不如 A 自己 timeout 本地 reload 省一次 HTTP 来回）。当前 router 也不会比较「A 现在反而比 B 闲」——只看其他 engine 的 load。
+
+**出路 2：engine A 本地 timeout fallback**
+
+5 秒 timeout 之后，A 做的事**不是**立刻让 V 进 running，是：
+
+1. V 状态从 `WAITING_FOR_REDISPATCH` 改成 `WAITING_FOR_RELOAD`
+2. 把 (V, num_checkpointed_tokens) 扔进 `slo_preempted_for_overlap_reload` 队列
+3. 删掉 shm 文件（router 之后扫不到）
+
+然后 V3 reload 状态机接手：
+
+1. 试着调 `allocate_slots` 给 V 分一组 GPU block
+2. **如果 A 这时候 GPU 满了，分不到 block，V 就卡在 `waiting_for_blocks` 状态，每步重试**——直到 A 上有其他请求跑完离开、腾出空 block 才能继续
+3. 分到 block 后：从 host 内存恢复 KV → status 改 `PREEMPTED`
+4. 下一步 admit loop 看到 `PREEMPTED` → admit 进 running
+
+所以 timeout fallback 不是「立刻 running」，是「开始排队等 GPU 空位 + 走 V3 reload 恢复」。等到 A 有空位才进 running。
+
+**V3 reload 是 engine 本地的状态机，跟"是 A 还是 B"无关**：只要请求带 `is_rerouted=True` 进 `WAITING_FOR_RELOAD` 状态，不管在哪台 engine 上都走同一套流程。原 engine 的 fallback 和跨机 router 接走，最终都汇到 V3 reload 这条路径上恢复 KV。
+
+**交接点小结**：
+
+| 状态 | 谁定义 | 谁推进 | admit loop 看到时 |
+|---|---|---|---|
+| `WAITING_FOR_REDISPATCH` | 我们 | engine A 的 `_process_slo_redispatch_queue` | skip-prepend |
+| `WAITING_FOR_RELOAD` | 我们 | 任一 engine 的 `_process_overlap_reload_queue` | skip-prepend |
+| `PREEMPTED` | vllm 原生 | vllm 自己的 admit loop | 当 resume 处理，塞进 running |
+
+我们的两个自定义状态都是中间态。最后通过把状态改成 vllm 原生的 `PREEMPTED`，把请求交还给 vllm 自己的 admit 流水线——不用自己写 admit 逻辑。
+
+---
+
+## E_M1 实验逻辑（paper 主图）
+
+### 这个实验在测什么
+
+「SLO attainment vs load」——同样的 workload 在不同 QPS（每秒到达请求数）下，三个系统各自能保证多少比例的请求满足 SLO。曲线 X 轴 QPS、Y 轴 SLO 通过率，三条线（三个系统）。
+
+判定标准：每个请求的 TTFT 和 TPOT 都不超 SLO 才算通过。
+
+### 三个对比系统
+
+| 系统 | 配置 | 含义 |
+|---|---|---|
+| `vllm_fcfs` | 2 个原生 vllm engine，客户端 round-robin，**没有 router** | 工业现状地板 |
+| `reroute_no_ckpt` | router + 2 engine，但 FT 全关（picker off、ckpt off、V3 reload off） | Llumnix-style stand-in：reroute 存在但没 host KV，只能全 reprefill |
+| `ours` | router + 2 engine，全开（picker + host ckpt + V3 reload） | 完整系统 |
+
+只有 `ours` 把 `SLO_PRIORITY_PREEMPT=1` 打开，并且客户端把 `ttft_slo_ms`/`tpot_slo_ms` 通过 `vllm_xargs` 送进引擎，picker 才能算 slack。其他两个 baseline 即使 env 设了也不起作用（客户端不送 SLO）。
+
+### SLO mode：uniform vs tiered
+
+- `uniform`：所有 N 个请求一个 SLO。简单 sanity check
+- `tiered`（Niyama 风格，**paper 主图用这个**）：N 个请求按 idx %% 3 分到 tight/normal/loose 三类，**每类的 SLO 不同**。tight 最严、loose 最松。混合分配的种子跟 prompt 采样独立，避免分配跟 prompt 内容耦合
+
+为什么用 tiered：picker 本质是 "tight-vs-loose 优先级仲裁"，uniform 模式下没差异（都一样紧），picker 无的放矢
+
+### SLO 数怎么来的（不能拍脑袋）
+
+跑一次 `slo_calibration.py` 在**低 QPS、原生 vllm**（无 contention、无 FT）下测每个 dataset 的 baseline P95 TTFT/TPOT。三档 SLO = baseline P95 × {1.5, 3, 6}。
+
+ShareGPT A6000 实测出来：
+
+```
+baseline TPOT P95 ≈ 22ms → tier 33 / 66 / 132 ms
+baseline TTFT P95 ≈ 456ms → tier 684 / 1368 / 2736 ms
+```
+
+文件：`experiments_v2/eval/results/slo_calib_sharegpt_n30_qps0.1_seed0_metrics.json`
+
+**关键**：tight SLO 是按"低负载基线 × 1.5"算的。高 QPS 下系统**物理上**就达不到——TPOT 跟 batch size 正相关，QPS 高时 batch 大、TPOT 涨。这是设计意图：tight tier 故意紧到普通调度过不了，让 SLO-aware 调度展现差异。但要注意分析数据时区分：
+
+- **TTFT-bound 失败** → picker 能救（picker 动 admit 时机）
+- **TPOT-bound 失败** → 任何调度都救不了，不重 calibrate 没办法
+
+### 数据解读规则
+
+每个 metrics.json 输出：
+- 整体 `slo_met_pct`（三档加权）
+- `per_class.{tight,normal,loose}.slo_met_pct`（分档）
+- 每档 TTFT P50/P95、TPOT P95
+- 每个请求的逐行 `per_request`（含 ttft_ms / tpot_ms / slo_met / class）
+
+分析每档失败原因时拆「TTFT 超」「TPOT 超」「双超」三类，picker 只能 take credit for TTFT-only fail 救回的部分。
+
+### 怎么跑
+
+完整 sweep 是 5 QPS × 3 baseline × 3 seed = 45 个 run，每 run ~7 分钟（engine 启动 3-4 分钟 + 跑请求 + 收尾），总共 ~5 小时串行。先 seed=0 看曲线形状是否合理，再加 seed=1/2 取 mean±std。
+
+跑前 cleanup `/dev/shm` 避免上轮残留：
+
+```bash
+rm -rf /dev/shm/vllm_ft_{preempt_queue,engine_status,req_map,checkpoints}
+```
+
+调命令（必须 PYTHONPATH=. 因为 `python -m experiments_v2.xxx` 要从 repo root import）：
+
+```bash
+PYTHONPATH=. python -m experiments_v2.eval.scripts.e_m1_slo_sweep \
+  --baseline ours --dataset sharegpt \
+  --arrival-rate-qps 4.0 --num-requests 60 --seed 0 \
+  --slo-mode tiered \
+  --ttft-slo-tight-ms 684 --ttft-slo-normal-ms 1368 --ttft-slo-loose-ms 2736 \
+  --tpot-slo-tight-ms 33 --tpot-slo-normal-ms 66 --tpot-slo-loose-ms 132
+```
+
+输出：`experiments_v2/eval/results/e_m1_<baseline>_<dataset>_qps<x>_n<n>_seed<s>_{metrics.json,engine0.log,engine1.log,router.log}`
+
+### 历史教训
+
+- 之前一度怀疑 picker hurt，是因为只看了 `tight=35%` 这一个数。**实际上是 SLO 校准 vs 物理负载的冲突**，与 picker 行为无关（log 显示 picker 正常触发、cross-engine redispatch 成功）。教训：失败原因永远要拆 TTFT-bound vs TPOT-bound 看
+- baseline 数据来自 qps=0.1 校准，但实验跑到 qps=4 以上。要在 paper 里**明确**这一点，或者把 sweep 范围控制在 SLO 物理上可达的区间（看 calibration 表，ShareGPT 大概到 qps≈3 都还行）
+
+数据文件：`experiments_v2/eval/results/e_m1_*_sharegpt_qps*_n60_seed*_metrics.json`，bug 修复前的备份后缀是 `.prebugfix`
+
+

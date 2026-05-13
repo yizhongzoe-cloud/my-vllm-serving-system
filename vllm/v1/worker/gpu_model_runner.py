@@ -7455,25 +7455,19 @@ class GPUModelRunner(
 
         self._ensure_shared_ckpt_dir()
 
-        bg_publish = os.environ.get("FT_BG_PUBLISH") == "1"
-
-        # FT_BG_PUBLISH backpressure: wait for the previous batch's
-        # background publish to finish before starting a new RPC. This
-        # bounds in-flight publish work at 1 batch and ensures we don't
-        # overrun the executor queue under high checkpoint frequency.
-        # The wait time reflects how slow worker-side file writes are
-        # — if it's > 0, the next RPC's API-server-visible duration
-        # is dominated by this wait, providing natural backpressure.
-        if bg_publish:
-            prev = getattr(self, "_ft_bg_publish_future", None)
-            if prev is not None:
-                try:
-                    prev.result(timeout=30.0)
-                except Exception:
-                    logger.exception(
-                        "FT_BG_PUBLISH: previous batch publish failed"
-                    )
-                self._ft_bg_publish_future = None
+        # Backpressure: wait for the previous batch's background publish
+        # to finish before starting a new RPC. Bounds in-flight publish
+        # work at 1 batch so executor queue can't overrun under high
+        # checkpoint frequency. The wait time naturally reflects how slow
+        # worker-side file writes are; under /dev/shm saturation this is
+        # what throttles ckpt cadence.
+        prev = getattr(self, "_ft_bg_publish_future", None)
+        if prev is not None:
+            try:
+                prev.result(timeout=30.0)
+            except Exception:
+                logger.exception("previous batch publish failed")
+            self._ft_bg_publish_future = None
 
         entries: list[tuple[str, "Any", int]] = []
         for request_id, block_ids, num_tokens in request_block_map:
@@ -7491,7 +7485,7 @@ class GPUModelRunner(
             return []
 
         # Sync the copy stream once for the whole batch so the host
-        # pinned tensors are valid before the RPC returns.
+        # pinned tensors are valid before the publish thread reads them.
         if torch.cuda.is_available():
             copy_stream = getattr(
                 self._ft_checkpoint_pool, "_copy_stream", None
@@ -7499,55 +7493,45 @@ class GPUModelRunner(
             if copy_stream is not None:
                 copy_stream.synchronize()
 
-        if bg_publish:
-            # Stage 3a: build optimistic results immediately. The
-            # in-memory entry size is a faithful approximation of the
-            # final shared-checkpoint size (each layer's pinned bytes
-            # = the bytes that will be written to the chunk file).
-            results = [
-                (req_id, int(entry.size_bytes), int(num_tokens))
-                for req_id, entry, num_tokens in entries
-            ]
+        # Build optimistic results immediately. The in-memory entry size
+        # is a faithful approximation of the final shared-checkpoint size
+        # (each layer's pinned bytes = the bytes that will be written to
+        # the chunk file).
+        results = [
+            (req_id, int(entry.size_bytes), int(num_tokens))
+            for req_id, entry, num_tokens in entries
+        ]
 
-            # Stage 3b: submit the publish work to a background thread.
-            # The thread keeps a reference to the entries so they aren't
-            # evicted from the pool before the file writes complete.
-            if not hasattr(self, "_ft_publish_executor"):
-                from concurrent.futures import ThreadPoolExecutor
-                self._ft_publish_executor = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="ft_publish",
-                )
-            publish_args = [(req_id, entry) for req_id, entry, _ in entries]
-            self._ft_bg_publish_future = self._ft_publish_executor.submit(
-                self._bg_publish_batch, publish_args,
+        # Submit publish work to a background thread so the RPC returns
+        # without blocking the engine step on /dev/shm I/O. The thread
+        # keeps a reference to the entries so they aren't evicted from
+        # the pool before the file writes complete.
+        if not hasattr(self, "_ft_publish_executor"):
+            from concurrent.futures import ThreadPoolExecutor
+            self._ft_publish_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="ft_publish",
             )
-            return results
-
-        # Inline publish (default).
-        results = []
-        for request_id, entry, _num_tokens in entries:
-            published_size_bytes, covered_tokens = (
-                self._publish_shared_checkpoint(request_id, entry)
-            )
-            results.append(
-                (request_id, published_size_bytes, covered_tokens)
-            )
+        publish_args = [(req_id, entry) for req_id, entry, _ in entries]
+        self._ft_bg_publish_future = self._ft_publish_executor.submit(
+            self._bg_publish_batch, publish_args,
+        )
         return results
 
     def _bg_publish_batch(
         self,
         publish_args: list[tuple[str, "Any"]],
     ) -> None:
-        """FT_BG_PUBLISH background thread: publish each entry's
-        chunk + manifest + latest. Catches exceptions per-entry so a
-        single failure doesn't drop the rest of the batch.
+        """Publish each entry's chunk + manifest + latest atomically to
+        the shared /dev/shm dir, running off the engine step's critical
+        path. Catches exceptions per-entry so a single failure doesn't
+        drop the rest of the batch.
         """
         for req_id, entry in publish_args:
             try:
                 self._publish_shared_checkpoint(req_id, entry)
             except Exception:
                 logger.exception(
-                    "FT_BG_PUBLISH: failed to publish %s", req_id,
+                    "background publish failed for %s", req_id,
                 )
 
     def restore_kv_blocks(

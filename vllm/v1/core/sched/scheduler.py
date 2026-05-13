@@ -272,6 +272,37 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
+        # FT-specific config: read env once at startup. Avoids per-step
+        # os.environ.get() syscall in the schedule() hot path. These
+        # values are immutable for the engine's lifetime.
+        self._ft_slo_priority_preempt = (
+            os.environ.get("SLO_PRIORITY_PREEMPT") == "1"
+        )
+        try:
+            self._ft_slo_min_interval_ms = float(
+                os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_MIN_INTERVAL_MS", "2000.0"
+                )
+            )
+        except ValueError:
+            self._ft_slo_min_interval_ms = 2000.0
+        try:
+            self._ft_slo_cooldown_ms = float(
+                os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS", "5000.0"
+                )
+            )
+        except ValueError:
+            self._ft_slo_cooldown_ms = 5000.0
+        try:
+            self._ft_slo_min_gap_ms = float(
+                os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_MIN_GAP_MS", "1000.0"
+                )
+            )
+        except ValueError:
+            self._ft_slo_min_gap_ms = 1000.0
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -350,17 +381,31 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
-        # SLO priority preempt: when SLO_PRIORITY_PREEMPT=1, fire the
+        # SLO priority preempt: when enabled at startup, fire the
         # picker before the running loop. If a tight-SLO waiting head
         # exists and a loose-SLO running req can be safely preempted,
         # the picker selects the victim and we route it through
         # _preempt_for_slo_retain (blocks retained on GPU; engine
         # drains the retain queue and re-admits after a short window).
-        if os.environ.get("SLO_PRIORITY_PREEMPT") == "1":
+        if self._ft_slo_priority_preempt:
             _victim = self._pick_priority_preempt_victim(time.time())
             if _victim is not None:
                 self.running.remove(_victim)
-                self._preempt_for_slo_retain(_victim, time.monotonic())
+                # Default path: cross-engine redispatch via host
+                # checkpoint (Option B). Falls back to retain when
+                # SLO_PRIORITY_PREEMPT_USE_RETAIN=1 (ablation baseline).
+                if os.environ.get(
+                    "SLO_PRIORITY_PREEMPT_USE_RETAIN"
+                ) == "1":
+                    self._preempt_for_slo_retain(_victim, time.monotonic())
+                else:
+                    # Redispatch path uses wall time (time.time()) for
+                    # preempt_ts because engine core compares against
+                    # time.time() in the timeout check. Using
+                    # time.monotonic() here would make every entry
+                    # appear ~1.7e9 seconds stale on the first check
+                    # and fire the timeout fallback instantly.
+                    self._preempt_for_slo_redispatch(_victim, time.time())
                 preempted_reqs.append(_victim)
 
         # First, schedule the RUNNING requests.
@@ -597,6 +642,18 @@ class Scheduler(SchedulerInterface):
                 # completes; until then we just skip-and-prepend like
                 # other WAITING_FOR_* states.
                 if request.status == RequestStatus.WAITING_FOR_RELOAD:
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+
+                # FT slack-picker cross-engine redispatch: this engine has
+                # already freed the req's KV blocks and signalled the
+                # router via /dev/shm/vllm_ft_preempt_queue/. Either the
+                # router will redispatch it to another engine (and close
+                # this engine's HTTP connection, triggering local abort),
+                # or our local fallback timer will flip it to
+                # WAITING_FOR_RELOAD. Until then, skip-and-prepend.
+                if request.status == RequestStatus.WAITING_FOR_REDISPATCH:
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
                     continue
@@ -1025,51 +1082,55 @@ class Scheduler(SchedulerInterface):
             return None
 
         # Global rate limit.
-        try:
-            min_interval_ms = float(
-                os.environ.get(
-                    "SLO_PRIORITY_PREEMPT_MIN_INTERVAL_MS", "2000.0"
-                )
-            )
-        except ValueError:
-            min_interval_ms = 2000.0
         last_t = getattr(self, "_priority_preempt_last_time", 0.0)
-        if (now - last_t) * 1000.0 < min_interval_ms:
+        if (now - last_t) * 1000.0 < self._ft_slo_min_interval_ms:
             return None
 
-        # Look at the waiting head's SLO slack.
-        try:
-            head = self.waiting.peek_request()
-        except (IndexError, KeyError):
-            return None
-        if head is None:
-            return None
-
-        # Skip rerouted requests (V3 reload path handles those via
-        # WAITING_FOR_RELOAD; we only act on regular tight-SLO new
-        # requests).
-        if getattr(head, "is_rerouted", False):
-            return None
-
+        # Find the most-urgent waiting request by scanning the entire
+        # queue (not just peek_request, which returns the FCFS oldest
+        # and may not be the most SLO-urgent). A tight-SLO request that
+        # arrived later can be buried behind older loose-SLO requests,
+        # and the FCFS admit loop would never let it through without
+        # this reordering. We pick the min-slack request as the
+        # admission target.
         from vllm.v1.core.sched.utils import (
             compute_replay_cost,
             compute_slo_budgets,
         )
-        try:
-            head_slack = compute_slo_budgets(head, now)["min_ms"]
-        except Exception:
+        most_urgent: "Request | None" = None
+        most_urgent_slack: float = float("inf")
+        for r in self.waiting:
+            # Picker only considers admit candidates. Skip any req
+            # whose status is a non-WAITING intermediate state:
+            #   WAITING_FOR_REDISPATCH — already picker-preempted,
+            #     waiting on router pickup or local timeout fallback.
+            #     If left in the candidate pool its slack decays over
+            #     wall time and eventually it becomes most_urgent,
+            #     causing picker to preempt running reqs to "make
+            #     room" for a req that admit loop will always skip.
+            #   WAITING_FOR_RELOAD — V3 reload state machine is
+            #     driving this req; admit loop also skips it.
+            # Same reasoning for is_rerouted (legacy flag set on V3
+            # reload path for cross-engine pickups).
+            if getattr(r, "is_rerouted", False):
+                continue
+            if r.status in (
+                RequestStatus.WAITING_FOR_REDISPATCH,
+                RequestStatus.WAITING_FOR_RELOAD,
+            ):
+                continue
+            try:
+                r_slack = compute_slo_budgets(r, now)["min_ms"]
+            except Exception:
+                continue
+            if r_slack < most_urgent_slack:
+                most_urgent = r
+                most_urgent_slack = r_slack
+        if most_urgent is None:
             return None
+        head_slack = most_urgent_slack
 
         # Build candidate list from running queue.
-        try:
-            cooldown_ms = float(
-                os.environ.get(
-                    "SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS",
-                    "5000.0",
-                )
-            )
-        except ValueError:
-            cooldown_ms = 5000.0
         history = getattr(self, "_priority_preempt_history", None)
         if history is None:
             self._priority_preempt_history = {}
@@ -1078,7 +1139,7 @@ class Scheduler(SchedulerInterface):
         candidates: list[tuple["Request", float]] = []
         for r in self.running:
             last_for_r = history.get(r.request_id, 0.0)
-            if (now - last_for_r) * 1000.0 < cooldown_ms:
+            if (now - last_for_r) * 1000.0 < self._ft_slo_cooldown_ms:
                 continue  # in per-req cooldown
             try:
                 r_slack = compute_slo_budgets(r, now)["min_ms"]
@@ -1101,16 +1162,27 @@ class Scheduler(SchedulerInterface):
 
         # Slack gap gate: only preempt if victim's slack exceeds
         # (head_slack + min_gap_ms + replay_cost_ms).
-        try:
-            min_gap_ms = float(
-                os.environ.get(
-                    "SLO_PRIORITY_PREEMPT_MIN_GAP_MS", "1000.0"
-                )
-            )
-        except ValueError:
-            min_gap_ms = 1000.0
-        if (victim_slack - head_slack) < (min_gap_ms + replay_cost_ms):
+        if ((victim_slack - head_slack)
+                < (self._ft_slo_min_gap_ms + replay_cost_ms)):
             return None
+
+        # Reorder the waiting queue so that the FCFS admit loop picks
+        # most_urgent first. Without this step, the slot we free by
+        # preempting `victim` would be filled by waiting[0] (the oldest
+        # arrival), defeating the picker's purpose. prepend_request is
+        # a no-op if most_urgent is already at the head; otherwise we
+        # remove-then-prepend (O(N) but waiting is small).
+        try:
+            current_head = self.waiting.peek_request()
+        except (IndexError, KeyError):
+            return None
+        if current_head is not most_urgent:
+            try:
+                self.waiting.remove_request(most_urgent)
+                self.waiting.prepend_request(most_urgent)
+            except (ValueError, KeyError):
+                # Most-urgent unexpectedly missing — abort safely.
+                return None
 
         # All checks passed. Record state and return.
         self._priority_preempt_last_time = now
@@ -1120,13 +1192,14 @@ class Scheduler(SchedulerInterface):
         )
         logger.info(
             "SLO_PRIORITY_PREEMPT #%d: victim=%s (slack=%.0fms) "
-            "for waiting head=%s (slack=%.0fms), gap=%.0fms, "
-            "replay_cost=%.0fms",
+            "for most_urgent=%s (slack=%.0fms), gap=%.0fms, "
+            "replay_cost=%.0fms, queue_pos=%d",
             self._priority_preempt_count,
             victim.request_id, victim_slack,
-            head.request_id, head_slack,
-            victim_slack - head_slack,
+            most_urgent.request_id, most_urgent_slack,
+            victim_slack - most_urgent_slack,
             replay_cost_ms,
+            0,  # most_urgent now at head; logged 0 for clarity
         )
         return victim
 
@@ -1192,6 +1265,77 @@ class Scheduler(SchedulerInterface):
 
         # Do NOT prepend to vLLM waiting queue. Engine drains the side
         # queue when retain_steps_remaining reaches 0.
+
+    def _preempt_for_slo_redispatch(
+        self, request: Request, timestamp: float
+    ) -> None:
+        """SLO-aware preempt that RELEASES blocks for router-mediated
+        cross-engine redispatch (Option B path).
+
+        Idea: this engine's picker decided the victim should make way
+        for a more urgent waiting head. We free the victim's GPU KV
+        blocks immediately so the urgent request can prefill. The
+        victim's KV is still safe on host (background checkpoint has
+        been writing every full block to /dev/shm), so it can resume
+        on ANY engine via V3 reload from the host checkpoint.
+
+        After this call:
+          - victim.status = WAITING_FOR_REDISPATCH (admit-loop skip)
+          - victim stays in this engine's waiting queue but is invisible
+            to admit until either:
+              (a) router redispatches to another engine and closes this
+                  engine's HTTP connection — vLLM then aborts the local
+                  copy via the standard client-disconnect path
+              (b) the engine's fallback timer fires and converts the
+                  status to WAITING_FOR_RELOAD (local V3 reload resume)
+
+        Engine core's _publish_slo_preempt_queue drains the side queue
+        each step, writes /dev/shm/vllm_ft_preempt_queue/<req_id>.json,
+        and tracks the preempt_ts for the fallback timer.
+
+        IMPORTANT differences vs _preempt_for_slo_retain:
+          - We DO free KV (retain keeps it on GPU; redispatch frees so
+            the freed slots are usable by other requests)
+          - We rely on continuous host checkpoint having captured KV
+            state; resume happens via V3 reload (host → GPU restore)
+            rather than direct GPU resume
+          - We do NOT keep num_computed_tokens unchanged: the resume
+            engine restores up to num_checkpointed_tokens (possibly
+            slightly behind real progress; replay_cost accounts for
+            this lag)
+        """
+        assert request.status == RequestStatus.RUNNING, (
+            "Only running requests can be preempted"
+        )
+
+        # Free everything that retain keeps: KV blocks AND encoder cache.
+        # This is the key difference vs retain — the freed GPU slots are
+        # immediately available for the urgent waiting head.
+        self.kv_cache_manager.free(request)
+        self.encoder_cache_manager.free(request)
+        request.spec_token_ids.clear()
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+        # New status: admit loop skips (we added a branch for this in
+        # the schedule() admit loop). Engine core watches the side
+        # queue below to publish the preempt entry to /dev/shm.
+        request.status = RequestStatus.WAITING_FOR_REDISPATCH
+
+        if not hasattr(self, "slo_preempted_for_redispatch"):
+            # Tuple shape: (request, preempt_ts) — engine core uses ts
+            # for the redispatch fallback timer.
+            self.slo_preempted_for_redispatch: list[
+                tuple["Request", float]
+            ] = []
+        self.slo_preempted_for_redispatch.append((request, timestamp))
+
+        # Put back at head of waiting queue. The new
+        # WAITING_FOR_REDISPATCH skip branch we added in schedule()
+        # admit will pop+skip it on every step until either router
+        # acts or the fallback timer fires.
+        self.waiting.prepend_request(request)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1822,7 +1966,16 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            is_first_post_reroute = (
+                getattr(request, "is_rerouted", False)
+                and request.num_output_tokens == 0
+            )
             request.append_output_token_ids(output_token_id)
+            if is_first_post_reroute:
+                logger.info(
+                    "FT first_post_reroute_token req=%s ts=%.6f",
+                    request.request_id, time.time(),
+                )
 
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.

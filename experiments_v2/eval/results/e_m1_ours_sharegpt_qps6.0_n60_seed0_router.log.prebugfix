@@ -1,0 +1,145 @@
+/home/yzhong76/code/my-vllm-serving-system/experiments_v2/router/router.py:337: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+/home/yzhong76/code/my-vllm-serving-system/experiments_v2/router/router.py:349: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("shutdown")
+INFO:     Started server process [2004820]
+INFO:     Waiting for application startup.
+2026-05-12 16:33:26,524 [INFO] router: router started; engines={0: 'http://127.0.0.1:8401', 1: 'http://127.0.0.1:8402'}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8400 (Press CTRL+C to quit)
+INFO:     127.0.0.1:57546 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57560 - "GET /health HTTP/1.1" 200 OK
+2026-05-12 16:33:33,215 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57662 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:37,341 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57730 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:38,225 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57754 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:38,436 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57736 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:38,532 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57562 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:39,260 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54128 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:40,420 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+2026-05-12 16:33:40,421 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57602 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57572 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:40,695 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57888 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:40,832 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57636 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:40,890 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57638 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:41,359 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57586 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:41,534 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57784 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:41,644 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57654 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:41,718 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57568 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:41,778 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+2026-05-12 16:33:41,779 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57616 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57624 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:42,274 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57646 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:42,435 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57728 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:42,542 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57712 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:42,629 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57690 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:42,793 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57822 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,040 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54240 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,085 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57704 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,115 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54194 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,142 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57678 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,454 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57780 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,465 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57734 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,493 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+2026-05-12 16:33:43,494 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57766 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57752 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,510 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57786 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,530 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57806 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,658 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+2026-05-12 16:33:43,659 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54134 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57832 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,713 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57848 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,747 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54152 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,769 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57872 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,808 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57796 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,899 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57856 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,924 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57870 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:43,994 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57898 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,019 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57908 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,040 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57852 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,041 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57838 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,059 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57910 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,141 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54218 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,176 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54226 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,289 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54092 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,337 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:57902 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,646 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54118 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,696 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54154 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,862 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54100 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,863 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54110 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,888 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54170 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,901 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54182 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:44,971 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54138 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:45,003 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54130 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:45,073 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8401/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54254 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:45,333 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54202 - "POST /v1/completions HTTP/1.1" 200 OK
+2026-05-12 16:33:45,451 [INFO] httpx: HTTP Request: POST http://127.0.0.1:8402/v1/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:54268 - "POST /v1/completions HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [2004820]

@@ -1,0 +1,140 @@
+{
+  "baseline": "reroute_no_ckpt",
+  "seed": 0,
+  "num_requests": 12,
+  "kill_ts": 1778581376.0145102,
+  "pre_kill_engine_counts": {
+    "0": 6,
+    "1": 6
+  },
+  "num_first_token_events": 6,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-aad2ce372dbdcf2a-0-8da6ce10",
+      "gap_ms": 1031.991958618164
+    },
+    {
+      "req_id": "cmpl-abd6e99d4d7aa987-0-89b26d26",
+      "gap_ms": 1610.77880859375
+    },
+    {
+      "req_id": "cmpl-92969d08e648d486-0-b83462af",
+      "gap_ms": 2199.8817920684814
+    },
+    {
+      "req_id": "cmpl-936f247750fa174b-0-a1ea34fa",
+      "gap_ms": 2787.876844406128
+    },
+    {
+      "req_id": "cmpl-bb96e98b30680a47-0-99e58e31",
+      "gap_ms": 3380.7599544525146
+    },
+    {
+      "req_id": "cmpl-9286255ca44c26b2-0-bf48b020",
+      "gap_ms": 3730.0219535827637
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 6,
+    "min": 1031.991958618164,
+    "p50": 2493.8793182373047,
+    "mean": 2456.8852186203003,
+    "max": 3730.0219535827637
+  },
+  "client_outcomes": {
+    "200_ok": 12,
+    "errored": 0,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 900,
+        "total_s": 13.298858165740967
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 882,
+        "total_s": 11.469342470169067
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 607,
+        "total_s": 11.623333930969238
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 900,
+        "total_s": 13.206342697143555
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 965,
+        "total_s": 11.364607810974121
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 925,
+        "total_s": 11.568986892700195
+      },
+      {
+        "idx": 6,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 922,
+        "total_s": 11.620036840438843
+      },
+      {
+        "idx": 7,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 905,
+        "total_s": 13.158756256103516
+      },
+      {
+        "idx": 8,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 760,
+        "total_s": 11.691397905349731
+      },
+      {
+        "idx": 9,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 900,
+        "total_s": 11.666615962982178
+      },
+      {
+        "idx": 10,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 900,
+        "total_s": 13.336839199066162
+      },
+      {
+        "idx": 11,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 883,
+        "total_s": 11.737179279327393
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 12,
+    "reroute_count": 6,
+    "dead_event_count": 1,
+    "in_flight": 0
+  }
+}

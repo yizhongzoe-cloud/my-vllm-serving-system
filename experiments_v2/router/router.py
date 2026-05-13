@@ -43,7 +43,12 @@ from fastapi.responses import JSONResponse
 
 SHM_ENGINE_STATUS_DIR = Path("/dev/shm/vllm_ft_engine_status")
 SHM_REQ_MAP_DIR = Path("/dev/shm/vllm_ft_req_map")
+SHM_PREEMPT_QUEUE_DIR = Path("/dev/shm/vllm_ft_preempt_queue")
 STATUS_POLL_INTERVAL_S = 0.5
+# Preempt queue poll cadence — kept tighter than status poll because the
+# engine's redispatch fallback timer is on the order of seconds; router
+# needs to react well before that fires to avoid double-resume.
+PREEMPT_POLL_INTERVAL_S = 0.2
 STATUS_STALE_THRESHOLD_S = 2.0
 ENGINE_REQUEST_TIMEOUT_S = 600.0
 
@@ -71,6 +76,16 @@ class InFlightReq:
     engine_id: int
     endpoint: str
     body: dict
+    # The asyncio.Task running the forward() call to the engine. The
+    # preempt-queue poller cancels this to tear down the connection
+    # when an engine asks for cross-engine redispatch; cancellation
+    # propagates into httpx which closes the underlying TCP, vllm sees
+    # client disconnect and aborts the local copy.
+    task: "asyncio.Task | None" = None
+    # Set by the preempt-queue poller right before it cancels `task`.
+    # Distinguishes "engine asked us to redispatch" from "client gave up
+    # and cancelled". On the former we reroute; on the latter we don't.
+    redispatch_requested: bool = False
 
 
 class Router:
@@ -156,6 +171,63 @@ class Router:
             ),
         )
 
+    # ── Preempt queue (cross-engine redispatch on picker preempt) ──
+
+    def scan_preempt_queue(self) -> None:
+        """Poll /dev/shm/vllm_ft_preempt_queue/*.json. For each entry:
+          - read engine A's payload (router_req_id, internal_req_id,
+            num_checkpointed_tokens, preempt_ts)
+          - look up the in_flight entry on router side
+          - if we have it AND there's another alive engine to take
+            over: unlink the shm file (so engine A won't see it again
+            after its abort), mark in_f.redispatch_requested, cancel
+            the forward task so proxy's CancelledError handler kicks
+            off the reroute path
+          - otherwise leave the file (engine A's fallback timer will
+            convert to local V3 reload after FT_REDISPATCH_TIMEOUT_S)
+
+        Robust to partial writes / vanished entries.
+        """
+        if not SHM_PREEMPT_QUEUE_DIR.exists():
+            return
+        for fp in SHM_PREEMPT_QUEUE_DIR.glob("*.json"):
+            try:
+                data = json.loads(fp.read_text())
+            except (OSError, json.JSONDecodeError):
+                # Mid-write or unlink raced; skip this round.
+                continue
+            router_req_id = data.get("router_req_id") or ""
+            if not router_req_id:
+                # Engine A published an entry without router_req_id —
+                # likely a direct-vllm (no router) test. Nothing for
+                # router to do; engine A's timeout will handle it.
+                continue
+            in_f = self.in_flight.get(router_req_id)
+            if in_f is None:
+                # Two cases: (a) the request already finished and we
+                # popped it from in_flight, (b) it was a direct vllm
+                # call. Either way, leave the entry; engine A cleans
+                # it on its own (FINISHED_* path or timeout path).
+                continue
+            origin_eid = data.get("engine_id")
+            if self.pick_engine(exclude=origin_eid) is None:
+                # No alternative engine — let engine A's local fallback
+                # handle it.
+                continue
+            try:
+                fp.unlink()
+            except OSError:
+                pass
+            in_f.redispatch_requested = True
+            if in_f.task is not None and not in_f.task.done():
+                in_f.task.cancel()
+            logger.info(
+                "preempt-redispatch: signaled req=%s (origin engine "
+                "%s, ckpt_tokens=%s) for reroute",
+                router_req_id, origin_eid,
+                data.get("num_checkpointed_tokens"),
+            )
+
     # ── Req map (user_req_id → internal_req_id) ────────────────────
 
     @staticmethod
@@ -230,28 +302,53 @@ class Router:
         )
 
     async def proxy(self, endpoint: str, body: dict) -> JSONResponse:
-        """Dispatch → forward → on engine failure, reroute once."""
+        """Dispatch → forward → on engine failure or preempt-redispatch
+        signal, reroute once.
+
+        The forward call is wrapped in an asyncio.Task so the preempt-
+        queue poller can cancel it externally. Two cancellation paths
+        are distinguished:
+          - in_f.redispatch_requested=True : engine A's picker asked
+            for cross-engine pickup. We reroute to another engine.
+          - otherwise : caller (client) cancelled. We propagate the
+            CancelledError instead of pretending the request succeeded.
+        """
         target = self.pick_engine()
         if target is None:
             raise HTTPException(503, "no alive engine to dispatch to")
 
         user_req_id = uuid.uuid4().hex
-        self.in_flight[user_req_id] = InFlightReq(
+        in_f = InFlightReq(
             user_req_id=user_req_id,
             engine_id=target.engine_id,
             endpoint=endpoint,
             body=body,
         )
+        self.in_flight[user_req_id] = in_f
         self.dispatch_count += 1
 
         try:
+            forward_task = asyncio.create_task(
+                self.forward(target, endpoint, body, user_req_id)
+            )
+            in_f.task = forward_task
             try:
-                resp = await self.forward(target, endpoint, body, user_req_id)
+                resp = await forward_task
                 return JSONResponse(
                     content=resp.json(),
                     status_code=resp.status_code,
                     headers={"X-Request-Id": user_req_id},
                 )
+            except asyncio.CancelledError:
+                if in_f.redispatch_requested:
+                    logger.info(
+                        "preempt-redispatch: engine %d asked router "
+                        "to redispatch req=%s",
+                        target.engine_id, user_req_id,
+                    )
+                    return await self.reroute(user_req_id)
+                # Client-side cancel — propagate.
+                raise
             except (
                 httpx.ConnectError,
                 httpx.ReadTimeout,
@@ -336,11 +433,20 @@ def create_app(router: Router) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        async def poll_loop():
+        async def status_poll_loop():
             while True:
                 router.scan_engine_status()
                 await asyncio.sleep(STATUS_POLL_INTERVAL_S)
-        app.state.poller_task = asyncio.create_task(poll_loop())
+
+        async def preempt_poll_loop():
+            while True:
+                router.scan_preempt_queue()
+                await asyncio.sleep(PREEMPT_POLL_INTERVAL_S)
+
+        app.state.poller_task = asyncio.create_task(status_poll_loop())
+        app.state.preempt_poller_task = asyncio.create_task(
+            preempt_poll_loop()
+        )
         logger.info(
             "router started; engines=%s",
             {eid: e.base_url for eid, e in router.engines.items()},
@@ -350,6 +456,8 @@ def create_app(router: Router) -> FastAPI:
     async def _shutdown() -> None:
         if app.state.poller_task is not None:
             app.state.poller_task.cancel()
+        if getattr(app.state, "preempt_poller_task", None) is not None:
+            app.state.preempt_poller_task.cancel()
         await router.close()
 
     @app.get("/health")

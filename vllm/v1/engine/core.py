@@ -227,8 +227,37 @@ class EngineCore:
         self._ft_router_shm_bus = (
             os.environ.get("FT_ROUTER_SHM_BUS") == "1"
         )
+        # Cache FT V3 / ckpt save flags once. These gate hot-path calls
+        # (_save_checkpoints_if_needed, _process_overlap_reload_queue)
+        # every step; pulling them via os.environ.get on each call burns
+        # microseconds × thousands of steps.
+        self._ft_capacity_preempt_reload = (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD") == "1"
+        )
+        self._ft_capacity_preempt_reload_overlap = (
+            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
+        )
+        try:
+            self._ft_ckpt_fixed_blocks = int(
+                os.environ.get("FT_CKPT_FIXED_BLOCKS", "1")
+            )
+        except ValueError:
+            self._ft_ckpt_fixed_blocks = 1
         self._ft_status_dir = Path("/dev/shm/vllm_ft_engine_status")
         self._ft_req_map_dir = Path("/dev/shm/vllm_ft_req_map")
+        # SLO redispatch publishing dir — picker preempts that need
+        # cross-engine pickup are published here. Router polls this
+        # dir alongside engine_status.
+        self._ft_preempt_queue_dir = Path("/dev/shm/vllm_ft_preempt_queue")
+        # Fallback timer: if router doesn't pick up a redispatch entry
+        # within this many seconds, the engine resumes the request
+        # locally via V3 reload (host KV → GPU).
+        try:
+            self._ft_redispatch_timeout_s = float(
+                os.environ.get("FT_REDISPATCH_TIMEOUT_S", "5.0")
+            )
+        except ValueError:
+            self._ft_redispatch_timeout_s = 5.0
         self._ft_status_path = (
             self._ft_status_dir / f"engine_{self._ft_engine_id}.json"
         )
@@ -241,10 +270,12 @@ class EngineCore:
             try:
                 self._ft_status_dir.mkdir(parents=True, exist_ok=True)
                 self._ft_req_map_dir.mkdir(parents=True, exist_ok=True)
+                self._ft_preempt_queue_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
                 logger.exception(
-                    "FT_ROUTER_SHM_BUS: failed to create shm dirs %s / %s",
+                    "FT_ROUTER_SHM_BUS: failed to create shm dirs %s / %s / %s",
                     self._ft_status_dir, self._ft_req_map_dir,
+                    self._ft_preempt_queue_dir,
                 )
             # Background writer thread. We can't piggyback on step()
             # because step() doesn't run when the engine is idle
@@ -632,6 +663,12 @@ class EngineCore:
         # back in waiting queue for the next admit.
         self._process_slo_retained_queue()
 
+        # SLO redispatch: publish picker-preempted requests to shm
+        # so the external router can redispatch them to another engine;
+        # also enforce the timeout fallback (engine resumes locally if
+        # router doesn't act in time).
+        self._process_slo_redispatch_queue()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -709,6 +746,156 @@ class EngineCore:
                 new_retained.append((request, steps_remaining))
         base.slo_preempted_retained = new_retained
 
+    def _process_slo_redispatch_queue(self) -> None:
+        """SLO redispatch path (Option B): publish picker-preempted
+        requests to shm for an external router to pick up cross-engine.
+
+        Called every step BEFORE scheduler.schedule(). For each
+        picker-preempted req (status = WAITING_FOR_REDISPATCH):
+          - First step: write /dev/shm/vllm_ft_preempt_queue/<req>.json
+            with the metadata router needs to redispatch (engine id,
+            internal_req_id, num_checkpointed_tokens, router_req_id,
+            preempt_ts) and add to in-flight tracker.
+          - Subsequent steps: check whether the local copy has been
+            aborted (router closed HTTP → status FINISHED_ABORTED) — in
+            which case clean up shm and forget. Otherwise check whether
+            the fallback timeout has fired — if yes, flip status to
+            WAITING_FOR_RELOAD and hand to V3 overlap reload queue so
+            this engine resumes locally.
+
+        No-op unless SLO_PRIORITY_PREEMPT=1 (picker is the only path
+        that produces WAITING_FOR_REDISPATCH entries).
+        """
+        if os.environ.get("SLO_PRIORITY_PREEMPT") != "1":
+            return
+        base = self.scheduler
+
+        if not hasattr(self, "_redispatch_inflight"):
+            # req_id → {request, preempt_ts, shm_path}
+            self._redispatch_inflight: dict[str, dict] = {}
+
+        # Stage A: drain scheduler-side handoff list — write shm and
+        # start tracking. The scheduler appends (request, preempt_ts)
+        # tuples here from _preempt_for_slo_redispatch.
+        pending = getattr(base, "slo_preempted_for_redispatch", None)
+        if pending:
+            for request, preempt_ts in list(pending):
+                req_id = request.request_id
+                shm_path = (
+                    self._ft_preempt_queue_dir / f"{req_id}.json"
+                )
+                payload = {
+                    "engine_id": self._ft_engine_id,
+                    "internal_req_id": req_id,
+                    "router_req_id": request.router_req_id or "",
+                    "num_checkpointed_tokens": int(
+                        request.num_checkpointed_tokens
+                    ),
+                    "preempt_ts": preempt_ts,
+                }
+                # Only publish if router shm bus is on AND the request
+                # has a router_req_id — otherwise no router can pick it
+                # up, so we skip straight to local fallback (timeout=0).
+                published = False
+                if self._ft_router_shm_bus and request.router_req_id:
+                    try:
+                        tmp_path = shm_path.with_suffix(".json.tmp")
+                        tmp_path.write_text(json.dumps(payload))
+                        os.replace(tmp_path, shm_path)
+                        published = True
+                    except OSError:
+                        logger.exception(
+                            "FT SLO redispatch: failed to publish %s",
+                            shm_path,
+                        )
+                self._redispatch_inflight[req_id] = {
+                    "request": request,
+                    "preempt_ts": preempt_ts,
+                    "shm_path": shm_path if published else None,
+                }
+                logger.info(
+                    "FT SLO redispatch: %s preempted for cross-engine "
+                    "pickup (router_req_id=%s, ckpt_tokens=%d, "
+                    "published=%s)",
+                    req_id, request.router_req_id,
+                    request.num_checkpointed_tokens, published,
+                )
+            pending.clear()
+
+        if not self._redispatch_inflight:
+            return
+
+        now = time.time()
+        for req_id, state in list(self._redispatch_inflight.items()):
+            request = state["request"]
+
+            # Case 1: router redispatched and closed the HTTP
+            # connection. vLLM aborted the local copy; status is
+            # FINISHED_ABORTED. Clean up shm (router already consumed
+            # the entry but may not have unlinked) and drop tracker.
+            if request.status.value > RequestStatus.PREEMPTED.value:
+                shm_path = state["shm_path"]
+                if shm_path is not None:
+                    try:
+                        shm_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                logger.info(
+                    "FT SLO redispatch: %s aborted locally "
+                    "(status=%s) — assuming router took over",
+                    req_id, request.status,
+                )
+                del self._redispatch_inflight[req_id]
+                continue
+
+            # Case 2: still WAITING_FOR_REDISPATCH. Has the fallback
+            # timer expired?
+            if request.status != RequestStatus.WAITING_FOR_REDISPATCH:
+                # Defensive: some other path moved this request
+                # (shouldn't happen — admit loop has a skip branch).
+                # Just stop tracking and let the normal flow handle it.
+                shm_path = state["shm_path"]
+                if shm_path is not None:
+                    try:
+                        shm_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                logger.warning(
+                    "FT SLO redispatch: %s left WAITING_FOR_REDISPATCH "
+                    "unexpectedly (status=%s); stopping tracking",
+                    req_id, request.status,
+                )
+                del self._redispatch_inflight[req_id]
+                continue
+
+            elapsed = now - state["preempt_ts"]
+            if elapsed < self._ft_redispatch_timeout_s:
+                continue
+
+            # Case 3: timeout. Router didn't pick up in time (or no
+            # router exists). Fall back to local V3 reload: flip to
+            # WAITING_FOR_RELOAD, hand to overlap reload queue, unlink
+            # shm so router won't grab a stale entry.
+            shm_path = state["shm_path"]
+            if shm_path is not None:
+                try:
+                    shm_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            request.status = RequestStatus.WAITING_FOR_RELOAD
+            if not hasattr(base, "slo_preempted_for_overlap_reload"):
+                base.slo_preempted_for_overlap_reload = []
+            base.slo_preempted_for_overlap_reload.append(
+                (request, int(request.num_checkpointed_tokens))
+            )
+            logger.info(
+                "FT SLO redispatch: %s timed out after %.2fs — "
+                "falling back to local V3 reload (ckpt_tokens=%d)",
+                req_id, elapsed, request.num_checkpointed_tokens,
+            )
+            del self._redispatch_inflight[req_id]
+
     def _process_overlap_reload_queue(self) -> None:
         """V3 capacity-preempt reload driver.
 
@@ -722,10 +909,7 @@ class EngineCore:
 
         Called every step BEFORE scheduler.schedule().
         """
-        use_overlap = (
-            os.environ.get("FT_CAPACITY_PREEMPT_RELOAD_OVERLAP") == "1"
-        )
-        if not use_overlap:
+        if not self._ft_capacity_preempt_reload_overlap:
             return
 
         base = self.scheduler
@@ -921,21 +1105,15 @@ class EngineCore:
 
         No-op unless FT_CAPACITY_PREEMPT_RELOAD=1 (V3 path enabled).
         """
-        if os.environ.get("FT_CAPACITY_PREEMPT_RELOAD") != "1":
+        if not self._ft_capacity_preempt_reload:
             return
 
         base = self.scheduler
         kv_mgr = base.kv_cache_manager
         block_size = base.block_size
-        try:
-            fixed_blocks = int(
-                os.environ.get("FT_CKPT_FIXED_BLOCKS", "1")
-            )
-        except ValueError:
-            fixed_blocks = 1
-        if fixed_blocks <= 0:
+        if self._ft_ckpt_fixed_blocks <= 0:
             return
-        required_tokens = fixed_blocks * block_size
+        required_tokens = self._ft_ckpt_fixed_blocks * block_size
 
         # Build list of (req, save_args, target_published_tokens) so we
         # can update each req's num_checkpointed_tokens AFTER the RPC
@@ -1012,6 +1190,9 @@ class EngineCore:
 
         # SLO retain: tick down retain windows.
         self._process_slo_retained_queue()
+
+        # SLO redispatch: same hook as the non-batched step().
+        self._process_slo_redispatch_queue()
 
         batch_queue = self.batch_queue
         assert batch_queue is not None

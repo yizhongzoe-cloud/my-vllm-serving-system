@@ -63,10 +63,10 @@ def main() -> int:
     print(f"[writer] generating {NUM_REQS} requests", file=sys.stderr, flush=True)
     llm.generate(prompts, sampling_params=params)
 
-    # Force any pending FT_BG_PUBLISH future to finish before we exit
-    # (best-effort; if FT_BG_PUBLISH is OFF this is mainly a guard against
-    # vllm's worker subprocess + CUDA context cleanup race with the reader
-    # starting up too soon).
+    # Give the background publish thread time to finish flushing the
+    # last batch of chunks + manifest + latest to /dev/shm, and let
+    # vllm's worker subprocess + CUDA context tear down cleanly before
+    # the reader starts.
     time.sleep(3.0)
 
     if not SHM_DIR.exists():

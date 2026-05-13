@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -37,6 +38,8 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -816,6 +819,27 @@ class OutputProcessor:
             num_cached_tokens=req_state.num_cached_tokens,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
+
+        # Per-request timing dump for paper experiments (E_M1-M4). All
+        # latency values come from vLLM's own computation paths — we just
+        # pull them out and convert to ms:
+        #   ttft_ms = req_stats.first_token_latency (set during decode)
+        #   tpot_ms = finished.mean_time_per_output_token (set just above
+        #             by update_from_finished_request)
+        #   e2e_ms  = finished.e2e_latency (same)
+        finished = iteration_stats.finished_requests[-1]
+        ttft_ms = req_state.stats.first_token_latency * 1000.0
+        tpot_ms = finished.mean_time_per_output_token * 1000.0
+        e2e_ms = finished.e2e_latency * 1000.0
+        logger.info(
+            "FT request_done req=%s arrival_ts=%.6f ttft_ms=%.3f "
+            "tpot_ms=%.3f e2e_ms=%.3f num_output=%d prompt_len=%d "
+            "finish=%s",
+            req_state.request_id, req_state.stats.arrival_time,
+            ttft_ms, tpot_ms, e2e_ms,
+            req_state.stats.num_generation_tokens, req_state.prompt_len,
+            finish_reason.name if finish_reason else "UNKNOWN",
+        )
 
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens

@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 470" width="780" height="470"
+     font-family="Helvetica, Arial, sans-serif" font-size="11">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="5" markerHeight="5"
+            orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#000"/></marker>
+    <pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6">
+      <path d="M-1,1 l2,-2 M0,6 l6,-6 M5,7 l2,-2" stroke="#666" stroke-width="0.6"/>
+    </pattern>
+  </defs>
+
+  <!-- title -->
+  <text x="390" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#000">
+    Figure N. State transitions of a picker-preempted request (Option B).
+  </text>
+
+  <!-- legend bottom-right -->
+  <g transform="translate(560, 396)" font-size="10">
+    <rect x="0" y="0" width="200" height="62" fill="#fff" stroke="#000" stroke-width="0.6"/>
+    <rect x="8" y="8" width="14" height="10" fill="#fff" stroke="#000" stroke-width="1.2"/>
+    <text x="28" y="17" fill="#000">vLLM-native state</text>
+    <rect x="8" y="22" width="14" height="10" fill="#e8e8e8" stroke="#000" stroke-width="1.2"/>
+    <text x="28" y="31" fill="#000">Custom intermediate state</text>
+    <rect x="8" y="36" width="14" height="10" fill="#cbdcec" stroke="#000" stroke-width="1.2"/>
+    <text x="28" y="45" fill="#000">Resume target (admit picks up)</text>
+    <rect x="8" y="50" width="14" height="10" fill="url(#hatch)" stroke="#000" stroke-width="1.2"/>
+    <text x="28" y="59" fill="#000">Aborted (terminal)</text>
+  </g>
+
+  <!-- engine A region -->
+  <rect x="20" y="48" width="490" height="378" fill="none" stroke="#000" stroke-width="0.6" stroke-dasharray="4,3"/>
+  <text x="30" y="64" font-size="11" font-weight="700" fill="#000">Engine A (origin)</text>
+
+  <!-- engine B region -->
+  <rect x="530" y="48" width="240" height="332" fill="none" stroke="#000" stroke-width="0.6" stroke-dasharray="4,3"/>
+  <text x="540" y="64" font-size="11" font-weight="700" fill="#000">Engine B (router-picked peer)</text>
+
+  <!-- ===== Engine A nodes ===== -->
+
+  <!-- RUNNING -->
+  <rect x="40" y="88" width="110" height="44" rx="3" fill="#fff" stroke="#000" stroke-width="1.4"/>
+  <text x="95" y="106" text-anchor="middle" font-weight="700">RUNNING</text>
+  <text x="95" y="121" text-anchor="middle" font-size="9" fill="#333">in self.running</text>
+
+  <!-- WAITING_FOR_REDISPATCH -->
+  <rect x="220" y="88" width="178" height="60" rx="3" fill="#e8e8e8" stroke="#000" stroke-width="1.4"/>
+  <text x="309" y="106" text-anchor="middle" font-weight="700">WAITING_FOR_REDISPATCH</text>
+  <text x="309" y="120" text-anchor="middle" font-size="9" fill="#333">KV freed; entry written to</text>
+  <text x="309" y="132" text-anchor="middle" font-size="9" fill="#333">/dev/shm/vllm_ft_preempt_queue</text>
+  <text x="309" y="143" text-anchor="middle" font-size="9" fill="#333">(admit loop skips)</text>
+
+  <!-- Path A label -->
+  <text x="95" y="178" text-anchor="middle" font-size="10" font-weight="700" fill="#000">Path A. router accept</text>
+  <line x1="40" y1="184" x2="148" y2="184" stroke="#000" stroke-width="0.4"/>
+
+  <!-- FINISHED_ABORTED -->
+  <rect x="40" y="196" width="170" height="48" rx="3" fill="url(#hatch)" stroke="#000" stroke-width="1.4"/>
+  <rect x="40" y="196" width="170" height="48" rx="3" fill="#fff" fill-opacity="0.55" stroke="none"/>
+  <text x="125" y="214" text-anchor="middle" font-weight="700">FINISHED_ABORTED</text>
+  <text x="125" y="227" text-anchor="middle" font-size="9" fill="#333">vLLM aborts on client disconnect</text>
+  <text x="125" y="238" text-anchor="middle" font-size="9" fill="#333">(local copy gone)</text>
+
+  <!-- Path B label -->
+  <text x="95" y="282" text-anchor="middle" font-size="10" font-weight="700" fill="#000">Path B. local fallback (timeout)</text>
+  <line x1="20" y1="288" x2="170" y2="288" stroke="#000" stroke-width="0.4"/>
+
+  <!-- WAITING_FOR_RELOAD (engine A) -->
+  <rect x="40" y="300" width="170" height="46" rx="3" fill="#e8e8e8" stroke="#000" stroke-width="1.4"/>
+  <text x="125" y="318" text-anchor="middle" font-weight="700">WAITING_FOR_RELOAD</text>
+  <text x="125" y="332" text-anchor="middle" font-size="9" fill="#333">queued into</text>
+  <text x="125" y="342" text-anchor="middle" font-size="9" fill="#333">slo_preempted_for_overlap_reload</text>
+
+  <!-- V3 reload driver (engine A) -->
+  <rect x="240" y="300" width="170" height="46" rx="3" fill="#e8e8e8" stroke="#000" stroke-width="1.4"/>
+  <text x="325" y="318" text-anchor="middle" font-weight="700">V3 reload driver</text>
+  <text x="325" y="332" text-anchor="middle" font-size="9" fill="#333">allocate_slots (wait if pool full)</text>
+  <text x="325" y="342" text-anchor="middle" font-size="9" fill="#333">+ restore_kv_blocks from host</text>
+
+  <!-- PREEMPTED (engine A) -->
+  <rect x="240" y="370" width="170" height="44" rx="3" fill="#cbdcec" stroke="#000" stroke-width="1.4"/>
+  <text x="325" y="388" text-anchor="middle" font-weight="700">PREEMPTED</text>
+  <text x="325" y="402" text-anchor="middle" font-size="9" fill="#333">num_computed_tokens set, status flipped</text>
+
+  <!-- RUNNING (resumed, engine A) -->
+  <rect x="40" y="370" width="170" height="44" rx="3" fill="#fff" stroke="#000" stroke-width="1.4"/>
+  <text x="125" y="388" text-anchor="middle" font-weight="700">RUNNING (resumed)</text>
+  <text x="125" y="402" text-anchor="middle" font-size="9" fill="#333">vLLM admit loop, recompute-style</text>
+
+  <!-- ===== Engine B nodes ===== -->
+
+  <!-- add_request -->
+  <rect x="552" y="86" width="200" height="46" rx="3" fill="#fff" stroke="#000" stroke-width="1.0" stroke-dasharray="2,2"/>
+  <text x="652" y="104" text-anchor="middle" font-weight="700">add_request</text>
+  <text x="652" y="118" text-anchor="middle" font-size="9" fill="#333">is_rerouted=True,</text>
+  <text x="652" y="128" text-anchor="middle" font-size="9" fill="#333">original_internal_req_id, ckpt_tokens</text>
+
+  <!-- WAITING_FOR_RELOAD (engine B) -->
+  <rect x="552" y="170" width="200" height="46" rx="3" fill="#e8e8e8" stroke="#000" stroke-width="1.4"/>
+  <text x="652" y="188" text-anchor="middle" font-weight="700">WAITING_FOR_RELOAD</text>
+  <text x="652" y="202" text-anchor="middle" font-size="9" fill="#333">queued into slo_preempted_</text>
+  <text x="652" y="212" text-anchor="middle" font-size="9" fill="#333">for_overlap_reload (engine B)</text>
+
+  <!-- V3 reload (engine B) -->
+  <rect x="552" y="244" width="200" height="46" rx="3" fill="#e8e8e8" stroke="#000" stroke-width="1.4"/>
+  <text x="652" y="262" text-anchor="middle" font-weight="700">V3 reload driver</text>
+  <text x="652" y="276" text-anchor="middle" font-size="9" fill="#333">allocate fresh blocks</text>
+  <text x="652" y="286" text-anchor="middle" font-size="9" fill="#333">+ restore_kv_blocks from host</text>
+
+  <!-- PREEMPTED + RUNNING (engine B) -->
+  <rect x="552" y="320" width="95" height="46" rx="3" fill="#cbdcec" stroke="#000" stroke-width="1.4"/>
+  <text x="599" y="338" text-anchor="middle" font-weight="700">PREEMPTED</text>
+  <text x="599" y="352" text-anchor="middle" font-size="9" fill="#333">admit picks up</text>
+
+  <rect x="657" y="320" width="95" height="46" rx="3" fill="#fff" stroke="#000" stroke-width="1.4"/>
+  <text x="704" y="338" text-anchor="middle" font-weight="700">RUNNING</text>
+  <text x="704" y="352" text-anchor="middle" font-size="9" fill="#333">(resumed)</text>
+
+  <!-- ===== Arrows (engine A internal) ===== -->
+
+  <!-- 1: RUNNING -> WAITING_FOR_REDISPATCH -->
+  <line x1="150" y1="110" x2="218" y2="110" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="184" y="103" text-anchor="middle" font-size="9" fill="#000">picker fires</text>
+  <text x="184" y="123" text-anchor="middle" font-size="8" fill="#444">slack(v)−slack(h) ≥ min_gap+replay_cost</text>
+
+  <!-- 2: WAITING_FOR_REDISPATCH -> FINISHED_ABORTED (Path A) -->
+  <path d="M 240 148 Q 200 170 175 196" fill="none" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="186" y="178" font-size="9" fill="#000">router cancels HTTP task</text>
+
+  <!-- 3: WAITING_FOR_REDISPATCH -> WAITING_FOR_RELOAD (Path B) -->
+  <path d="M 309 148 Q 309 240 200 300" fill="none" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="318" y="220" font-size="9" fill="#000">FT_REDISPATCH_TIMEOUT_S elapsed</text>
+  <text x="318" y="232" font-size="8" fill="#444">(no peer or all peers busy)</text>
+
+  <!-- 4: WAITING_FOR_RELOAD -> V3 reload (engine A) -->
+  <line x1="210" y1="323" x2="238" y2="323" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+
+  <!-- 5: V3 reload -> PREEMPTED (engine A) -->
+  <line x1="325" y1="346" x2="325" y2="368" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="332" y="361" font-size="9" fill="#000">status flip</text>
+
+  <!-- 6: PREEMPTED -> RUNNING (engine A) -->
+  <line x1="238" y1="392" x2="212" y2="392" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="225" y="384" text-anchor="middle" font-size="9" fill="#000">vLLM admit</text>
+
+  <!-- ===== Cross-engine arrow ===== -->
+
+  <!-- WAITING_FOR_REDISPATCH (engine A) -> add_request (engine B) -->
+  <path d="M 398 108 Q 470 70 552 108" fill="none" stroke="#000" stroke-width="1.4" stroke-dasharray="5,3"
+        marker-end="url(#ar)"/>
+  <text x="475" y="76" text-anchor="middle" font-size="9" fill="#000" font-weight="700">router POST /v1/completions to engine B</text>
+  <text x="475" y="88" text-anchor="middle" font-size="8" fill="#444">vllm_xargs.is_rerouted=True + ckpt_tokens</text>
+
+  <!-- ===== Arrows (engine B internal) ===== -->
+  <line x1="652" y1="132" x2="652" y2="168" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <line x1="652" y1="216" x2="652" y2="242" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <line x1="652" y1="290" x2="630" y2="318" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+  <text x="616" y="306" font-size="9" fill="#000">status flip</text>
+  <line x1="647" y1="343" x2="655" y2="343" stroke="#000" stroke-width="1.2" marker-end="url(#ar)"/>
+
+  <!-- footer caption -->
+  <text x="40" y="446" font-size="9" fill="#333">
+    Both recovery paths converge on the vLLM-native PREEMPTED state, after which the unmodified admit loop reinstates the request as a recompute-style resume.
+  </text>
+  <text x="40" y="458" font-size="9" fill="#333">
+    Path A is preferred when at least one alive peer engine exists; Path B is the local fallback driven by the engine itself.
+  </text>
+</svg>

@@ -347,6 +347,15 @@ class RequestStatus(enum.IntEnum):
     # status while engine asynchronously alloc'd blocks + reloads KV
     # from host checkpoint. Engine flips to PREEMPTED once reload done.
     WAITING_FOR_RELOAD = enum.auto()
+    # FT slack-picker cross-engine redispatch: this engine's picker
+    # decided to preempt the req in favor of a more urgent waiting
+    # head, and freed the req's GPU KV blocks. The req now sits in
+    # this status until the external router either (a) redispatches
+    # it to another engine — at which point the router closes this
+    # engine's HTTP connection and vLLM aborts the local copy — or
+    # (b) the engine's fallback timer expires and the engine flips
+    # the status to WAITING_FOR_RELOAD to resume locally.
+    WAITING_FOR_REDISPATCH = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

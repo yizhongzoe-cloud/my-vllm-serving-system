@@ -61,36 +61,33 @@ def compute_slo_budgets(
 
 
 def compute_replay_cost(request: Request, now_sec: float) -> float:
-    """Estimate the decode-replay cost (ms) of preempting `request` now.
+    """Estimate the replay cost (ms) of preempting `request` now.
 
-    When a running req is preempted via V3 retain, its KV is reloaded from
-    the most recently published checkpoint, which may lag behind the actual
-    decode head. The lagging tokens must be regenerated (replayed) to catch
-    up to where the request was. Replay cost is roughly:
+    Host KV checkpoints lag behind GPU progress (saved per full block,
+    asynchronously). After preempt + reload, tokens between
+    num_checkpointed_tokens and num_computed_tokens must be re-run.
 
-        replay_tokens = num_output_tokens − num_checkpointed_tokens
-        replay_cost_ms = replay_tokens × avg_TPOT_ms
+        replay_tokens = num_computed_tokens − num_checkpointed_tokens
+        per_token_ms = elapsed_since_arrival_ms / num_computed_tokens
+        replay_cost_ms = replay_tokens × per_token_ms
 
-    A request with `num_output_tokens == 0` (still in prefill) has no
-    decode replay; cost = 0. A request whose checkpoint is fully caught
-    up also has cost = 0.
+    Using num_computed_tokens (prompt + decode) keeps the formula
+    meaningful for both prefill-stage and decode-stage victims; both
+    operands above are in the same units. A victim with checkpoint
+    fully caught up returns 0.
 
-    The picker uses this to inflate the hysteresis gap so that "cheap to
-    preempt" running reqs are preferred victims over "expensive to replay"
-    ones, even if both have similar slack.
+    The picker uses this to inflate the hysteresis gap so reqs that
+    have done more uncheckpointed work are harder to preempt than
+    fresh reqs with the same slack.
     """
-    if request.num_output_tokens <= 0:
-        return 0.0
     replay_tokens = max(
-        0, request.num_output_tokens - request.num_checkpointed_tokens
+        0, request.num_computed_tokens - request.num_checkpointed_tokens
     )
     if replay_tokens == 0:
         return 0.0
-    # avg_TPOT is computed the same way as in compute_slo_budgets: the total
-    # post-arrival elapsed wall time divided by tokens produced so far.
     elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
-    avg_tpot_ms = elapsed_ms / max(1, request.num_output_tokens)
-    return replay_tokens * avg_tpot_ms
+    per_token_ms = elapsed_ms / max(1, request.num_computed_tokens)
+    return replay_tokens * per_token_ms
 
 
 def remove_all(lst: list, items_to_remove: set) -> list:
