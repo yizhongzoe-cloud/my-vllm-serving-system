@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import json
 import os
 import time
 from collections import defaultdict, deque
@@ -302,6 +303,27 @@ class Scheduler(SchedulerInterface):
             )
         except ValueError:
             self._ft_slo_min_gap_ms = 1000.0
+
+        # Peer-engine load gate (paper: §3.3 picker rule, target-aware
+        # back-off). picker fires only when at least one peer engine has
+        # spare capacity to receive the victim. Without this gate the
+        # picker fires blindly even when all peer engines are already
+        # overloaded, and the rerouted victim sits in the receiving
+        # engine's waiting queue for tens of seconds (measured P95 on
+        # RULER 16K). Reading peer status from /dev/shm tmpfs costs ~60us
+        # per fire decision; picker fires sparsely so total overhead
+        # is negligible.
+        self._ft_engine_id = int(os.environ.get("VLLM_FT_ENGINE_ID", "0"))
+        self._ft_picker_peer_load_gate = (
+            os.environ.get("FT_PICKER_PEER_LOAD_GATE", "1") == "1"
+        )
+        try:
+            self._ft_peer_overload_kv_usage = float(
+                os.environ.get("FT_PEER_OVERLOAD_KV_USAGE", "0.85")
+            )
+        except ValueError:
+            self._ft_peer_overload_kv_usage = 0.85
+        self._ft_engine_status_dir = "/dev/shm/vllm_ft_engine_status"
 
     def _mamba_block_aligned_split(
         self,
@@ -1184,6 +1206,20 @@ class Scheduler(SchedulerInterface):
                 < (self._ft_slo_min_gap_ms + replay_cost_ms)):
             return None
 
+        # Peer-load gate: only fire if at least one peer engine has
+        # spare capacity to receive the victim. See _peer_overloaded
+        # docstring for the data flow. Gate is on by default; disable
+        # with FT_PICKER_PEER_LOAD_GATE=0 for ablation.
+        if self._ft_picker_peer_load_gate and self._peer_overloaded(now):
+            logger.info(
+                "PICKER_PEER_GATE_BLOCKED: would-fire victim=%s "
+                "(slack=%.0fms, head_slack=%.0fms, replay=%.0fms) "
+                "blocked — all peer engines overloaded or unreachable",
+                victim.request_id, victim_slack, head_slack,
+                replay_cost_ms,
+            )
+            return None
+
         # Diagnostic: log victim state at the moment we decide to fire.
         # Helps identify whether picker is preempting requests whose
         # host checkpoint truly exists, or whose counter is non-zero
@@ -1247,6 +1283,87 @@ class Scheduler(SchedulerInterface):
             0,  # most_urgent now at head; logged 0 for clarity
         )
         return victim
+
+    def _peer_overloaded(self, now: float) -> bool:
+        """Return True iff all peer engines are overloaded or unreachable.
+
+        Reads /dev/shm/vllm_ft_engine_status/engine_*.json (same files
+        the router uses for death detection), excluding our own entry.
+        A peer is considered usable iff:
+          - file exists, parses, alive=True
+          - ts within 2 s of now (matches router death-detect window)
+          - kv_usage <= FT_PEER_OVERLOAD_KV_USAGE (default 0.85)
+          - running < 0.8 × max_num_seqs (Niyama-style headroom)
+
+        If ANY peer is usable → picker fire is OK (router will route
+        the victim there). If NO peer is usable → return True so picker
+        backs off; firing now would just queue the victim for tens of
+        seconds on an already-saturated target.
+
+        Conservative on errors: missing dir, no peer files, JSON parse
+        failure, or any unexpected IO error are all treated as "no
+        usable peer". Picker would rather skip a fire than make a bad
+        trade. Cost: 1 stat() + 1 read() + json.loads() per peer file,
+        typically ~60μs per call on tmpfs. Picker fires sparsely so
+        this is invisible in overall scheduler timing.
+        """
+        # Hardcoded thresholds — see experiments_v2/docs/env_vars.md
+        # for the rationale on why these are non-tunable:
+        #   running cap fraction:  0.8  (Niyama-style headroom)
+        #   stale heartbeat (sec): 2.0  (matches router's death detector)
+        _PEER_RUNNING_FRAC = 0.8
+        _PEER_STALE_S = 2.0
+
+        try:
+            entries = os.listdir(self._ft_engine_status_dir)
+        except OSError:
+            return True
+
+        peer_running_cap = max(
+            1, int(self.max_num_running_reqs * _PEER_RUNNING_FRAC)
+        )
+
+        for name in entries:
+            if not name.startswith("engine_") or not name.endswith(".json"):
+                continue
+            try:
+                peer_id = int(name[len("engine_"):-len(".json")])
+            except ValueError:
+                continue
+            if peer_id == self._ft_engine_id:
+                continue
+            path = os.path.join(self._ft_engine_status_dir, name)
+            try:
+                with open(path, "rb") as fp:
+                    data = json.loads(fp.read())
+            except (OSError, ValueError):
+                # File missing/corrupt — treat as not usable, keep
+                # looking for another peer.
+                continue
+            if not isinstance(data, dict):
+                # Unexpected JSON shape (e.g. list/string/null);
+                # writer always emits dict so this is defensive only.
+                continue
+            try:
+                ts = float(data.get("ts", 0.0))
+                kv_usage = float(data.get("kv_usage", 1.0))
+                running = int(data.get("running", peer_running_cap))
+                alive = bool(data.get("alive", False))
+            except (TypeError, ValueError):
+                continue
+            if not alive:
+                continue
+            if (now - ts) > _PEER_STALE_S:
+                continue
+            if kv_usage > self._ft_peer_overload_kv_usage:
+                continue
+            if running >= peer_running_cap:
+                continue
+            # This peer is alive, fresh, and has spare capacity.
+            return False
+
+        # No usable peer found — back off.
+        return True
 
     def _preempt_for_slo_retain(
         self, request: Request, timestamp: float
