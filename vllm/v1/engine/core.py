@@ -1104,11 +1104,18 @@ class EngineCore:
             request.status = RequestStatus.PREEMPTED
             logger.info(
                 "FT overlap V3: %s done — alloc waited %d step(s), "
-                "reload took %d step(s), %d tokens restored",
+                "reload took %d step(s), %d tokens restored "
+                "resume_ts=%.3f original_internal_req_id=%s",
                 req_id,
                 state.get("steps_waited", 0),
                 steps_in_reload,
                 tokens_started,
+                time.time(),
+                request.original_internal_req_id or req_id,
+                # ^ pairs with engine A's PICKER_DIAG victim=<id>: for
+                # cross-engine reroute, original_internal_req_id == the
+                # picker victim's id on engine A. Post-process script
+                # joins on this to compute resume_ts - fire_ts.
             )
             del self._overlap_reload_inflight[req_id]
 

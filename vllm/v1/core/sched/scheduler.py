@@ -1198,13 +1198,15 @@ class Scheduler(SchedulerInterface):
             logger.info(
                 "PICKER_DIAG: victim=%s num_ckpt_tokens=%d "
                 "num_computed_tokens=%d elapsed_since_arrival=%.0fms "
-                "host_manifest_exists=%s is_rerouted=%s",
+                "host_manifest_exists=%s is_rerouted=%s "
+                "fire_ts=%.3f",
                 victim.request_id,
                 getattr(victim, "num_checkpointed_tokens", 0),
                 getattr(victim, "num_computed_tokens", 0),
                 _diag_elapsed_ms,
                 _diag_host_manifest_exists,
                 getattr(victim, "is_rerouted", False),
+                now,  # wall-clock (time.time()) — see caller passes it in
             )
         except Exception:
             pass
