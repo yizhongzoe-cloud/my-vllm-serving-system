@@ -1,0 +1,107 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+  <g id="bg">
+    <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+  </g>
+
+  <g id="header">
+    <text x="60" y="80" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-size="30" font-weight="bold" fill="#111827">Three experiments aligned to three contributions</text>
+    <line x1="60" y1="105" x2="1220" y2="105" stroke="#D1D5DB" stroke-with="1" stroke-width="1"/>
+    <text x="60" y="135" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="16" fill="#4B5563">Figure placeholders — real plots inserted as results come in.</text>
+  </g>
+
+  <g id="fig-1-E_M1">
+    <text x="80" y="180" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">E_M1  ·  MAIN FIGURE</text>
+
+    <rect x="80" y="200" width="370" height="240" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="6,4"/>
+    <line x1="120" y1="220" x2="120" y2="410" stroke="#D1D5DB" stroke-width="1"/>
+    <line x1="120" y1="410" x2="430" y2="410" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="80" y="220" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">SLO attain %</text>
+    <text x="420" y="430" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">QPS →</text>
+
+    <polyline points="125,235 175,238 230,245 285,260 340,295 395,355" fill="none" stroke="#111827" stroke-width="2"/>
+    <polyline points="125,238 175,250 230,275 285,320 340,372 395,398" fill="none" stroke="#4B5563" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <polyline points="125,242 175,265 230,310 285,358 340,392 395,408" fill="none" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="2,3"/>
+
+    <text x="405" y="237" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#111827">ours</text>
+    <text x="405" y="293" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">no_ckpt</text>
+    <text x="405" y="322" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">fcfs</text>
+
+    <text x="265" y="460" text-anchor="middle" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="13" fill="#4B5563">Figure 2.  SLO attainment vs QPS</text>
+
+    <text x="80" y="500" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Claim</text>
+    <text x="80" y="525" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827"><tspan font-family="Consolas, &quot;Courier New&quot;, monospace">ours</tspan> holds attainment past the</text>
+    <text x="80" y="545" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827">saturation knee where baselines</text>
+    <text x="80" y="565" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827">drop below 90%.</text>
+    <text x="80" y="600" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">Long-context gap clearest because</text>
+    <text x="80" y="620" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">each preempt saves seconds of prefill.</text>
+
+    <text x="80" y="655" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#9CA3AF">Status: 1.0–8.0 QPS sweep, 3 seeds on A6000  ·  L40S replicate in progress</text>
+  </g>
+
+  <g id="fig-2-E_M4">
+    <text x="500" y="180" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">E_M4  ·  PICKER ABLATION</text>
+
+    <rect x="500" y="200" width="370" height="240" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="6,4"/>
+    <line x1="540" y1="220" x2="540" y2="410" stroke="#D1D5DB" stroke-width="1"/>
+    <line x1="540" y1="410" x2="850" y2="410" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="500" y="220" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">SLO attain %</text>
+    <text x="840" y="430" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">QPS →</text>
+
+    <polyline points="545,235 595,238 650,245 705,260 760,295 815,355" fill="none" stroke="#111827" stroke-width="2"/>
+    <polyline points="545,238 595,245 650,260 705,290 760,335 815,378" fill="none" stroke="#4B5563" stroke-width="1.5"/>
+    <polyline points="545,240 595,253 650,278 705,322 760,372 815,398" fill="none" stroke="#4B5563" stroke-width="1.5" stroke-dasharray="5,3"/>
+
+    <text x="825" y="237" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#111827">ours</text>
+    <text x="825" y="305" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">no_picker</text>
+    <text x="825" y="343" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">no_ckpt</text>
+
+    <text x="685" y="460" text-anchor="middle" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="13" fill="#4B5563">Figure 4.  Mechanism vs policy ablation</text>
+
+    <text x="500" y="500" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Claim</text>
+    <text x="500" y="525" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827"><tspan font-family="Consolas, &quot;Courier New&quot;, monospace">ours_no_picker</tspan> sits between</text>
+    <text x="500" y="545" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827"><tspan font-family="Consolas, &quot;Courier New&quot;, monospace">ours</tspan> and <tspan font-family="Consolas, &quot;Courier New&quot;, monospace">reroute_no_ckpt</tspan>.</text>
+    <text x="500" y="580" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">Mechanism alone = passive benefit.</text>
+    <text x="500" y="600" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">Picker = active SLO advantage.</text>
+    <text x="500" y="620" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">Two contributions independent + additive.</text>
+
+    <text x="500" y="655" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#9CA3AF">Status: <tspan font-family="Consolas, &quot;Courier New&quot;, monospace">ours_no_picker</tspan> runs scheduled this week</text>
+  </g>
+
+  <g id="fig-3-E_D1">
+    <text x="920" y="180" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">E_D1  ·  FAILOVER GAP</text>
+
+    <rect x="920" y="200" width="300" height="240" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="6,4"/>
+    <line x1="960" y1="220" x2="960" y2="410" stroke="#D1D5DB" stroke-width="1"/>
+    <line x1="960" y1="410" x2="1200" y2="410" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="920" y="220" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">failover gap (s)</text>
+    <text x="1190" y="430" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">context length →</text>
+
+    <rect x="985" y="395" width="22" height="15" fill="#111827"/>
+    <rect x="1015" y="385" width="22" height="25" fill="#111827"/>
+    <rect x="1045" y="370" width="22" height="40" fill="#111827"/>
+    <rect x="1075" y="355" width="22" height="55" fill="#111827"/>
+
+    <rect x="1110" y="380" width="22" height="30" fill="#4B5563"/>
+    <rect x="1140" y="330" width="22" height="80" fill="#4B5563"/>
+    <rect x="1170" y="245" width="22" height="165" fill="#4B5563"/>
+
+    <text x="1060" y="345" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#111827">ours</text>
+    <text x="1170" y="230" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">no_ckpt</text>
+
+    <text x="1070" y="460" text-anchor="middle" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="13" fill="#4B5563">Figure 5.  SIGKILL → next-token gap</text>
+
+    <text x="920" y="500" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Claim</text>
+    <text x="920" y="525" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827"><tspan font-family="Consolas, &quot;Courier New&quot;, monospace">ours</tspan> ≈ 1.5 s on RULER 16K.</text>
+    <text x="920" y="545" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827"><tspan font-family="Consolas, &quot;Courier New&quot;, monospace">no_ckpt</tspan> ≈ 10–20 s at 16K.</text>
+    <text x="920" y="580" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">Gap grows with context length —</text>
+    <text x="920" y="600" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">tens of seconds extrapolated at 64K.</text>
+    <text x="920" y="620" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="13" fill="#4B5563">Lower variance too (single V3 batch).</text>
+
+    <text x="920" y="655" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#9CA3AF">Status: RULER 16K demo working  ·  scaling to longer context</text>
+  </g>
+
+  <g id="footer">
+    <text x="60" y="700" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">Disruption-Aware SLO Scheduling — APSys 2026 draft</text>
+    <text x="1220" y="700" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">11 / 12</text>
+  </g>
+</svg>

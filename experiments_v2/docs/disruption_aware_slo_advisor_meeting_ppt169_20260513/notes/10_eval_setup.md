@@ -1,0 +1,5 @@
+[Transition] Setup, then claims, then placeholder figures.
+Hardware is 2× A6000 PCIe with an L40S portability check. Model is Qwen2.5-7B-Instruct fp16, max_model_len 32K. Workloads are RULER 16K for the long-context regime we target and ShareGPT for the short-context regime we must not break, both with Poisson arrivals and Niyama-style 3-tier QoS in the main figure. SLOs are calibrated as multiples of baseline P95 on vllm_fcfs at uncontested low QPS. Four baselines isolate router cost, FT cost, and the slack picker contribution: vllm_fcfs as the no-router floor, reroute_no_ckpt as router-on but FT-off, ours_no_picker as FT-on with picker disabled, and ours as the full system. Three seeds per config.
+
+Key points: ① 4 baselines isolate router / FT / picker contributions ② RULER 16K is the target regime, ShareGPT is the don't-break check ③ 3 seeds, mean ± std
+Duration: 2 minutes

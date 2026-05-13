@@ -1,0 +1,134 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+  <defs>
+    <marker id="arrowHead" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111827"/>
+    </marker>
+    <marker id="arrowHeadGrey" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#4B5563"/>
+    </marker>
+  </defs>
+
+  <g id="bg">
+    <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+  </g>
+
+  <g id="header">
+    <text x="60" y="80" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-size="30" font-weight="bold" fill="#111827">Heartbeat → reroute → reload state machine on the surviving engine</text>
+    <line x1="60" y1="105" x2="1220" y2="105" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="60" y="135" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="16" fill="#4B5563">All in-flight requests on the dead engine recover in one V3 batch — sub-ms spread across requests.</text>
+  </g>
+
+  <g id="sequence-diagram">
+    <text x="60" y="180" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">SEQUENCE</text>
+
+    <g id="lane-engine-dead">
+      <rect x="60" y="200" width="140" height="34" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="130" y="222" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" fill="#111827">Engine 0 (dies)</text>
+      <line x1="130" y1="234" x2="130" y2="555" stroke="#9CA3AF" stroke-width="1" stroke-dasharray="3,3"/>
+      <text x="130" y="280" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">heartbeat 200ms</text>
+      <line x1="115" y1="335" x2="145" y2="365" stroke="#111827" stroke-width="2"/>
+      <line x1="145" y1="335" x2="115" y2="365" stroke="#111827" stroke-width="2"/>
+      <text x="130" y="395" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">SIGKILL</text>
+    </g>
+
+    <g id="lane-router">
+      <rect x="220" y="200" width="160" height="34" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="300" y="222" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" fill="#111827">Router</text>
+      <line x1="300" y1="234" x2="300" y2="555" stroke="#9CA3AF" stroke-width="1" stroke-dasharray="3,3"/>
+
+      <text x="300" y="265" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">poll 500ms</text>
+
+      <text x="300" y="430" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#111827">timestamp &gt; 2 s ⇒ dead</text>
+    </g>
+
+    <g id="lane-shm">
+      <rect x="400" y="200" width="180" height="34" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="490" y="222" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" fill="#111827">/dev/shm</text>
+      <line x1="490" y1="234" x2="490" y2="555" stroke="#9CA3AF" stroke-width="1" stroke-dasharray="3,3"/>
+    </g>
+
+    <g id="lane-engine-alive">
+      <rect x="600" y="200" width="160" height="34" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="680" y="222" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" fill="#111827">Engine 1 (survives)</text>
+      <line x1="680" y1="234" x2="680" y2="555" stroke="#9CA3AF" stroke-width="1" stroke-dasharray="3,3"/>
+    </g>
+
+    <line x1="135" y1="290" x2="485" y2="290" stroke="#4B5563" stroke-width="1.2" marker-end="url(#arrowHeadGrey)"/>
+    <text x="310" y="285" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">heartbeat file write (daemon thread)</text>
+
+    <line x1="495" y1="320" x2="305" y2="320" stroke="#4B5563" stroke-width="1.2" marker-end="url(#arrowHeadGrey)"/>
+    <text x="370" y="316" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#4B5563">read status</text>
+
+    <line x1="300" y1="460" x2="675" y2="460" stroke="#111827" stroke-width="1.5" marker-end="url(#arrowHead)"/>
+    <text x="425" y="455" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#111827">re-forward in_flight requests</text>
+    <text x="425" y="478" font-family="Consolas, &quot;Courier New&quot;, monospace" font-size="11" fill="#4B5563">is_rerouted=True, internal_req_id, num_ckpt_tokens</text>
+
+    <line x1="675" y1="520" x2="495" y2="520" stroke="#111827" stroke-width="1.5" marker-end="url(#arrowHead)"/>
+    <text x="500" y="515" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#111827">restore_kv_blocks</text>
+  </g>
+
+  <g id="separator">
+    <line x1="800" y1="170" x2="800" y2="600" stroke="#D1D5DB" stroke-width="1"/>
+  </g>
+
+  <g id="mechanism-notes">
+    <g id="detect">
+      <!-- icon: tabler-outline/history -->
+  <g transform="translate(830.0, 178.0) scale(0.9166666666666666)" fill="none" stroke="#111827" stroke-width="2">
+    <path d="M12 8l0 4l2 2" />
+    <path d="M3.05 11a9 9 0 1 1 .5 4m-.5 5v-5h5" />
+  </g>
+      <text x="865" y="195" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">DETECT</text>
+      <text x="830" y="225" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" font-weight="bold" fill="#111827">Heartbeat from daemon thread</text>
+      <text x="830" y="250" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Engine writes status file every 200 ms.</text>
+      <text x="830" y="270" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">NOT on step() — idle engines never call it.</text>
+      <text x="830" y="290" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Router polls 500 ms; &gt; 2 s stale ⇒ dead.</text>
+    </g>
+
+    <line x1="830" y1="315" x2="1220" y2="315" stroke="#D1D5DB" stroke-width="1"/>
+
+    <g id="reroute">
+      <!-- icon: tabler-outline/network -->
+  <g transform="translate(830.0, 328.0) scale(0.9166666666666666)" fill="none" stroke="#111827" stroke-width="2">
+    <path d="M6 9a6 6 0 1 0 12 0a6 6 0 0 0 -12 0" />
+    <path d="M12 3c1.333 .333 2 2.333 2 6s-.667 5.667 -2 6" />
+    <path d="M12 3c-1.333 .333 -2 2.333 -2 6s.667 5.667 2 6" />
+    <path d="M6 9h12" />
+    <path d="M3 20h7" />
+    <path d="M14 20h7" />
+    <path d="M10 20a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+    <path d="M12 15v3" />
+  </g>
+      <text x="865" y="345" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">REROUTE</text>
+      <text x="830" y="375" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" font-weight="bold" fill="#111827">in_flight dict + vllm_xargs</text>
+      <text x="830" y="400" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Router tracks <tspan font-family="Consolas, &quot;Courier New&quot;, monospace">router_req_id → (engine, body)</tspan>.</text>
+      <text x="830" y="420" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">On death: enumerate, re-forward with</text>
+      <text x="830" y="440" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563"><tspan font-family="Consolas, &quot;Courier New&quot;, monospace">is_rerouted=True</tspan> + original IDs to surviving engine.</text>
+    </g>
+
+    <line x1="830" y1="465" x2="1220" y2="465" stroke="#D1D5DB" stroke-width="1"/>
+
+    <g id="restore">
+      <!-- icon: tabler-outline/refresh -->
+  <g transform="translate(830.0, 478.0) scale(0.9166666666666666)" fill="none" stroke="#111827" stroke-width="2">
+    <path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4" />
+    <path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4" />
+  </g>
+      <text x="865" y="495" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">RESTORE</text>
+      <text x="830" y="525" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" font-weight="bold" fill="#111827">Reload state machine</text>
+      <text x="830" y="550" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">alloc KV blocks → restore from shm</text>
+      <text x="830" y="570" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">→ flip to <tspan font-family="Consolas, &quot;Courier New&quot;, monospace">PREEMPTED</tspan>; vLLM's standard</text>
+      <text x="830" y="590" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">resumed-from-preempt admit path takes over.</text>
+    </g>
+  </g>
+
+  <g id="takeaway">
+    <line x1="60" y1="620" x2="1220" y2="620" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="640" y="655" text-anchor="middle" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="18" fill="#111827">No admit-loop modification on the new engine — we reuse vLLM's existing resumed-from-preempt path.</text>
+  </g>
+
+  <g id="footer">
+    <text x="60" y="700" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">Disruption-Aware SLO Scheduling — APSys 2026 draft</text>
+    <text x="1220" y="700" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">09 / 12</text>
+  </g>
+</svg>

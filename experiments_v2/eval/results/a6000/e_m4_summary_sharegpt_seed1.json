@@ -1,0 +1,84 @@
+{
+  "dataset": "sharegpt",
+  "num_requests": 60,
+  "seed": 1,
+  "qps_sweep": [
+    1.0,
+    2.0,
+    4.0,
+    6.0,
+    8.0
+  ],
+  "ttft_tiers": {
+    "tight": 684.0,
+    "normal": 1368.0,
+    "loose": 2736.0
+  },
+  "tpot_tiers": {
+    "tight": 33.0,
+    "normal": 66.0,
+    "loose": 132.0
+  },
+  "runs": [
+    {
+      "qps": 1.0,
+      "baseline": "ours_no_picker",
+      "metrics_file": "e_m4_ours_no_picker_sharegpt_qps1.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 1.0,
+      "baseline": "ours",
+      "metrics_file": "e_m4_ours_sharegpt_qps1.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 2.0,
+      "baseline": "ours_no_picker",
+      "metrics_file": "e_m4_ours_no_picker_sharegpt_qps2.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 2.0,
+      "baseline": "ours",
+      "metrics_file": "e_m4_ours_sharegpt_qps2.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 4.0,
+      "baseline": "ours_no_picker",
+      "metrics_file": "e_m4_ours_no_picker_sharegpt_qps4.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 4.0,
+      "baseline": "ours",
+      "metrics_file": "e_m4_ours_sharegpt_qps4.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 6.0,
+      "baseline": "ours_no_picker",
+      "metrics_file": "e_m4_ours_no_picker_sharegpt_qps6.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 6.0,
+      "baseline": "ours",
+      "metrics_file": "e_m4_ours_sharegpt_qps6.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 8.0,
+      "baseline": "ours_no_picker",
+      "metrics_file": "e_m4_ours_no_picker_sharegpt_qps8.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    },
+    {
+      "qps": 8.0,
+      "baseline": "ours",
+      "metrics_file": "e_m4_ours_sharegpt_qps8.0_n60_seed1_metrics.json",
+      "exit_code": 0
+    }
+  ]
+}

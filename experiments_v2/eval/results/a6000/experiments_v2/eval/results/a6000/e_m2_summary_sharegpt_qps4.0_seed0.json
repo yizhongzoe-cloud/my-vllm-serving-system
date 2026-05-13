@@ -1,0 +1,61 @@
+{
+  "dataset": "sharegpt",
+  "qps": 4.0,
+  "num_requests": 60,
+  "seed": 0,
+  "base_ttft_p95_ms": 455.97,
+  "base_tpot_p95_ms": 22.047,
+  "runs": [
+    {
+      "tightness": "default",
+      "tightness_factor": 1.0,
+      "baseline": "vllm_fcfs",
+      "metrics_file": "e_m2_vllm_fcfs_sharegpt_qps4.0_n60_seed0_tight-default_metrics.json",
+      "exit_code": 0,
+      "ttft_tiers": {
+        "tight": 683.955,
+        "normal": 1367.91,
+        "loose": 2735.82
+      },
+      "tpot_tiers": {
+        "tight": 33.0705,
+        "normal": 66.141,
+        "loose": 132.282
+      }
+    },
+    {
+      "tightness": "default",
+      "tightness_factor": 1.0,
+      "baseline": "reroute_no_ckpt",
+      "metrics_file": "e_m2_reroute_no_ckpt_sharegpt_qps4.0_n60_seed0_tight-default_metrics.json",
+      "exit_code": 0,
+      "ttft_tiers": {
+        "tight": 683.955,
+        "normal": 1367.91,
+        "loose": 2735.82
+      },
+      "tpot_tiers": {
+        "tight": 33.0705,
+        "normal": 66.141,
+        "loose": 132.282
+      }
+    },
+    {
+      "tightness": "default",
+      "tightness_factor": 1.0,
+      "baseline": "ours",
+      "metrics_file": "e_m2_ours_sharegpt_qps4.0_n60_seed0_tight-default_metrics.json",
+      "exit_code": 0,
+      "ttft_tiers": {
+        "tight": 683.955,
+        "normal": 1367.91,
+        "loose": 2735.82
+      },
+      "tpot_tiers": {
+        "tight": 33.0705,
+        "normal": 66.141,
+        "loose": 132.282
+      }
+    }
+  ]
+}

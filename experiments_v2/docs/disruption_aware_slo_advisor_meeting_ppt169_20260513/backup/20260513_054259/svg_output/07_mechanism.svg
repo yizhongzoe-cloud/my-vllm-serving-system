@@ -1,0 +1,103 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+  <defs>
+    <marker id="arrowHead" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#111827"/>
+    </marker>
+  </defs>
+
+  <g id="bg">
+    <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+  </g>
+
+  <g id="header">
+    <text x="60" y="80" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-size="30" font-weight="bold" fill="#111827">Block-aligned, two-tier, async pipeline</text>
+    <line x1="60" y1="105" x2="1220" y2="105" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="60" y="135" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="16" fill="#4B5563">Naive sync publish costs ~30% TTFT. The four-stage pipeline drives that to negligible.</text>
+  </g>
+
+  <g id="pipeline-diagram">
+    <text x="60" y="180" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">ASYNC PUBLISH PIPELINE  ·  4 STAGES</text>
+
+    <g id="stage-1">
+      <rect x="60" y="200" width="240" height="80" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="180" y="225" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" letter-spacing="1.5" fill="#9CA3AF">STAGE 1 · ENGINE</text>
+      <text x="180" y="250" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Future + depth-1 BP</text>
+      <text x="180" y="270" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#4B5563">eager num_checkpointed_tokens</text>
+    </g>
+
+    <line x1="300" y1="240" x2="345" y2="240" stroke="#111827" stroke-width="1.5" marker-end="url(#arrowHead)"/>
+
+    <g id="stage-2">
+      <rect x="350" y="200" width="240" height="80" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="470" y="225" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" letter-spacing="1.5" fill="#9CA3AF">STAGE 2 · WORKER</text>
+      <text x="470" y="250" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">GPU batch gather</text>
+      <text x="470" y="270" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#4B5563">one async H2D copy</text>
+    </g>
+
+    <line x1="590" y1="240" x2="635" y2="240" stroke="#111827" stroke-width="1.5" marker-end="url(#arrowHead)"/>
+
+    <g id="stage-3">
+      <rect x="640" y="200" width="240" height="80" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="760" y="225" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" letter-spacing="1.5" fill="#9CA3AF">STAGE 3 · SHM WRITE</text>
+      <text x="760" y="250" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">ctypes → libc write</text>
+      <text x="760" y="270" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#4B5563">releases the GIL</text>
+    </g>
+
+    <line x1="880" y1="240" x2="925" y2="240" stroke="#111827" stroke-width="1.5" marker-end="url(#arrowHead)"/>
+
+    <g id="stage-4">
+      <rect x="930" y="200" width="240" height="80" fill="#F3F4F6" stroke="#111827" stroke-width="1.5"/>
+      <text x="1050" y="225" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" letter-spacing="1.5" fill="#9CA3AF">STAGE 4 · RESTORE</text>
+      <text x="1050" y="250" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">shared CUDA stream</text>
+      <text x="1050" y="270" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="12" fill="#4B5563">batch-end flush, dyn. mem est.</text>
+    </g>
+  </g>
+
+  <g id="what-when">
+    <text x="60" y="335" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">WHAT / WHEN</text>
+    <line x1="60" y1="345" x2="610" y2="345" stroke="#111827" stroke-width="1"/>
+    <text x="60" y="378" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" fill="#111827">Every <tspan font-weight="bold">16 tokens decoded</tspan> (= one vLLM KV block):</text>
+    <text x="60" y="402" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" fill="#111827">save K/V of newly-stable blocks — <tspan font-style="italic">per-block delta</tspan>, not full KV.</text>
+    <text x="60" y="430" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Block alignment is mandatory — vLLM allocates KV in fixed blocks;</text>
+    <text x="60" y="450" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">a partial block has no defined boundary.</text>
+  </g>
+
+  <g id="two-tier">
+    <text x="60" y="500" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">TWO TIERS</text>
+    <line x1="60" y1="510" x2="610" y2="510" stroke="#111827" stroke-width="1"/>
+    <text x="60" y="543" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" fill="#111827"><tspan font-weight="bold">Layer 1.</tspan> In-process pinned host pool — <tspan font-style="italic">sub-ms</tspan>, same-engine.</text>
+    <text x="60" y="568" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" fill="#111827"><tspan font-weight="bold">Layer 2.</tspan> <tspan font-family="Consolas, &quot;Courier New&quot;, monospace">/dev/shm</tspan> mirror — atomic tmp+rename, cross-engine.</text>
+    <text x="60" y="600" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Identical data in both tiers; only the access path differs.</text>
+  </g>
+
+  <g id="invariants">
+    <text x="660" y="335" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="13" letter-spacing="1.5" fill="#9CA3AF">CORRECTNESS INVARIANTS</text>
+    <line x1="660" y1="345" x2="1220" y2="345" stroke="#111827" stroke-width="1"/>
+
+    <g id="invariant-a">
+      <text x="660" y="378" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="18" fill="#111827">(a)</text>
+      <text x="710" y="378" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" font-weight="bold" fill="#111827">"latest" pointer updates only after rename.</text>
+      <text x="710" y="405" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Cross-engine restore never observes a partial</text>
+      <text x="710" y="425" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">chunk; reader sees the previous good version.</text>
+    </g>
+
+    <g id="invariant-b">
+      <text x="660" y="475" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="18" fill="#111827">(b)</text>
+      <text x="710" y="475" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" font-weight="bold" fill="#111827">Eager-counter gap = decode replay.</text>
+      <text x="710" y="502" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">If engine dies before publish completes, peer</text>
+      <text x="710" y="522" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">reads older "latest", restores fewer tokens.</text>
+      <text x="710" y="542" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Reload state machine absorbs the gap.</text>
+    </g>
+
+    <g id="overhead-note">
+      <line x1="660" y1="585" x2="1220" y2="585" stroke="#D1D5DB" stroke-width="1"/>
+      <text x="660" y="615" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">Healthy-load TTFT P50 vs no-FT baseline:</text>
+      <text x="660" y="638" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827"><tspan font-weight="bold">+ ~30 ms</tspan>  ·  throughput within 0.5%</text>
+    </g>
+  </g>
+
+  <g id="footer">
+    <text x="60" y="700" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">Disruption-Aware SLO Scheduling — APSys 2026 draft</text>
+    <text x="1220" y="700" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">07 / 12</text>
+  </g>
+</svg>

@@ -1,0 +1,64 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+  <g id="bg">
+    <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+  </g>
+
+  <g id="header">
+    <text x="60" y="80" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-size="30" font-weight="bold" fill="#111827">Long-context prefill is expensive — and we keep throwing it away</text>
+    <line x1="60" y1="105" x2="1220" y2="105" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="60" y="135" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="16" fill="#4B5563">Qwen2.5-7B + A6000, P95 from a no-pressure calibration sweep.</text>
+  </g>
+
+  <g id="bar-comparison">
+    <!-- icon: tabler-outline/clock -->
+  <g transform="translate(320.0, 195.0) scale(1.3333333333333333)" fill="none" stroke="#111827" stroke-width="2">
+    <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" />
+    <path d="M12 7v5l3 3" />
+  </g>
+    <text x="365" y="218" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#4B5563">Prefill / TTFT P95 — bar length scaled to seconds</text>
+
+    <g id="bar-sharegpt">
+      <text x="220" y="295" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" fill="#111827">ShareGPT chat (TTFT)</text>
+      <rect x="430" y="270" width="55" height="40" fill="#9CA3AF"/>
+      <text x="500" y="297" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="20" font-weight="bold" fill="#111827">0.45 s</text>
+    </g>
+
+    <g id="bar-ruler">
+      <text x="220" y="385" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" fill="#111827">RULER 16K (prefill)</text>
+      <rect x="430" y="360" width="330" height="40" fill="#111827"/>
+      <text x="775" y="387" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="20" font-weight="bold" fill="#111827">2.7 s</text>
+    </g>
+
+    <g id="gap-callout">
+      <line x1="900" y1="290" x2="900" y2="380" stroke="#111827" stroke-width="1.5"/>
+      <line x1="894" y1="290" x2="906" y2="290" stroke="#111827" stroke-width="1.5"/>
+      <line x1="894" y1="380" x2="906" y2="380" stroke="#111827" stroke-width="1.5"/>
+      <text x="920" y="332" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-style="italic" font-size="36" font-weight="bold" fill="#111827">≈ 6 ×</text>
+      <text x="920" y="358" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">gap in cost-of-discard</text>
+    </g>
+  </g>
+
+  <g id="bullets">
+    <line x1="60" y1="460" x2="1220" y2="460" stroke="#D1D5DB" stroke-width="1"/>
+
+    <g id="bullet-1">
+      <text x="80" y="500" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">·</text>
+      <text x="100" y="500" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">Modern LLM workloads — RAG, long-document QA, agentic tool-use traces — routinely push prompts past <tspan font-weight="bold">16K tokens</tspan>.</text>
+    </g>
+
+    <g id="bullet-2">
+      <text x="80" y="538" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">·</text>
+      <text x="100" y="538" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">Once prefill is computed, throwing it away costs <tspan font-weight="bold">seconds of GPU time per request</tspan> — time that could have served someone else.</text>
+    </g>
+
+    <g id="bullet-3">
+      <text x="80" y="576" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">·</text>
+      <text x="100" y="576" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">Two distinct system events keep forcing us to throw it away — <tspan font-style="italic">engine death</tspan> and <tspan font-style="italic">priority preemption</tspan> (next slide).</text>
+    </g>
+  </g>
+
+  <g id="footer">
+    <text x="60" y="690" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">Disruption-Aware SLO Scheduling — APSys 2026 draft</text>
+    <text x="1220" y="690" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">02 / 12</text>
+  </g>
+</svg>

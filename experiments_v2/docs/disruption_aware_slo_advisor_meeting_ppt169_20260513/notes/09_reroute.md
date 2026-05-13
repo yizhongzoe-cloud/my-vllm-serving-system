@@ -1,0 +1,5 @@
+[Transition] Cross-engine reroute uses the same checkpoint data.
+Detection: each engine writes a heartbeat file every 200 ms from a daemon thread — not piggybacked on step() because idle engines never call step. Router polls every 500 ms; timestamp older than 2 seconds means dead. Reroute: router enumerates in-flight requests on the dead engine and re-forwards each to a surviving engine, body carries is_rerouted=True plus the original internal_req_id plus the published num_checkpointed_tokens. Restore: new engine's add_request diverts the request into a reload state machine that allocates KV blocks, calls restore_kv_blocks against /dev/shm, and flips status to PREEMPTED. From there vLLM's standard resumed-from-preempt admit path takes over, so we don't touch the admit loop.
+
+Key points: ① heartbeat from daemon thread (lesson from earlier dead-engine false positive) ② is_rerouted flag + original req_id wire it together ③ reuse vLLM's resumed-from-preempt path, no admit-loop changes
+Duration: 2.5 minutes

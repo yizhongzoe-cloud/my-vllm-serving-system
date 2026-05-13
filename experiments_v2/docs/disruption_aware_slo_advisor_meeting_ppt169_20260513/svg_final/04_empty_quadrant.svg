@@ -1,0 +1,124 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+  <g id="bg">
+    <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+  </g>
+
+  <g id="header">
+    <text x="60" y="80" font-family="Georgia, &quot;Times New Roman&quot;, serif" font-size="30" font-weight="bold" fill="#111827">Every prior system fills 3 of 4 cells. None fills all four.</text>
+    <line x1="60" y1="105" x2="1220" y2="105" stroke="#D1D5DB" stroke-width="1"/>
+    <text x="60" y="135" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-style="italic" font-size="16" fill="#4B5563">Empty quadrant: <tspan font-weight="bold">cheap preempt of long-context decode × disruption-aware</tspan>.</text>
+  </g>
+
+  <g id="table">
+    <!-- icon: tabler-outline/target -->
+  <g transform="translate(60.0, 160.0) scale(0.9166666666666666)" fill="none" stroke="#111827" stroke-width="2">
+    <path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+    <path d="M7 12a5 5 0 1 0 10 0a5 5 0 1 0 -10 0" />
+    <path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0" />
+  </g>
+
+    <g id="table-header">
+      <rect x="60" y="195" width="1160" height="40" fill="#F3F4F6"/>
+      <text x="80" y="221" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">System</text>
+      <text x="500" y="221" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Preempt long-ctx decode</text>
+      <text x="730" y="221" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Disruption-aware</text>
+      <text x="920" y="221" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Host-side KV</text>
+      <text x="1110" y="221" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">Cross-engine state</text>
+    </g>
+
+    <g id="row-vllm">
+      <text x="80" y="265" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">vLLM (FCFS)</text>
+      <text x="500" y="265" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="730" y="265" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="265" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="1110" y="265" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="278" x2="1220" y2="278" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-qlm">
+      <text x="80" y="303" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">QLM</text>
+      <text x="500" y="303" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">✗ (early chunks only)</text>
+      <text x="730" y="303" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="303" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="1110" y="303" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="316" x2="1220" y2="316" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-scorpio">
+      <text x="80" y="341" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">Scorpio</text>
+      <text x="500" y="341" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">✗ (TTFT/TPOT gates)</text>
+      <text x="730" y="341" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="341" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="1110" y="341" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="354" x2="1220" y2="354" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-jitserve">
+      <text x="80" y="379" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">JITServe</text>
+      <text x="500" y="379" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">✗ (admission ctrl)</text>
+      <text x="730" y="379" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="379" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="1110" y="379" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="392" x2="1220" y2="392" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-niyama">
+      <text x="80" y="417" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">Niyama</text>
+      <text x="500" y="417" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">✗ (deadline EDF)</text>
+      <text x="730" y="417" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="417" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="1110" y="417" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="430" x2="1220" y2="430" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-llumnix">
+      <text x="80" y="455" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">Llumnix</text>
+      <text x="500" y="455" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">partial</text>
+      <text x="730" y="455" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">partial (source must live)</text>
+      <text x="920" y="455" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="1110" y="455" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827">✓ live migration</text>
+      <line x1="60" y1="468" x2="1220" y2="468" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-mooncake">
+      <text x="80" y="493" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">Mooncake</text>
+      <text x="500" y="493" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="730" y="493" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="493" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827">✓ (prefix cache)</text>
+      <text x="1110" y="493" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="506" x2="1220" y2="506" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-tokenflow">
+      <text x="80" y="531" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">TokenFlow</text>
+      <text x="500" y="531" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827">✓ same-engine resume</text>
+      <text x="730" y="531" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="531" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#111827">✓</text>
+      <text x="1110" y="531" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="544" x2="1220" y2="544" stroke="#D1D5DB" stroke-width="0.5"/>
+    </g>
+
+    <g id="row-fastserve">
+      <text x="80" y="569" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="15" fill="#111827">FastServe</text>
+      <text x="500" y="569" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#111827">✓ skip-join MLFQ</text>
+      <text x="730" y="569" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <text x="920" y="569" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" fill="#4B5563">partial (host swap)</text>
+      <text x="1110" y="569" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="18" fill="#9CA3AF">✗</text>
+      <line x1="60" y1="582" x2="1220" y2="582" stroke="#111827" stroke-width="1"/>
+    </g>
+
+    <g id="row-ours">
+      <rect x="60" y="585" width="1160" height="44" fill="#F3F4F6"/>
+      <text x="80" y="613" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="16" font-weight="bold" fill="#111827">Ours</text>
+      <text x="500" y="613" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="20" font-weight="bold" fill="#111827">✓</text>
+      <text x="730" y="613" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">✓ (source can die)</text>
+      <text x="920" y="613" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="20" font-weight="bold" fill="#111827">✓</text>
+      <text x="1110" y="613" text-anchor="middle" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="14" font-weight="bold" fill="#111827">✓ checkpoint mirror</text>
+    </g>
+  </g>
+
+  <g id="footer">
+    <text x="60" y="690" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">Disruption-Aware SLO Scheduling — APSys 2026 draft</text>
+    <text x="1220" y="690" text-anchor="end" font-family="Arial, &quot;Helvetica Neue&quot;, sans-serif" font-size="11" fill="#9CA3AF">04 / 12</text>
+  </g>
+</svg>

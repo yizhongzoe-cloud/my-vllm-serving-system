@@ -1,0 +1,5 @@
+[Transition] Policy on top of the mechanism: slack-based preempt picker.
+Slack is defined as wall-clock remaining before a request misses its SLO — TTFT slack pre-first-token, TPOT slack post-first-token. One signal collapses both SLO regimes. Picker rule: every scheduler step, pick the running request with maximum slack as candidate victim, the waiting request with minimum slack as candidate head, and preempt iff slack(victim) − slack(head) > δ + replay_cost AND the victim has checkpointed tokens AND cooldown elapsed. Three guards each kill one failure mode — hysteresis δ kills thrashing, replay_cost kills bad trades, cooldown kills repeat-victim. The point relative to prior work: where Scorpio, JITServe, Llumnix rely on offline-profiled latency models, we observe slack drift at runtime and correct reactively — that's the prediction-to-measurement shift the paper argues for.
+
+Key points: ① slack collapses TTFT + TPOT to one signal ② three guards, each kills one failure mode ③ measurement replaces offline profiling
+Duration: 3 minutes

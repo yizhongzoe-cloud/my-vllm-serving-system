@@ -1,0 +1,5 @@
+[Transition] Mechanism details first, since policy depends on what the mechanism cheap-enables.
+We save per-block deltas — every 16 tokens decoded is one vLLM KV block, and we checkpoint the new K/V tensors of that block. Block alignment is mandatory because vLLM allocates KV in fixed blocks. Naive synchronous /dev/shm publish costs about 30% TTFT under load; we drive that down to negligible with a four-stage async pipeline — Future + depth-1 backpressure on the engine side, GPU-side batch gather on the worker, libc-write via ctypes for GIL release on the shm side, and a shared CUDA stream with batched flush on the restore side. Two correctness invariants keep this safe: the "latest" pointer updates only after rename so readers never see a partial chunk, and the eager-counter gap is absorbed by the reload state machine as decode replay.
+
+Key points: ① 4-stage pipeline → ~30% TTFT overhead reduced to ~30 ms ② invariants make crash-during-publish safe ③ same data backs both tiers
+Duration: 3 minutes

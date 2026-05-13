@@ -1,0 +1,152 @@
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:287] 
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:287]        █     █     █▄   ▄█
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:287]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.16.0rc2.dev126+gb96f7314b
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:287]   █▄█▀ █     █     █     █  model   /home/yzhong76/model/Qwen2.5-7B-Instruct
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:287]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:287] 
+(APIServer pid=2129071) INFO 05-13 01:13:37 [utils.py:223] non-default args: {'port': 8401, 'model': '/home/yzhong76/model/Qwen2.5-7B-Instruct', 'dtype': 'float16', 'max_model_len': 4608, 'enforce_eager': True, 'enable_prefix_caching': False}
+(APIServer pid=2129071) WARNING 05-13 01:13:37 [envs.py:1625] Unknown vLLM environment variable detected: VLLM_FT_ENGINE_ID
+(APIServer pid=2129071) INFO 05-13 01:13:37 [model.py:531] Resolved architecture: Qwen2ForCausalLM
+(APIServer pid=2129071) WARNING 05-13 01:13:37 [model.py:1881] Casting torch.bfloat16 to torch.float16.
+(APIServer pid=2129071) INFO 05-13 01:13:37 [model.py:1555] Using max model len 4608
+(APIServer pid=2129071) INFO 05-13 01:13:37 [scheduler.py:224] Chunked prefill is enabled with max_num_batched_tokens=2048.
+(APIServer pid=2129071) INFO 05-13 01:13:37 [vllm.py:698] Asynchronous scheduling is enabled.
+(APIServer pid=2129071) WARNING 05-13 01:13:37 [vllm.py:736] Enforce eager set, overriding optimization level to -O0
+(APIServer pid=2129071) INFO 05-13 01:13:37 [vllm.py:854] Cudagraph is disabled under eager mode
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:41 [core.py:99] Initializing a V1 LLM engine (v0.16.0rc2.dev126+gb96f7314b) with config: model='/home/yzhong76/model/Qwen2.5-7B-Instruct', speculative_config=None, tokenizer='/home/yzhong76/model/Qwen2.5-7B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4608, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/home/yzhong76/model/Qwen2.5-7B-Instruct, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:42 [parallel_state.py:1246] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://128.114.59.167:43293 backend=nccl
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:43 [parallel_state.py:1474] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:43 [gpu_model_runner.py:4181] Starting to load model /home/yzhong76/model/Qwen2.5-7B-Instruct...
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:43 [cuda.py:367] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore_DP0 pid=2129474) Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+(EngineCore_DP0 pid=2129474) Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.24it/s]
+(EngineCore_DP0 pid=2129474) Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.11it/s]
+(EngineCore_DP0 pid=2129474) Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:02<00:00,  1.07it/s]
+(EngineCore_DP0 pid=2129474) Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.11it/s]
+(EngineCore_DP0 pid=2129474) Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.11it/s]
+(EngineCore_DP0 pid=2129474) 
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:47 [default_loader.py:293] Loading weights took 3.73 seconds
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:47 [gpu_model_runner.py:4278] Model loading took 14.25 GiB memory and 4.074266 seconds
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:48 [gpu_worker.py:375] Available KV cache memory: 26.98 GiB
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:48 [kv_cache_utils.py:1308] GPU KV cache size: 505,200 tokens
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:48 [kv_cache_utils.py:1313] Maximum concurrency for 4,608 tokens per request: 109.64x
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:48 [kernel_warmup.py:44] Skipping FlashInfer autotune because it is disabled.
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:48 [core.py:384] init engine (profile, create kv cache, warmup model) took 1.07 seconds
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:49 [vllm.py:698] Asynchronous scheduling is enabled.
+(EngineCore_DP0 pid=2129474) WARNING 05-13 01:13:49 [vllm.py:743] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:13:49 [vllm.py:854] Cudagraph is disabled under eager mode
+(APIServer pid=2129071) INFO 05-13 01:13:49 [api_server.py:495] Supported tasks: ['generate']
+(APIServer pid=2129071) WARNING 05-13 01:13:49 [model.py:1356] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'repetition_penalty': 1.05, 'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=2129071) INFO 05-13 01:13:49 [serving.py:188] Warming up chat template processing...
+(APIServer pid=2129071) INFO 05-13 01:13:49 [hf.py:318] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=2129071) INFO 05-13 01:13:49 [serving.py:213] Chat template warmup completed in 183.9ms
+(APIServer pid=2129071) INFO 05-13 01:13:49 [api_server.py:500] Starting vLLM API server 0 on http://0.0.0.0:8401
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:38] Available routes are:
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /docs, Methods: GET, HEAD
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /tokenize, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /detokenize, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /load, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /version, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /health, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /metrics, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/models, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /ping, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /ping, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /invocations, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/responses, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/completions, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/completions/render, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /v1/messages, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=2129071) INFO 05-13 01:13:49 [launcher.py:47] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=2129071) INFO:     Started server process [2129071]
+(APIServer pid=2129071) INFO:     Waiting for application startup.
+(APIServer pid=2129071) INFO:     Application startup complete.
+(APIServer pid=2129071) INFO:     127.0.0.1:53780 - "GET /health HTTP/1.1" 200 OK
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051] Checkpoint cmpl-9a09c196d1bfaf3d-0-be9ba330: failed to publish shared chunk /dev/shm/vllm_ft_checkpoints/cmpl-9a09c196d1bfaf3d-0-be9ba330/chunk_rank0_1.pt
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051] Traceback (most recent call last):
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051]   File "/home/yzhong76/code/my-vllm-serving-system/vllm/v1/worker/gpu_model_runner.py", line 7049, in _publish_shared_checkpoint
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051]     self._atomic_torch_save(chunk_path, chunk_payload)
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051]   File "/home/yzhong76/code/my-vllm-serving-system/vllm/v1/worker/gpu_model_runner.py", line 6516, in _atomic_torch_save
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051]     os.replace(tmp_path, final_path)
+(EngineCore_DP0 pid=2129474) ERROR 05-13 01:13:55 [gpu_model_runner.py:7051] FileNotFoundError: [Errno 2] No such file or directory: '/dev/shm/vllm_ft_checkpoints/cmpl-9a09c196d1bfaf3d-0-be9ba330/chunk_rank0_1.pt.tmp.2129474.1778660035350256987' -> '/dev/shm/vllm_ft_checkpoints/cmpl-9a09c196d1bfaf3d-0-be9ba330/chunk_rank0_1.pt'
+(APIServer pid=2129071) INFO 05-13 01:13:59 [output_processor.py:834] FT request_done req=cmpl-8df34f1d537b9354-0-aceccd4c arrival_ts=1778660039.395723 ttft_ms=314.138 tpot_ms=36.170 e2e_ms=603.181 num_output=9 prompt_len=686 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60594 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:00 [output_processor.py:834] FT request_done req=cmpl-9a09c196d1bfaf3d-0-be9ba330 arrival_ts=1778660035.036285 ttft_ms=195.483 tpot_ms=29.574 e2e_ms=4985.396 num_output=163 prompt_len=1136 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53792 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:00 [loggers.py:259] Engine 000: Avg prompt throughput: 966.7 tokens/s, Avg generation throughput: 69.3 tokens/s, Running: 5 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.7%, Prefix cache hit rate: 0.0%
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:14:00 [scheduler.py:1975] FT first_post_reroute_token req=cmpl-9a42bc9190b90766-0-8325cea3 ts=1778660040.544443
+(APIServer pid=2129071) INFO 05-13 01:14:01 [output_processor.py:834] FT request_done req=cmpl-be1a2a3f4d8c5bb2-0-a3e1c595 arrival_ts=1778660035.445790 ttft_ms=287.853 tpot_ms=28.476 e2e_ms=5556.022 num_output=186 prompt_len=1894 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53798 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:01 [output_processor.py:834] FT request_done req=cmpl-af3ce6547a89f8d8-0-97e1034c arrival_ts=1778660035.580858 ttft_ms=241.652 tpot_ms=29.542 e2e_ms=6120.765 num_output=200 prompt_len=574 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53800 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:02 [output_processor.py:834] FT request_done req=cmpl-a3f7d37252708c68-0-bfcbf87f arrival_ts=1778660036.156975 ttft_ms=163.102 tpot_ms=29.769 e2e_ms=6087.254 num_output=200 prompt_len=953 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53812 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:03 [output_processor.py:834] FT request_done req=cmpl-98a7cd5e76ff8d4a-0-bafa0b9f arrival_ts=1778660041.240879 ttft_ms=180.732 tpot_ms=33.680 e2e_ms=1966.041 num_output=54 prompt_len=1045 finish=UNKNOWN
+(APIServer pid=2129071) INFO:     127.0.0.1:53798 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:03 [output_processor.py:834] FT request_done req=cmpl-917da05cc670ad4e-0-a624ab7f arrival_ts=1778660041.786147 ttft_ms=201.177 tpot_ms=27.618 e2e_ms=1443.635 num_output=46 prompt_len=1234 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53800 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:03 [output_processor.py:834] FT request_done req=cmpl-bfe91eb30bd9b536-0-a06b6a8d arrival_ts=1778660037.055156 ttft_ms=404.510 tpot_ms=29.226 e2e_ms=6220.785 num_output=200 prompt_len=2669 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53816 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:14:05 [scheduler.py:1975] FT first_post_reroute_token req=cmpl-8451b26dc13b2239-0-953b0bef ts=1778660045.455101
+(APIServer pid=2129071) INFO 05-13 01:14:06 [output_processor.py:834] FT request_done req=cmpl-be088314dd56ea78-0-993c4cda arrival_ts=1778660039.396344 ttft_ms=441.033 tpot_ms=33.723 e2e_ms=7152.067 num_output=200 prompt_len=2161 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60604 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:06 [output_processor.py:834] FT request_done req=cmpl-b7cafe25be2dc5d5-0-8569bc1b arrival_ts=1778660042.271983 ttft_ms=150.169 tpot_ms=33.940 e2e_ms=4324.717 num_output=124 prompt_len=788 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53812 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:07 [output_processor.py:834] FT request_done req=cmpl-b174185dee6a9b9b-0-905d9212 arrival_ts=1778660040.451439 ttft_ms=157.026 tpot_ms=33.249 e2e_ms=6574.251 num_output=194 prompt_len=220 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60616 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:07 [output_processor.py:834] FT request_done req=cmpl-8b0a1d4181c685d4-0-b8432cd1 arrival_ts=1778660040.239372 ttft_ms=113.594 tpot_ms=33.771 e2e_ms=6834.434 num_output=200 prompt_len=560 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53792 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:07 [output_processor.py:834] FT request_done req=cmpl-9a42bc9190b90766-0-8325cea3 arrival_ts=1778660040.345362 ttft_ms=199.873 tpot_ms=33.039 e2e_ms=6774.990 num_output=200 prompt_len=1264 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60594 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:14:07 [scheduler.py:1193] SLO_PRIORITY_PREEMPT #1: victim=cmpl-b23723fe62beae51-0-94a60d88 (slack=2413ms) for most_urgent=cmpl-ada5db891f74d7db-0-aebcc944 (slack=513ms), gap=1900ms, replay_cost=19ms, queue_pos=0
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:14:07 [core.py:833] FT SLO redispatch: cmpl-b23723fe62beae51-0-94a60d88 preempted for cross-engine pickup (router_req_id=f6da995f96ee441cb8bfc4f80d8a4aa7, ckpt_tokens=2032, published=True)
+(EngineCore_DP0 pid=2129474) INFO 05-13 01:14:07 [core.py:860] FT SLO redispatch: cmpl-b23723fe62beae51-0-94a60d88 aborted locally (status=FINISHED_ABORTED) — assuming router took over
+(APIServer pid=2129071) INFO 05-13 01:14:09 [output_processor.py:834] FT request_done req=cmpl-97d587548a2d4bf7-0-9b0488a0 arrival_ts=1778660041.329647 ttft_ms=348.546 tpot_ms=37.345 e2e_ms=7779.867 num_output=200 prompt_len=1688 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60618 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:09 [output_processor.py:834] FT request_done req=cmpl-97c7f5afe0b7f19c-0-bf2c6f74 arrival_ts=1778660043.383947 ttft_ms=197.354 tpot_ms=38.207 e2e_ms=6157.258 num_output=157 prompt_len=1188 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53798 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:10 [loggers.py:259] Engine 000: Avg prompt throughput: 2672.8 tokens/s, Avg generation throughput: 300.0 tokens/s, Running: 13 reqs, Waiting: 0 reqs, GPU KV cache usage: 4.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2129071) INFO 05-13 01:14:10 [output_processor.py:834] FT request_done req=cmpl-b1d36b1f8e917015-0-8fb8c14c arrival_ts=1778660042.811342 ttft_ms=159.840 tpot_ms=38.133 e2e_ms=7748.888 num_output=200 prompt_len=941 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60632 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:11 [output_processor.py:834] FT request_done req=cmpl-98269c3715082e66-0-bd0f5daa arrival_ts=1778660043.818853 ttft_ms=162.537 tpot_ms=37.845 e2e_ms=7693.738 num_output=200 prompt_len=872 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53800 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:11 [output_processor.py:834] FT request_done req=cmpl-bf341ef5dbf5be68-0-b39201e7 arrival_ts=1778660043.901477 ttft_ms=451.990 tpot_ms=36.344 e2e_ms=7684.133 num_output=200 prompt_len=2443 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:53816 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:11 [output_processor.py:834] FT request_done req=cmpl-a11905d592516669-0-89ad2629 arrival_ts=1778660044.256657 ttft_ms=209.545 tpot_ms=35.897 e2e_ms=7353.608 num_output=200 prompt_len=776 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60644 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:12 [output_processor.py:834] FT request_done req=cmpl-8a4f99ab4cb5f967-0-91904581 arrival_ts=1778660044.865432 ttft_ms=89.035 tpot_ms=35.715 e2e_ms=7196.782 num_output=200 prompt_len=311 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60650 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:12 [output_processor.py:834] FT request_done req=cmpl-8451b26dc13b2239-0-953b0bef arrival_ts=1778660044.952666 ttft_ms=503.285 tpot_ms=33.555 e2e_ms=7180.759 num_output=200 prompt_len=3344 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60660 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:12 [output_processor.py:834] FT request_done req=cmpl-9aa33aa617d15ac4-0-bf6429b7 arrival_ts=1778660045.943307 ttft_ms=117.485 tpot_ms=33.219 e2e_ms=6728.024 num_output=200 prompt_len=414 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60676 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:12 [output_processor.py:834] FT request_done req=cmpl-aa154f4137749cfe-0-909c0602 arrival_ts=1778660046.592148 ttft_ms=98.403 tpot_ms=33.992 e2e_ms=6148.754 num_output=179 prompt_len=379 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:60684 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:13 [output_processor.py:834] FT request_done req=cmpl-a756cb702d3124c3-0-8ab125b6 arrival_ts=1778660050.457849 ttft_ms=102.381 tpot_ms=25.168 e2e_ms=2769.975 num_output=107 prompt_len=285 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:33256 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:13 [output_processor.py:834] FT request_done req=cmpl-ada5db891f74d7db-0-aebcc944 arrival_ts=1778660047.224733 ttft_ms=661.836 tpot_ms=29.507 e2e_ms=6533.944 num_output=200 prompt_len=2491 finish=LENGTH
+(APIServer pid=2129071) INFO 05-13 01:14:13 [output_processor.py:834] FT request_done req=cmpl-8b2000137f3632b3-0-ada76b53 arrival_ts=1778660047.332952 ttft_ms=553.617 tpot_ms=29.507 e2e_ms=6425.725 num_output=200 prompt_len=517 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:33206 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO:     127.0.0.1:33216 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:13 [output_processor.py:834] FT request_done req=cmpl-8766d55b47107768-0-937c1a8f arrival_ts=1778660047.791777 ttft_ms=247.145 tpot_ms=28.971 e2e_ms=6012.348 num_output=200 prompt_len=854 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:33224 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:14 [output_processor.py:834] FT request_done req=cmpl-9442edb4c896a902-0-a81d493e arrival_ts=1778660048.233057 ttft_ms=483.955 tpot_ms=26.818 e2e_ms=5820.358 num_output=200 prompt_len=3242 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:33240 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:15 [output_processor.py:834] FT request_done req=cmpl-a4c6b910b8e35999-0-9e9861e4 arrival_ts=1778660049.906344 ttft_ms=521.490 tpot_ms=24.166 e2e_ms=5329.708 num_output=200 prompt_len=3305 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:33254 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2129071) INFO 05-13 01:14:15 [output_processor.py:834] FT request_done req=cmpl-9d5337a69358957a-0-afced162 arrival_ts=1778660050.990381 ttft_ms=203.445 tpot_ms=22.939 e2e_ms=4768.130 num_output=200 prompt_len=1177 finish=LENGTH
+(APIServer pid=2129071) INFO:     127.0.0.1:33258 - "POST /v1/completions HTTP/1.1" 200 OK
+[rank0]:[W513 01:14:16.487869868 ProcessGroupNCCL.cpp:1553] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+(APIServer pid=2129071) INFO 05-13 01:14:16 [launcher.py:122] Shutting down FastAPI HTTP server.
+(APIServer pid=2129071) INFO:     Shutting down
+(APIServer pid=2129071) INFO:     Waiting for application shutdown.
+(APIServer pid=2129071) INFO:     Application shutdown complete.

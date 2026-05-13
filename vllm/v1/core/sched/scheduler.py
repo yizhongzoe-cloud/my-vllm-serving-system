@@ -1141,6 +1141,24 @@ class Scheduler(SchedulerInterface):
             last_for_r = history.get(r.request_id, 0.0)
             if (now - last_for_r) * 1000.0 < self._ft_slo_cooldown_ms:
                 continue  # in per-req cooldown
+            # V3-reload feasibility gate. picker fires only when the
+            # cross-engine reroute can actually V3-reload the victim
+            # from a host checkpoint. We use the same ground truth
+            # that reroute uses: the manifest file in /dev/shm. The
+            # counter num_checkpointed_tokens is advanced eagerly when
+            # the save RPC is fired (see core.py _save_checkpoints_
+            # if_needed) but the manifest file appears only after the
+            # worker finishes the GPU gather + host write, which can
+            # lag the counter by tens of ms. Without this gate, picker
+            # often kicks young requests whose counter is non-zero but
+            # whose host bytes haven't landed, and reroute falls back
+            # to full reprefill. /dev/shm is tmpfs, stat cost ~3us.
+            _manifest_path = (
+                f"/dev/shm/vllm_ft_checkpoints/{r.request_id}/"
+                "latest_rank0"
+            )
+            if not os.path.exists(_manifest_path):
+                continue
             try:
                 r_slack = compute_slo_budgets(r, now)["min_ms"]
             except Exception:
@@ -1165,6 +1183,31 @@ class Scheduler(SchedulerInterface):
         if ((victim_slack - head_slack)
                 < (self._ft_slo_min_gap_ms + replay_cost_ms)):
             return None
+
+        # Diagnostic: log victim state at the moment we decide to fire.
+        # Helps identify whether picker is preempting requests whose
+        # host checkpoint truly exists, or whose counter is non-zero
+        # only via eager update / inherited from cross-engine reroute.
+        try:
+            _diag_manifest_path = (
+                f"/dev/shm/vllm_ft_checkpoints/{victim.request_id}/"
+                "latest_rank0"
+            )
+            _diag_host_manifest_exists = os.path.exists(_diag_manifest_path)
+            _diag_elapsed_ms = (now - victim.arrival_time) * 1000.0
+            logger.info(
+                "PICKER_DIAG: victim=%s num_ckpt_tokens=%d "
+                "num_computed_tokens=%d elapsed_since_arrival=%.0fms "
+                "host_manifest_exists=%s is_rerouted=%s",
+                victim.request_id,
+                getattr(victim, "num_checkpointed_tokens", 0),
+                getattr(victim, "num_computed_tokens", 0),
+                _diag_elapsed_ms,
+                _diag_host_manifest_exists,
+                getattr(victim, "is_rerouted", False),
+            )
+        except Exception:
+            pass
 
         # Reorder the waiting queue so that the FCFS admit loop picks
         # most_urgent first. Without this step, the slot we free by
