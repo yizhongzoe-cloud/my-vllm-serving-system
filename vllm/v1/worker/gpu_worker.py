@@ -610,6 +610,17 @@ class Worker(WorkerBase):
             return True
         return fn(request_id, steps_waited)
 
+    def flush_pending_restore(self) -> None:
+        """Sync the model runner's shared restore stream (Stage 4).
+
+        Called by the engine after a batched sync=False restore so
+        any temp src tensors enqueued on the shared restore stream
+        get freed before the next step's forward enqueues more work.
+        """
+        fn = getattr(self.model_runner, "flush_pending_restore", None)
+        if callable(fn):
+            fn()
+
     def register_rerouted_request(
         self,
         req_id: str,

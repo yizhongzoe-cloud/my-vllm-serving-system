@@ -1112,6 +1112,19 @@ class EngineCore:
             )
             del self._overlap_reload_inflight[req_id]
 
+        # Stage 4: flush the worker's shared restore stream so all
+        # temp src tensors enqueued by Stage A's async restores are
+        # released before the next step's forward/save allocates more
+        # GPU memory. The worker's flush_pending_restore is a no-op
+        # if nothing was enqueued since the last flush, so calling it
+        # unconditionally each step is safe and cheap.
+        try:
+            self.collective_rpc("flush_pending_restore")
+        except Exception:
+            logger.exception(
+                "FT overlap V3: flush_pending_restore RPC failed"
+            )
+
     def _save_checkpoints_if_needed(self) -> None:
         """Trigger ckpt save for running reqs with new full block(s).
 

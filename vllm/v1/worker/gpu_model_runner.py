@@ -7195,22 +7195,102 @@ class GPUModelRunner(
                     )
 
             if torch.cuda.is_available():
-                # FT_ASYNC_RESTORE=1: reuse a single shared restore stream
-                # across all restore_kv_blocks calls in a step, and skip
-                # the per-call sync. Caller must call flush_pending_restore()
-                # after the last restore in the batch, before reading the
-                # restored KV (i.e. before execute_model).
+                # Async restore by default when caller passes sync=False.
+                # All restore_kv_blocks calls in the same step share one
+                # CUDA stream; each call enqueues its H2D copies and
+                # returns without syncing. Caller is responsible for
+                # invoking flush_pending_restore() once at the end of
+                # the batch (before any kernel that consumes the
+                # restored KV — typically before execute_model).
                 #
-                # Default OFF: each call creates its own stream and syncs,
-                # matching the original serial behavior.
-                use_async = (
-                    os.environ.get("FT_ASYNC_RESTORE") == "1" and not sync
-                )
+                # sync=True is the legacy synchronous path (each call
+                # creates its own stream and syncs inside the RPC). Used
+                # by paths that aren't part of the batched reload queue.
+                use_async = not sync
+
+                # Dynamic GPU-memory estimation: every async restore
+                # leaves a "src" temp tensor per layer alive on the
+                # shared stream until flush. Multiple requests
+                # accumulate, and a single layer can be tens of MB on
+                # long-context — across 32 layers and several reqs the
+                # temp pool easily exceeds the 0.1 headroom outside the
+                # vllm KV pool. If our estimated post-enqueue temp
+                # bytes would exceed the free GPU memory minus a
+                # safety margin, we proactively flush the shared
+                # stream to release accumulated temp tensors before
+                # enqueueing this req.
+                if use_async:
+                    sample = self.kv_caches[0]
+                    per_block_bytes = (
+                        2  # K and V
+                        * sample.shape[2]  # block_size
+                        * sample.shape[3]  # num_kv_heads
+                        * sample.shape[4]  # head_size
+                        * sample.element_size()
+                    )
+                    num_layers = len(self.kv_caches)
+                    tmp_bytes_this_req = (
+                        num_layers
+                        * per_block_bytes
+                        * num_checkpoint_blocks
+                    )
+                    pending_bytes = getattr(
+                        self, "_ft_pending_restore_bytes", 0
+                    )
+
+                    # 512 MB safety margin for forward activation +
+                    # caching allocator churn. Conservative — we'd
+                    # rather over-flush than OOM mid-restore.
+                    SAFETY_MARGIN = 512 * 1024 * 1024
+                    free_gpu, _ = torch.cuda.mem_get_info(device)
+
+                    if (
+                        pending_bytes + tmp_bytes_this_req
+                        > free_gpu - SAFETY_MARGIN
+                    ):
+                        # Proactively drain the shared stream so the
+                        # already-enqueued src tensors get freed.
+                        if (
+                            getattr(self, "_ft_shared_restore_stream", None)
+                            is not None
+                            and getattr(self, "_ft_has_pending_restore", False)
+                        ):
+                            self._ft_shared_restore_stream.synchronize()
+                            self._ft_has_pending_restore = False
+                        self._ft_pending_restore_bytes = 0
+                        pending_bytes = 0
+
+                        # Re-check after flush. If a single req STILL
+                        # doesn't fit (rare, e.g. very long context),
+                        # degrade this req to the synchronous path —
+                        # caller's stream.synchronize() inside the
+                        # restore loop is still preferable to crashing.
+                        free_gpu, _ = torch.cuda.mem_get_info(device)
+                        if (
+                            tmp_bytes_this_req
+                            > free_gpu - SAFETY_MARGIN
+                        ):
+                            logger.warning(
+                                "Restore %s: temp tensors estimated "
+                                "%.1f MB exceed free %.1f MB even "
+                                "after flush; degrading this req to "
+                                "synchronous restore (may still risk "
+                                "OOM on extreme long-context).",
+                                request_id,
+                                tmp_bytes_this_req / 1048576,
+                                free_gpu / 1048576,
+                            )
+                            use_async = False
+
                 if use_async:
                     if getattr(self, "_ft_shared_restore_stream", None) is None:
                         self._ft_shared_restore_stream = torch.cuda.Stream()
                     stream = self._ft_shared_restore_stream
                     self._ft_has_pending_restore = True
+                    self._ft_pending_restore_bytes = (
+                        getattr(self, "_ft_pending_restore_bytes", 0)
+                        + tmp_bytes_this_req
+                    )
                 else:
                     stream = torch.cuda.Stream()
 
@@ -7279,23 +7359,16 @@ class GPUModelRunner(
                                 )
                                 gpu_tensor[:, target_indices, :, :, :] = src
                     if not use_async:
+                        # Synchronous path (sync=True or async path
+                        # degraded due to OOM risk). Sync inside the
+                        # RPC, matching the legacy serial behavior.
                         stream.synchronize()
-                    elif cuda_lock is not None and os.environ.get(
-                        "FT_RESTORE_PER_REQ_SYNC", "1"
-                    ) == "1":
-                        # Parallel batch restore: each req allocates
-                        # ~224 MB of temp src GPU tensors (32 layers ×
-                        # ~7 MB for 8B at 121 blocks). Under
-                        # FT_ASYNC_RESTORE these aren't freed until
-                        # flush_pending_restore; with 7-13 reqs that's
-                        # 1.5-3 GB, exceeding the ~2.5 GB headroom
-                        # after gpu_memory_utilization=0.9. Sync per
-                        # req so temp src tensors are released before
-                        # the next thread enters. Still overlaps CPU
-                        # chunk loads (the dominant cost). Disable via
-                        # FT_RESTORE_PER_REQ_SYNC=0 when headroom is
-                        # widened (gpu_util<=0.85 or concurrency<=2).
-                        stream.synchronize()
+                    # Async path: don't sync here. Caller (engine
+                    # _process_overlap_reload_queue) calls
+                    # flush_pending_restore once after all reqs are
+                    # enqueued. Dynamic GPU-memory estimation above
+                    # would have forced a flush proactively if temp
+                    # tensors were about to overflow.
                 finally:
                     if cuda_lock is not None:
                         cuda_lock.release()
@@ -7357,6 +7430,21 @@ class GPUModelRunner(
                 request_dir,
             )
             return 0
+
+    def flush_pending_restore(self) -> None:
+        """Sync the shared restore stream and release accumulated temp
+        tensors. Called by the engine at the end of a batched restore
+        sequence (after all sync=False restore_kv_blocks calls in this
+        step have been enqueued). No-op if no async restore has been
+        fired since the last flush.
+        """
+        if not getattr(self, "_ft_has_pending_restore", False):
+            return
+        stream = getattr(self, "_ft_shared_restore_stream", None)
+        if stream is not None:
+            stream.synchronize()
+        self._ft_has_pending_restore = False
+        self._ft_pending_restore_bytes = 0
 
     # ── V3 capacity-preempt: KV checkpoint save / async reload ──
     # save_checkpoint copies KV from GPU to host pinned memory.
