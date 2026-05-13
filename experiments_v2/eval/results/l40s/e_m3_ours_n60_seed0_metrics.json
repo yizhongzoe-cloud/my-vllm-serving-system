@@ -1,0 +1,635 @@
+{
+  "baseline": "ours",
+  "seed": 0,
+  "num_requests": 60,
+  "inter_arrival_s": 5.0,
+  "first_arrival_ts": 1778656728.728448,
+  "last_done_ts": 1778657032.0366237,
+  "window_s": 303.30817580223083,
+  "total_output_tokens": 14993,
+  "throughput_tok_per_s": 49.43157222961257,
+  "ttft_ms": {
+    "n": 60,
+    "p50": 80.595,
+    "p95": 276.287,
+    "mean": 107.69093333333333
+  },
+  "tpot_ms": {
+    "n": 60,
+    "p50": 20.333,
+    "p95": 20.641,
+    "mean": 20.389333333333333
+  },
+  "e2e_ms": {
+    "n": 60,
+    "p50": 5083.897,
+    "p95": 8315.421,
+    "mean": 5182.989283333333
+  },
+  "client_outcomes": {
+    "200_ok": 60,
+    "errored": 0
+  },
+  "per_request": [
+    {
+      "req_id": "cmpl-b740623d888e3e29-0-8638bb53",
+      "arrival_ts": 1778656728.728448,
+      "ttft_ms": 142.954,
+      "tpot_ms": 20.528,
+      "e2e_ms": 3466.654,
+      "num_output": 163,
+      "prompt_len": 1136,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a3954232804c249d-0-85420949",
+      "arrival_ts": 1778656733.708896,
+      "ttft_ms": 86.504,
+      "tpot_ms": 20.319,
+      "e2e_ms": 4170.496,
+      "num_output": 202,
+      "prompt_len": 1102,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-b79ab2c0a0fb36ff-0-838eb3a3",
+      "arrival_ts": 1778656738.715163,
+      "ttft_ms": 37.313,
+      "tpot_ms": 20.383,
+      "e2e_ms": 5356.542,
+      "num_output": 262,
+      "prompt_len": 319,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-afa971d1d16cd026-0-8bc1c206",
+      "arrival_ts": 1778656748.727849,
+      "ttft_ms": 82.521,
+      "tpot_ms": 20.375,
+      "e2e_ms": 7437.653,
+      "num_output": 362,
+      "prompt_len": 1022,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-bd6a1f9610c5f714-0-86b49df5",
+      "arrival_ts": 1778656758.722956,
+      "ttft_ms": 80.595,
+      "tpot_ms": 20.329,
+      "e2e_ms": 8089.909,
+      "num_output": 395,
+      "prompt_len": 998,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-aaef479c5a733826-0-9af90c52",
+      "arrival_ts": 1778656768.744436,
+      "ttft_ms": 387.515,
+      "tpot_ms": 20.637,
+      "e2e_ms": 5050.71,
+      "num_output": 227,
+      "prompt_len": 3437,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-88cc6667231c1439-0-9b21fc27",
+      "arrival_ts": 1778656778.729168,
+      "ttft_ms": 68.132,
+      "tpot_ms": 20.319,
+      "e2e_ms": 5107.032,
+      "num_output": 249,
+      "prompt_len": 874,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-aa7954d27ca5adc7-0-8d88751a",
+      "arrival_ts": 1778656788.740238,
+      "ttft_ms": 185.437,
+      "tpot_ms": 20.524,
+      "e2e_ms": 7122.559,
+      "num_output": 339,
+      "prompt_len": 2161,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-b3cca2e941a870ee-0-9b45019a",
+      "arrival_ts": 1778656798.750869,
+      "ttft_ms": 284.559,
+      "tpot_ms": 20.658,
+      "e2e_ms": 4684.346,
+      "num_output": 214,
+      "prompt_len": 3533,
+      "finish": "UNKNOWN"
+    },
+    {
+      "req_id": "cmpl-a2b497cd20fd2f3d-0-89945ffa",
+      "arrival_ts": 1778656803.735772,
+      "ttft_ms": 49.978,
+      "tpot_ms": 20.287,
+      "e2e_ms": 8144.504,
+      "num_output": 400,
+      "prompt_len": 560,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-923f2b84b5840699-0-936b22aa",
+      "arrival_ts": 1778656813.741186,
+      "ttft_ms": 88.044,
+      "tpot_ms": 20.323,
+      "e2e_ms": 1265.829,
+      "num_output": 59,
+      "prompt_len": 1045,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-b45daf8a3776845d-0-8cfb6429",
+      "arrival_ts": 1778656818.745142,
+      "ttft_ms": 133.757,
+      "tpot_ms": 20.449,
+      "e2e_ms": 8292.104,
+      "num_output": 400,
+      "prompt_len": 1688,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a22c52584e81ac75-0-a47c2294",
+      "arrival_ts": 1778656828.743413,
+      "ttft_ms": 50.79,
+      "tpot_ms": 20.283,
+      "e2e_ms": 7291.327,
+      "num_output": 358,
+      "prompt_len": 574,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8dbdd3cd520d67d9-0-814d443b",
+      "arrival_ts": 1778656838.748264,
+      "ttft_ms": 36.066,
+      "tpot_ms": 20.268,
+      "e2e_ms": 8122.928,
+      "num_output": 400,
+      "prompt_len": 261,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8460239dcc127d78-0-8260580b",
+      "arrival_ts": 1778656848.752857,
+      "ttft_ms": 66.555,
+      "tpot_ms": 20.302,
+      "e2e_ms": 2563.512,
+      "num_output": 124,
+      "prompt_len": 788,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-9d1994b79fdce6c2-0-b8091530",
+      "arrival_ts": 1778656853.753152,
+      "ttft_ms": 49.779,
+      "tpot_ms": 20.284,
+      "e2e_ms": 5262.46,
+      "num_output": 258,
+      "prompt_len": 573,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a62812a3f9d4303b-0-b63a37bc",
+      "arrival_ts": 1778656863.761616,
+      "ttft_ms": 126.061,
+      "tpot_ms": 20.449,
+      "e2e_ms": 1454.662,
+      "num_output": 66,
+      "prompt_len": 1652,
+      "finish": "UNKNOWN"
+    },
+    {
+      "req_id": "cmpl-a10c0b8b3748e1b6-0-93de5a88",
+      "arrival_ts": 1778656868.762201,
+      "ttft_ms": 95.268,
+      "tpot_ms": 20.335,
+      "e2e_ms": 3267.339,
+      "num_output": 157,
+      "prompt_len": 1188,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8ed672f02e309ed3-0-a7dc98d4",
+      "arrival_ts": 1778656873.762685,
+      "ttft_ms": 68.345,
+      "tpot_ms": 20.301,
+      "e2e_ms": 6990.846,
+      "num_output": 342,
+      "prompt_len": 872,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a543ed8819634a35-0-8d6fc6ca",
+      "arrival_ts": 1778656883.785752,
+      "ttft_ms": 226.37,
+      "tpot_ms": 20.592,
+      "e2e_ms": 6815.738,
+      "num_output": 321,
+      "prompt_len": 2800,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-980940f4b0d4d288-0-91c7cfd6",
+      "arrival_ts": 1778656893.781899,
+      "ttft_ms": 276.287,
+      "tpot_ms": 20.647,
+      "e2e_ms": 8514.407,
+      "num_output": 400,
+      "prompt_len": 3344,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-85862fbd50d0c2ac-0-9a2f3b45",
+      "arrival_ts": 1778656903.771196,
+      "ttft_ms": 36.816,
+      "tpot_ms": 20.271,
+      "e2e_ms": 8124.835,
+      "num_output": 400,
+      "prompt_len": 311,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8f21c8e22ea3356e-0-90e5fc66",
+      "arrival_ts": 1778656913.779856,
+      "ttft_ms": 146.89,
+      "tpot_ms": 20.486,
+      "e2e_ms": 5083.897,
+      "num_output": 242,
+      "prompt_len": 1894,
+      "finish": "UNKNOWN"
+    },
+    {
+      "req_id": "cmpl-be408cfecb68173a-0-9fcb8f97",
+      "arrival_ts": 1778656923.782241,
+      "ttft_ms": 49.981,
+      "tpot_ms": 20.289,
+      "e2e_ms": 6906.919,
+      "num_output": 339,
+      "prompt_len": 541,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-98105f3c6a9c1eb6-0-8969dffb",
+      "arrival_ts": 1778656933.792052,
+      "ttft_ms": 188.631,
+      "tpot_ms": 20.517,
+      "e2e_ms": 5912.887,
+      "num_output": 280,
+      "prompt_len": 2159,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-ad2a1b8738949e0d-0-a93e7401",
+      "arrival_ts": 1778656943.79091,
+      "ttft_ms": 51.182,
+      "tpot_ms": 20.292,
+      "e2e_ms": 8147.703,
+      "num_output": 400,
+      "prompt_len": 517,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-aab1217e6bc671fe-0-b23cc2a0",
+      "arrival_ts": 1778656953.793972,
+      "ttft_ms": 96.231,
+      "tpot_ms": 20.357,
+      "e2e_ms": 625.204,
+      "num_output": 27,
+      "prompt_len": 1217,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8a26aa44bd3057d1-0-9df39028",
+      "arrival_ts": 1778656958.794192,
+      "ttft_ms": 68.809,
+      "tpot_ms": 20.317,
+      "e2e_ms": 5919.78,
+      "num_output": 289,
+      "prompt_len": 854,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-92aca6f32109cda5-0-92fd319d",
+      "arrival_ts": 1778656968.798809,
+      "ttft_ms": 262.412,
+      "tpot_ms": 20.626,
+      "e2e_ms": 4737.973,
+      "num_output": 218,
+      "prompt_len": 3242,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-92ba9a054b2ac463-0-abc0fa54",
+      "arrival_ts": 1778656973.795891,
+      "ttft_ms": 31.489,
+      "tpot_ms": 20.246,
+      "e2e_ms": 3270.751,
+      "num_output": 161,
+      "prompt_len": 117,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-ab6b0092b9e1bc36-0-9d378af0",
+      "arrival_ts": 1778656978.80427,
+      "ttft_ms": 124.908,
+      "tpot_ms": 20.426,
+      "e2e_ms": 4781.692,
+      "num_output": 229,
+      "prompt_len": 1590,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-b8f407c9d7dd2e7a-0-a1ef2cbf",
+      "arrival_ts": 1778656988.8035,
+      "ttft_ms": 44.25,
+      "tpot_ms": 20.276,
+      "e2e_ms": 5072.328,
+      "num_output": 249,
+      "prompt_len": 458,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a6af98f07ba225a1-0-964db461",
+      "arrival_ts": 1778656998.810194,
+      "ttft_ms": 263.597,
+      "tpot_ms": 20.641,
+      "e2e_ms": 8498.718,
+      "num_output": 400,
+      "prompt_len": 3305,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8a17cd2e72f9baf8-0-a48bee76",
+      "arrival_ts": 1778657008.813095,
+      "ttft_ms": 88.494,
+      "tpot_ms": 20.333,
+      "e2e_ms": 3259.951,
+      "num_output": 157,
+      "prompt_len": 1095,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-aa35964533ac7eac-0-a33abe50",
+      "arrival_ts": 1778657013.812336,
+      "ttft_ms": 37.266,
+      "tpot_ms": 20.259,
+      "e2e_ms": 2184.519,
+      "num_output": 107,
+      "prompt_len": 285,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-87beec51e35d2eef-0-b821ac4f",
+      "arrival_ts": 1778657018.814617,
+      "ttft_ms": 45.344,
+      "tpot_ms": 20.282,
+      "e2e_ms": 6778.79,
+      "num_output": 333,
+      "prompt_len": 477,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8fbc2b14e2d537a4-0-95df1916",
+      "arrival_ts": 1778656743.737717,
+      "ttft_ms": 187.519,
+      "tpot_ms": 20.572,
+      "e2e_ms": 3991.545,
+      "num_output": 186,
+      "prompt_len": 1894,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8d055825f77f050b-0-845d8132",
+      "arrival_ts": 1778656753.71532,
+      "ttft_ms": 47.532,
+      "tpot_ms": 20.557,
+      "e2e_ms": 5721.407,
+      "num_output": 277,
+      "prompt_len": 574,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a15080a602340e8e-0-bfc01c87",
+      "arrival_ts": 1778656763.723967,
+      "ttft_ms": 75.709,
+      "tpot_ms": 20.328,
+      "e2e_ms": 8185.623,
+      "num_output": 400,
+      "prompt_len": 953,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-9beee683ce79f2e0-0-ba4798a4",
+      "arrival_ts": 1778656773.735741,
+      "ttft_ms": 385.041,
+      "tpot_ms": 20.532,
+      "e2e_ms": 5127.346,
+      "num_output": 232,
+      "prompt_len": 2669,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-801eb86305876eca-0-aa1682b3",
+      "arrival_ts": 1778656783.729616,
+      "ttft_ms": 56.625,
+      "tpot_ms": 20.31,
+      "e2e_ms": 219.001,
+      "num_output": 9,
+      "prompt_len": 686,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-9578a00b3b86311e-0-9eb8d368",
+      "arrival_ts": 1778656793.736989,
+      "ttft_ms": 90.356,
+      "tpot_ms": 20.348,
+      "e2e_ms": 4627.412,
+      "num_output": 224,
+      "prompt_len": 1264,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-869ea62a7e9505aa-0-b0de3515",
+      "arrival_ts": 1778656808.73623,
+      "ttft_ms": 34.244,
+      "tpot_ms": 20.258,
+      "e2e_ms": 3943.976,
+      "num_output": 194,
+      "prompt_len": 220,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a4fb6a55dcb0aed0-0-8b0076ed",
+      "arrival_ts": 1778656823.742951,
+      "ttft_ms": 41.972,
+      "tpot_ms": 20.663,
+      "e2e_ms": 1260.982,
+      "num_output": 60,
+      "prompt_len": 467,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-97358bdabcd7f8d8-0-847f8e4a",
+      "arrival_ts": 1778656833.747215,
+      "ttft_ms": 89.978,
+      "tpot_ms": 20.347,
+      "e2e_ms": 1005.393,
+      "num_output": 46,
+      "prompt_len": 1234,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-b2d939381d8c9065-0-bf09b00e",
+      "arrival_ts": 1778656843.75855,
+      "ttft_ms": 176.665,
+      "tpot_ms": 20.512,
+      "e2e_ms": 5796.998,
+      "num_output": 275,
+      "prompt_len": 2136,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-85229ec0a7ceef3a-0-84c9441d",
+      "arrival_ts": 1778656858.759233,
+      "ttft_ms": 73.551,
+      "tpot_ms": 20.3,
+      "e2e_ms": 4600.298,
+      "num_output": 224,
+      "prompt_len": 941,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-864830b3757297c2-0-b89063df",
+      "arrival_ts": 1778656878.77004,
+      "ttft_ms": 191.244,
+      "tpot_ms": 20.549,
+      "e2e_ms": 8390.065,
+      "num_output": 400,
+      "prompt_len": 2443,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-aa95734cb5c454aa-0-861756ce",
+      "arrival_ts": 1778656888.767949,
+      "ttft_ms": 62.656,
+      "tpot_ms": 20.294,
+      "e2e_ms": 4953.343,
+      "num_output": 242,
+      "prompt_len": 776,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-90e3c46de683cdcf-0-8d9b11e4",
+      "arrival_ts": 1778656898.773939,
+      "ttft_ms": 118.303,
+      "tpot_ms": 20.433,
+      "e2e_ms": 4061.677,
+      "num_output": 194,
+      "prompt_len": 1655,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-a829a4de3a8cd05e-0-853a8b78",
+      "arrival_ts": 1778656908.77794,
+      "ttft_ms": 101.69,
+      "tpot_ms": 20.335,
+      "e2e_ms": 1565.557,
+      "num_output": 73,
+      "prompt_len": 1300,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-af42e41aff23656a-0-b5fcbb72",
+      "arrival_ts": 1778656918.777948,
+      "ttft_ms": 40.031,
+      "tpot_ms": 20.271,
+      "e2e_ms": 8128.006,
+      "num_output": 400,
+      "prompt_len": 414,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-9b952e902945f1de-0-853ec86b",
+      "arrival_ts": 1778656928.780926,
+      "ttft_ms": 35.608,
+      "tpot_ms": 20.265,
+      "e2e_ms": 3642.69,
+      "num_output": 179,
+      "prompt_len": 379,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-95b73d18d88dc0d6-0-8059120b",
+      "arrival_ts": 1778656938.793898,
+      "ttft_ms": 193.022,
+      "tpot_ms": 20.564,
+      "e2e_ms": 8315.421,
+      "num_output": 396,
+      "prompt_len": 2491,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-87c6c0ab6583a686-0-8d390064",
+      "arrival_ts": 1778656948.787985,
+      "ttft_ms": 47.747,
+      "tpot_ms": 20.274,
+      "e2e_ms": 3899.459,
+      "num_output": 191,
+      "prompt_len": 563,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-be22a5ec3835a4fe-0-a0ea55d4",
+      "arrival_ts": 1778656963.794425,
+      "ttft_ms": 57.007,
+      "tpot_ms": 20.285,
+      "e2e_ms": 3525.182,
+      "num_output": 172,
+      "prompt_len": 698,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-81560f3b998a9b85-0-bc2e6057",
+      "arrival_ts": 1778656983.800479,
+      "ttft_ms": 35.382,
+      "tpot_ms": 20.263,
+      "e2e_ms": 8120.042,
+      "num_output": 400,
+      "prompt_len": 276,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-9e51f604946af135-0-9e4486e6",
+      "arrival_ts": 1778656993.805577,
+      "ttft_ms": 35.634,
+      "tpot_ms": 20.262,
+      "e2e_ms": 2588.195,
+      "num_output": 127,
+      "prompt_len": 266,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-8c23aade389193c0-0-8c7af313",
+      "arrival_ts": 1778657003.8092,
+      "ttft_ms": 35.71,
+      "tpot_ms": 20.263,
+      "e2e_ms": 3317.973,
+      "num_output": 163,
+      "prompt_len": 339,
+      "finish": "LENGTH"
+    },
+    {
+      "req_id": "cmpl-9d7a39c3d583ca99-0-8a2ef938",
+      "arrival_ts": 1778657023.818308,
+      "ttft_ms": 89.1,
+      "tpot_ms": 20.365,
+      "e2e_ms": 8214.262,
+      "num_output": 400,
+      "prompt_len": 1177,
+      "finish": "LENGTH"
+    }
+  ]
+}
