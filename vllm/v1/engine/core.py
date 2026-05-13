@@ -9,7 +9,7 @@ import time
 from collections import deque
 from pathlib import Path
 from collections.abc import Callable, Generator
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
@@ -301,6 +301,23 @@ class EngineCore:
                 name="ft_router_shm_status_writer",
             )
             self._ft_status_writer_thread.start()
+
+        # Async checkpoint save dispatcher. The `checkpoint_kv_blocks`
+        # collective_rpc used to block engine.step() until the GPU→host
+        # copy + /dev/shm publish was done; now we submit it to a single
+        # background thread and only peek with future.done() on the next
+        # step. Depth-1 backpressure: if last RPC hasn't returned, skip
+        # firing a new one this step (one save will catch up the missed
+        # blocks next round). Single-worker pool guarantees in-order
+        # RPCs against the worker.
+        if self._ft_capacity_preempt_reload:
+            self._ft_ckpt_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="ft_ckpt"
+            )
+            self._ft_ckpt_future: Future | None = None
+        else:
+            self._ft_ckpt_executor = None
+            self._ft_ckpt_future = None
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -1108,6 +1125,20 @@ class EngineCore:
         if not self._ft_capacity_preempt_reload:
             return
 
+        # Drain previous async RPC's future if it's done. If still
+        # in-flight, depth-1 backpressure: skip firing a new RPC this
+        # step — let it finish, the next step will catch up the
+        # missed blocks.
+        if self._ft_ckpt_future is not None:
+            if self._ft_ckpt_future.done():
+                try:
+                    self._ft_ckpt_future.result()
+                except Exception:
+                    logger.exception("async ckpt save RPC failed")
+                self._ft_ckpt_future = None
+            else:
+                return
+
         base = self.scheduler
         kv_mgr = base.kv_cache_manager
         block_size = base.block_size
@@ -1115,10 +1146,9 @@ class EngineCore:
             return
         required_tokens = self._ft_ckpt_fixed_blocks * block_size
 
-        # Build list of (req, save_args, target_published_tokens) so we
-        # can update each req's num_checkpointed_tokens AFTER the RPC
-        # returns successfully (not before — if RPC fails we'd otherwise
-        # claim a save that didn't happen, breaking V3 reload later).
+        # Build candidates list. num_checkpointed_tokens is advanced
+        # eagerly below, before firing the RPC (see "fire-and-forget"
+        # block).
         candidates: list[tuple[Request, tuple[str, list[int], int], int]] = []
         for req in list(base.running):
             stable_full_tokens = (
@@ -1140,19 +1170,38 @@ class EngineCore:
         if not candidates:
             return
         request_block_map = [args for _, args, _ in candidates]
-        try:
-            self.collective_rpc(
-                "checkpoint_kv_blocks",
-                args=(request_block_map,),
-            )
-        except Exception:
-            logger.exception("ckpt save RPC failed")
-            return  # Don't update num_checkpointed_tokens on failure.
 
-        # RPC returned (and worker side has synced the copy stream).
-        # Now safe to mark these tokens as checkpointed on host.
+        # Fire-and-forget: submit the RPC to the ckpt executor and
+        # advance num_checkpointed_tokens eagerly. The actual /dev/shm
+        # publish completes a few steps later, but the host pinned
+        # bytes are valid as soon as worker's `_batch_gather` returns
+        # — i.e. by the time the next step runs. Picker/replay_cost
+        # read num_checkpointed_tokens to gauge "how far host lags
+        # GPU"; being optimistic by 1-2 steps is OK because replay_cost
+        # accounts for the lag in the same units.
+        #
+        # The previous fire's future is drained at the top of the
+        # function (see "drain previous future" block); a failed RPC
+        # surfaces there as an exception but does NOT roll back the
+        # eager counter update — replay_cost on resume will just
+        # discover the host bytes are missing and fall back to vanilla
+        # reprefill, which is the same behavior the old sync code had
+        # on RPC failure (except sync code didn't advance the counter,
+        # so it was more conservative but blocked the step).
         for req, _, target in candidates:
             req.num_checkpointed_tokens = target
+
+        if self._ft_ckpt_executor is None:
+            # Defensive: capacity-preempt was off at init but somehow
+            # candidates got produced (shouldn't happen given the
+            # _ft_capacity_preempt_reload guard above).
+            return
+
+        self._ft_ckpt_future = self._ft_ckpt_executor.submit(
+            self.collective_rpc,
+            "checkpoint_kv_blocks",
+            args=(request_block_map,),
+        )
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -1308,6 +1357,18 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        # Stop the ckpt save executor first; outstanding future is
+        # waited on so a half-published checkpoint doesn't get
+        # orphaned in /dev/shm.
+        if getattr(self, "_ft_ckpt_future", None) is not None:
+            try:
+                self._ft_ckpt_future.result(timeout=10.0)
+            except Exception:
+                logger.exception("async ckpt save did not drain cleanly")
+            self._ft_ckpt_future = None
+        if getattr(self, "_ft_ckpt_executor", None) is not None:
+            self._ft_ckpt_executor.shutdown(wait=True)
+            self._ft_ckpt_executor = None
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()

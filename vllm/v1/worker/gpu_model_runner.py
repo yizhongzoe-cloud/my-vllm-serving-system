@@ -6490,20 +6490,14 @@ class GPUModelRunner(
                 )
 
     def _atomic_write_bytes(self, final_path: str, data: bytes) -> None:
+        # KV checkpoints live under /dev/shm (tmpfs, RAM-backed) — fsync
+        # is provably useless there and only adds latency. The atomic
+        # rename below is what gives reader/writer ordering guarantees.
         tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
         try:
             with open(tmp_path, "wb") as f:
                 f.write(data)
-                # FT_FAST_TMPFS_WRITE: skip flush+fsync when the
-                # checkpoint store is on tmpfs (/dev/shm is RAM-backed,
-                # so fsync is provably useless and only adds latency).
-                # Default off to preserve original semantics for
-                # non-tmpfs deployments. See overnight_2026-04-09.md
-                # follow-up "stream blocking root cause".
-                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
-                    f.flush()
-                    os.fsync(f.fileno())
             os.replace(tmp_path, final_path)
         except Exception:
             try:
@@ -6513,15 +6507,12 @@ class GPUModelRunner(
             raise
 
     def _atomic_torch_save(self, final_path: str, data: Any) -> None:
+        # Same /dev/shm-only assumption as _atomic_write_bytes.
         tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
         try:
             with open(tmp_path, "wb") as f:
                 torch.save(data, f)
-                # Same FT_FAST_TMPFS_WRITE bypass as _atomic_write_bytes.
-                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
-                    f.flush()
-                    os.fsync(f.fileno())
             os.replace(tmp_path, final_path)
         except Exception:
             try:
@@ -6728,9 +6719,6 @@ class GPUModelRunner(
                     # 1× cat + 1× tobytes + 1× write (vs 32× each)
                     all_data = torch.cat(prepared)
                     f.write(all_data.numpy().tobytes())
-                    if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
-                        f.flush()
-                        os.fsync(f.fileno())
                 os.replace(tmp_path, final_path)
             except Exception:
                 try:
@@ -6758,9 +6746,6 @@ class GPUModelRunner(
                     else:
                         np_view = t.numpy()
                     f.write(np_view.tobytes())
-                if os.environ.get("FT_FAST_TMPFS_WRITE") != "1":
-                    f.flush()
-                    os.fsync(f.fileno())
             os.replace(tmp_path, final_path)
         except Exception:
             try:
