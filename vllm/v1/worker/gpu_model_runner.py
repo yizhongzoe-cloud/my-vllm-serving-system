@@ -6667,86 +6667,39 @@ class GPUModelRunner(
         tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
 
-        # FT_NOGIL_WRITE=1 (default OFF): use ctypes-based GIL-free
-        # write path. All file IO goes through libc write() via ctypes,
-        # which releases GIL during the syscall. The 32-layer for-loop
-        # and .tobytes() memcpy are eliminated — tensor data_ptr() is
-        # passed directly to write(). This removes ~2-3ms of GIL hold
-        # time per checkpoint cycle that causes main thread delays.
-        if os.environ.get("FT_NOGIL_WRITE") == "1":
-            from vllm.v1.worker.checkpoint_write_ext import fast_write_chunk
+        # GIL-free write path: all IO goes through libc write() via
+        # ctypes, which releases the GIL for the duration of each
+        # syscall. Tensor data_ptr() is passed directly — no .tobytes()
+        # memcpy and no per-layer Python for-loop holding the GIL.
+        # This removes ~2-3ms of GIL-hold time per checkpoint cycle
+        # that previously contended with main-thread forward.
+        from vllm.v1.worker.checkpoint_write_ext import fast_write_chunk
 
-            # Prepare manifest padded bytes
-            manifest_padded = b""
-            if manifest_payload:
-                pad = (-len(manifest_payload)) % 8
-                manifest_padded = manifest_payload + (b"\x00" * pad if pad else b"")
+        manifest_padded = b""
+        if manifest_payload:
+            pad = (-len(manifest_payload)) % 8
+            manifest_padded = (
+                manifest_payload + (b"\x00" * pad if pad else b"")
+            )
 
-            # Prepare layer tensors (contiguous, handle bf16)
-            tensors = []
-            for li in layer_indices:
-                t = chunk_tensors[li]
-                if not t.is_contiguous():
-                    t = t.contiguous()
-                if t.dtype == torch.bfloat16:
-                    t = t.view(torch.int16)
-                tensors.append(t)
+        tensors = []
+        for li in layer_indices:
+            t = chunk_tensors[li]
+            if not t.is_contiguous():
+                t = t.contiguous()
+            if t.dtype == torch.bfloat16:
+                # numpy lacks bf16 support but the byte layout is
+                # identical to int16; reinterpret for raw write.
+                t = t.view(torch.int16)
+            tensors.append(t)
 
-            fast_write_chunk(tmp_path, final_path, header, manifest_padded, tensors)
-            return
-
-        # FT_MERGE_LAYER_WRITE=1: concatenate all 32 layers into one
-        # tensor, then 1× tobytes + 1× write instead of 32× each.
-        # Reduces GIL acquire/release from 96 ops to ~35 ops per chunk.
-        if os.environ.get("FT_MERGE_LAYER_WRITE") == "1":
-            try:
-                with open(tmp_path, "wb") as f:
-                    f.write(header)
-                    if manifest_payload:
-                        f.write(manifest_payload)
-                        pad = (-len(manifest_payload)) % 8
-                        if pad:
-                            f.write(b"\x00" * pad)
-                    # Prepare all layers (handle bf16 + contiguous)
-                    prepared = []
-                    for li in layer_indices:
-                        t = chunk_tensors[li]
-                        if not t.is_contiguous():
-                            t = t.contiguous()
-                        if t.dtype == torch.bfloat16:
-                            t = t.view(torch.int16)
-                        prepared.append(t.reshape(-1))
-                    # 1× cat + 1× tobytes + 1× write (vs 32× each)
-                    all_data = torch.cat(prepared)
-                    f.write(all_data.numpy().tobytes())
-                os.replace(tmp_path, final_path)
-            except Exception:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-                raise
-            return
-
-        # Original Python path (fallback)
+        # fast_write_chunk handles its own atomic rename + post-rename
+        # cleanup. We add an outer try/except so write failures (where
+        # fd is closed but tmp file is left behind) also get cleaned.
         try:
-            with open(tmp_path, "wb") as f:
-                f.write(header)
-                if manifest_payload:
-                    f.write(manifest_payload)
-                    pad = (-len(manifest_payload)) % 8
-                    if pad:
-                        f.write(b"\x00" * pad)
-                for li in layer_indices:
-                    t = chunk_tensors[li]
-                    if not t.is_contiguous():
-                        t = t.contiguous()
-                    if t.dtype == torch.bfloat16:
-                        np_view = t.view(torch.int16).numpy()
-                    else:
-                        np_view = t.numpy()
-                    f.write(np_view.tobytes())
-            os.replace(tmp_path, final_path)
+            fast_write_chunk(
+                tmp_path, final_path, header, manifest_padded, tensors,
+            )
         except Exception:
             try:
                 os.remove(tmp_path)
