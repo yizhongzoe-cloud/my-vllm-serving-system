@@ -725,6 +725,17 @@ Bursty / Gamma CV sweep 推后。
 - **不动 `experiments_v2/smoke/`**——smoke test 是 smoke test，跟 paper 实验解耦
 - E_D1 那个 disruption demo 是从 Test 4 复制改造，**不动原 Test 4**
 
+### 跑 sweep 的启动指令（A6000 + L40S）
+
+完整 runbook：[experiments_v2/docs/RUNBOOK_paper_sweep.md](RUNBOOK_paper_sweep.md)
+
+里面包含：
+- A6000 / L40S 各自的启动命令（含 nohup 后台跑）
+- L40S 上必须先跑 SLO calibration（不然 E_M2 会 fallback 到 A6000 的）
+- monitor 进度的命令
+- 跑完之后 A6000 vs L40S 数据对比的 Python 一行
+- 哪个实验读 calibration 哪个不读（关键非显然信息）
+
 ### 两个 critical 选择（已定）
 
 1. ✅ Workload：Azure trace 主 + Poisson 副，BurstGPT 推后
