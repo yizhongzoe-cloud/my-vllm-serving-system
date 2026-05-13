@@ -278,7 +278,7 @@ No raster images. All visuals are native SVG geometry. (No `images/` directory e
   - Model: Qwen2.5-7B-Instruct fp16, `max_model_len 32K`
   - Workloads: RULER 16K (long-context regime we target) · ShareGPT (short-context — must not break)
   - Arrivals: Poisson · Niyama-style 3-tier QoS (tight / normal / loose)
-  - SLO calibration: baseline P95 on `vllm_fcfs` at uncontested low QPS; tiers = {1.5×, 3×, 6×} baseline
+  - SLO calibration: baseline P95 on `vllm_fcfs` at uncontested low QPS; tiers = {2×, 3×, 6×} baseline
   - **Baselines**: `vllm_fcfs` (no router floor) · `reroute_no_ckpt` (architecture, no FT) · `ours` (full) · `ours_no_picker` (mechanism only, picker off)
   - 3 seeds per config, mean ± std reported
 

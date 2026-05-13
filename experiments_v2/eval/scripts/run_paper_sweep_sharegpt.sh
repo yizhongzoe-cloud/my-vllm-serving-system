@@ -43,7 +43,18 @@ BASELINES_M1="${BASELINES_M1:-vllm_fcfs reroute_no_ckpt ours}"
 BASELINES_M3="${BASELINES_M3:-vllm_fcfs reroute_no_ckpt ours}"
 
 # Tier SLO numbers from ShareGPT calibration (baseline P95 × 1.5/3/6).
-# These match what E_M1's recent sweeps used.
+#
+# !!! INCONSISTENT WITH DOCS / RULER_16K SWEEP !!!
+# Paper methodology was changed on 2026-05-13 from {1.5, 3, 6} →
+# {2, 3, 6} (tight bumped because 1.5× was inside batch-size jitter
+# on ShareGPT). All docs and the RULER_16K sweep already use 2/3/6.
+# This ShareGPT sweep is intentionally left at 1.5× because the
+# A6000 ShareGPT data already in results/a6000/ was collected with
+# these values and we don't want to invalidate it yet.
+#
+# Before re-running this sweep — decide: keep 1.5× to match old
+# data, or bump to {912, 1368, 2736} TTFT / {44, 66, 132} TPOT to
+# match the paper methodology.
 E_M1_TTFT_TIGHT_MS="684"
 E_M1_TTFT_NORMAL_MS="1368"
 E_M1_TTFT_LOOSE_MS="2736"

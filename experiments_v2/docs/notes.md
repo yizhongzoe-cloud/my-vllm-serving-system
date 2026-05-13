@@ -665,7 +665,7 @@ Bursty / Gamma CV sweep 推后。
 - `S_TTFT = 2 × baseline_p95_TTFT`
 - `S_TPOT = 2 × baseline_p95_TPOT`
 
-三档 SLO tier（紧/中/松，参考 Niyama）：1.5x / 3x / 6x baseline P95。
+三档 SLO tier（紧/中/松，参考 Niyama）：2x / 3x / 6x baseline P95。
 
 ### Baselines（3 个，全自己实现）
 
@@ -838,7 +838,7 @@ Bursty / Gamma CV sweep 推后。
 
 **问题**：SLO 越紧，我们的优势是不是越大？
 
-**Setup**：固定 QPS（取 E_M1 曲线膝盖那个点），换三档 SLO（tight / medium / loose = 1.5x / 3x / 6x baseline P95），三个 system 各跑一次。
+**Setup**：固定 QPS（取 E_M1 曲线膝盖那个点），换三档 SLO（tight / medium / loose = 2x / 3x / 6x baseline P95），三个 system 各跑一次。
 
 **测量**：每档 SLO 下的 attainment %。
 
@@ -1029,18 +1029,20 @@ picker 是 engine 层的，每个 engine 的 scheduler 自己跑自己的 picker
 
 ### SLO 数怎么来的（不能拍脑袋）
 
-跑一次 `slo_calibration.py` 在**低 QPS、原生 vllm**（无 contention、无 FT）下测每个 dataset 的 baseline P95 TTFT/TPOT。三档 SLO = baseline P95 × {1.5, 3, 6}。
+跑一次 `slo_calibration.py` 在**低 QPS、原生 vllm**（无 contention、无 FT）下测每个 dataset 的 baseline P95 TTFT/TPOT。三档 SLO = baseline P95 × {2, 3, 6}（tight / normal / loose）。
+
+> 注：tight 原来是 × 1.5，后来改成 × 2 —— 1.5 在 ShareGPT 下太紧，被 batch-size 自然 jitter 主导；2× 更能反映系统实际能力差异。normal/loose 保持 3×/6× 不变。
 
 ShareGPT A6000 实测出来：
 
 ```
-baseline TPOT P95 ≈ 22ms → tier 33 / 66 / 132 ms
-baseline TTFT P95 ≈ 456ms → tier 684 / 1368 / 2736 ms
+baseline TPOT P95 ≈ 22ms → tier 44 / 66 / 132 ms
+baseline TTFT P95 ≈ 456ms → tier 912 / 1368 / 2736 ms
 ```
 
 文件：`experiments_v2/eval/results/slo_calib_sharegpt_n30_qps0.1_seed0_metrics.json`
 
-**关键**：tight SLO 是按"低负载基线 × 1.5"算的。高 QPS 下系统**物理上**就达不到——TPOT 跟 batch size 正相关，QPS 高时 batch 大、TPOT 涨。这是设计意图：tight tier 故意紧到普通调度过不了，让 SLO-aware 调度展现差异。但要注意分析数据时区分：
+**关键**：tight SLO 是按"低负载基线 × 2"算的。高 QPS 下系统**物理上**就达不到——TPOT 跟 batch size 正相关，QPS 高时 batch 大、TPOT 涨。这是设计意图：tight tier 故意紧到普通调度过不了，让 SLO-aware 调度展现差异。但要注意分析数据时区分：
 
 - **TTFT-bound 失败** → picker 能救（picker 动 admit 时机）
 - **TPOT-bound 失败** → 任何调度都救不了，不重 calibrate 没办法
@@ -1072,8 +1074,8 @@ PYTHONPATH=. python -m experiments_v2.eval.scripts.e_m1_slo_sweep \
   --baseline ours --dataset sharegpt \
   --arrival-rate-qps 4.0 --num-requests 60 --seed 0 \
   --slo-mode tiered \
-  --ttft-slo-tight-ms 684 --ttft-slo-normal-ms 1368 --ttft-slo-loose-ms 2736 \
-  --tpot-slo-tight-ms 33 --tpot-slo-normal-ms 66 --tpot-slo-loose-ms 132
+  --ttft-slo-tight-ms 912 --ttft-slo-normal-ms 1368 --ttft-slo-loose-ms 2736 \
+  --tpot-slo-tight-ms 44 --tpot-slo-normal-ms 66 --tpot-slo-loose-ms 132
 ```
 
 输出：`experiments_v2/eval/results/e_m1_<baseline>_<dataset>_qps<x>_n<n>_seed<s>_{metrics.json,engine0.log,engine1.log,router.log}`

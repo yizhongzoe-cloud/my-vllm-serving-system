@@ -29,26 +29,6 @@
 
 **Root cause shared by both.** No cheap way to *resume* a partial decode after eviction.
 
-### 1.3 Empty quadrant in the existing-systems landscape
-
-Axes that matter for this problem: (i) preempt long-context decode · (ii) disruption-aware · (iii) host-side KV · (iv) cross-engine state transfer.
-
-| System | Preempt long-ctx | Disruption-aware | Host-side KV | Cross-engine state |
-|---|---|---|---|---|
-| vLLM (FCFS) | ✗ | ✗ | ✗ | ✗ |
-| QLM | ✗ (early chunks only) | ✗ | ✗ | ✗ |
-| Scorpio | ✗ (TTFT/TPOT gates) | ✗ | ✗ | ✗ |
-| JITServe | ✗ (admission ctrl) | ✗ | ✗ | ✗ |
-| Niyama | ✗ (deadline EDF) | ✗ | ✗ | ✗ |
-| Llumnix | partial | partial (source must live) | ✗ | ✓ live migration |
-| Mooncake | ✗ | ✗ | ✓ (prefix cache) | ✗ |
-| TokenFlow | ✓ same-engine resume | ✗ | ✓ | ✗ |
-| FastServe | ✓ skip-join MLFQ | ✗ | partial (host swap) | ✗ |
-| **Ours** | **✓** | **✓ (source can die)** | **✓** | **✓ (checkpoint mirror)** |
-
-- Every prior system fills 3 of 4 cells. None fills all four.
-- Empty quadrant: `(cheap preempt of long-context decode) × (disruption-aware)` — our position.
-
 ---
 
 ## 2. Key insight
@@ -61,8 +41,6 @@ A single **host-side KV checkpoint**, async-published to `/dev/shm` at block-ali
 - **(ii) cheap-preempt substrate** — scheduler can preempt running long-context decode without wasting prefill.
 
 Same data. Two uses. No duplication.
-
-**Broader framing.** When a mechanism's cost drops below a threshold, design space that was previously off-limits opens up — host-KV checkpoint crosses that threshold for long-context LLM serving.
 
 ---
 
@@ -88,8 +66,7 @@ engines ⇄ /dev/shm checkpoint store + engine status files
 |---|---|
 | What gets saved | Per-block delta — newly-stable blocks since last save |
 | When | Every 16 tokens decoded (= one vLLM KV block); block alignment mandatory |
-| Where | L1 pinned host pool + L2 `/dev/shm` mirror; identical data, different access path |
-| Cadence | Tied to block boundary, not wall-clock |
+| Where | L1 pinned host pool + L2 `/dev/shm` mirror |
 
 **Async publish pipeline — 4 stages** (naive sync publish costs ~30% TTFT; pipeline drives that to negligible):
 
@@ -116,8 +93,6 @@ engines ⇄ /dev/shm checkpoint store + engine status files
 | Pre-first-token | `slack = S_TTFT − elapsed_since_arrival` |
 | Post-first-token | `slack = S_TPOT − avg_per_token_so_far` |
 
-One signal collapses both SLO regimes. **Measured at runtime**, not predicted from offline profile.
-
 **Picker rule.** Every scheduler step:
 - `victim ← argmax slack` over running queue (most relaxed)
 - `head ← argmin slack` over waiting queue (most urgent)
@@ -137,7 +112,7 @@ One signal collapses both SLO regimes. **Measured at runtime**, not predicted fr
 | `replay_cost` | Unfavorable trades (net slack must improve) |
 | `cooldown` | Repeat-victim — same request preempted every step |
 
-**Defaults.** `δ = 1 s`, `cooldown = 5 s`. Tunable; stable across our sweeps.
+**Defaults.** `δ = 1 s`, `cooldown = 5 s`.
 
 ### 3.4 Cross-engine reroute — second use of the same checkpoint
 
@@ -159,7 +134,7 @@ One signal collapses both SLO regimes. **Measured at runtime**, not predicted fr
 | Model | Qwen2.5-7B-Instruct fp16, `max_model_len 32K` |
 | Workloads | RULER 16K (long-context regime we target) + ShareGPT (short-context — must not break) |
 | Arrivals | Poisson · Niyama-style 3-tier QoS (tight / normal / loose) in main figure |
-| SLO calibration | Baseline P95 on `vllm_fcfs` at uncontested low QPS (RULER 0.02, ShareGPT 0.1). Tiers = baseline × {1.5×, 3×, 6×} for tight / normal / loose |
+| SLO calibration | Baseline P95 on `vllm_fcfs` at uncontested low QPS (RULER 0.02, ShareGPT 0.1). Tiers = baseline × {2×, 3×, 6×} for tight / normal / loose (tight changed 1.5× → 2× on 2026-05-13: 1.5× too tight on ShareGPT under natural batch-size jitter) |
 | Seeds | 3 per config; mean ± std reported |
 
 **Baselines — 4-way comparison to isolate router cost, FT cost, picker contribution.**
@@ -171,31 +146,21 @@ One signal collapses both SLO regimes. **Measured at runtime**, not predicted fr
 | `ours_no_picker` | FT mechanism on, slack picker off — ablation |
 | `ours` | Full system |
 
-### 4.2 Three experiments — one per contribution
+### 4.2 Three experiments
 
 | Experiment | What it measures | Claim | Status |
 |---|---|---|---|
 | **E_M1** main figure | SLO attainment vs QPS on RULER 16K + ShareGPT | `ours` holds attainment past saturation knee where baselines drop below 90%. Long-context gap clearest. | A6000 1.0–8.0 QPS sweep × 3 seeds in. L40S replicate in progress. |
-| **E_M4** picker ablation | Same axes + `ours_no_picker` | `ours_no_picker` sits between `ours` and `reroute_no_ckpt`. Mechanism alone = passive benefit; picker = active SLO advantage. Two contributions independent + additive. | `ours_no_picker` runs scheduled this week. |
+| **E_M4** picker ablation | Same axes + `ours_no_picker` | `ours_no_picker` sits between `ours` and `reroute_no_ckpt`. Mechanism alone = passive benefit; picker = active SLO advantage. | `ours_no_picker` runs scheduled this week. |
 | **E_D1** failover gap | SIGKILL → next-token latency vs context length, three systems | `ours` ≈ 1.5 s on RULER 16K. `no_ckpt` ≈ 10–20 s at 16K. Gap *grows with context length* (tens of s extrapolated at 64K). Lower variance too (single V3 batch sync). | RULER 16K demo working. Scaling to longer context next. |
 
-**De-risk check (in Setup paragraph, not its own figure).**
-
-- E_M3 healthy low-QPS: `ours` adds ~30 ms TTFT P50 over `reroute_no_ckpt`, throughput within 0.5%.
-- `vllm_fcfs ≈ reroute_no_ckpt` → router itself is essentially free.
+**Healthy low-QPS de-risk.** `ours` adds ~30 ms TTFT P50 over `reroute_no_ckpt`, throughput within 0.5%. `vllm_fcfs ≈ reroute_no_ckpt` — router itself essentially free.
 
 ---
 
-## 5. Status & open questions
+## 5. Status
 
-### Status checklist
-
-- [x] Paper framework & 5-section outline drafted (APSys shape)
-- [~] E_M1 main figure — partial: A6000 sweep × 3 seeds in; L40S replicate in progress
-- [~] E_M4 picker ablation — partial: `ours_no_picker` runs scheduled this week
-- [~] E_D1 failover demo — working on RULER 16K, scaling to longer context
-
-### Open questions for discussion
-
-1. **Headline figure: tiered QoS vs uniform?** Tiered tells a clearer story (per-class attainment under 3-tier QoS) but uses synthetic classes. Uniform is the cleaner setup but flattens the picker's value.
-2. **δ / cooldown defaults: justify with a small sweep?** Run `δ ∈ {500 ms, 1 s, 2 s} × cooldown ∈ {3 s, 5 s, 10 s}` on a slice of E_M2 budget, pick the pair maximizing the knee gap. Note inline that defaults are tuned, not first-principles.
+- [x] Paper framework drafted
+- [~] E_M1 — A6000 sweep × 3 seeds in; L40S replicate in progress
+- [~] E_M4 — `ours_no_picker` runs scheduled this week
+- [~] E_D1 — RULER 16K demo working; scaling to longer context

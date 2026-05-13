@@ -141,7 +141,7 @@ Router 维护一个 `in_flight` 字典，把 `router_req_id` 映射到 `(engine_
 
 ### Setup 段（1 段）
 
-硬件：2× NVIDIA A6000 PCIe（48 GB 每块）；portability check 跑在 2× L40S 上（同模型不同 SM）。模型：Qwen2.5-7B-Instruct fp16，`max_model_len 32K`。Workload：长上下文用 RULER 16K（这是我们 paper 主打的 regime），短上下文用 ShareGPT（这是不能被打坏的 regime），都用 Poisson 到达加 Niyama 风格的三档 QoS（主图）。SLO calibration：在 `vllm_fcfs` 上以无 contention 的低 QPS 测 baseline P95（RULER 0.02 QPS、ShareGPT 0.1 QPS）；每档 SLO 设成 baseline P95 的 {1.5×, 3×, 6×}，对应 tight / normal / loose。Baseline：`vllm_fcfs`（无 router 的地板 —— 测「完全没 router 没 FT」的开销）、`reroute_no_ckpt`（我们的架构去掉 FT —— 测「只有 router」的开销）、`ours`（完整系统）、`ours_no_picker`（picker ablation —— FT 全在但 slack picker 关掉）。每个配置三个 seed，报告 mean ± std。在跑压力测试之前，我们先验证 FT 机制在 healthy 低 QPS 下不带来实质 overhead（E_M3）：`ours` 在 `reroute_no_ckpt` 之上加约 30 毫秒 TTFT P50、throughput 差距在 0.5% 以内；router 自身基本免费（`vllm_fcfs ≈ reroute_no_ckpt`）。
+硬件：2× NVIDIA A6000 PCIe（48 GB 每块）；portability check 跑在 2× L40S 上（同模型不同 SM）。模型：Qwen2.5-7B-Instruct fp16，`max_model_len 32K`。Workload：长上下文用 RULER 16K（这是我们 paper 主打的 regime），短上下文用 ShareGPT（这是不能被打坏的 regime），都用 Poisson 到达加 Niyama 风格的三档 QoS（主图）。SLO calibration：在 `vllm_fcfs` 上以无 contention 的低 QPS 测 baseline P95（RULER 0.02 QPS、ShareGPT 0.1 QPS）；每档 SLO 设成 baseline P95 的 {2×, 3×, 6×}，对应 tight / normal / loose。Baseline：`vllm_fcfs`（无 router 的地板 —— 测「完全没 router 没 FT」的开销）、`reroute_no_ckpt`（我们的架构去掉 FT —— 测「只有 router」的开销）、`ours`（完整系统）、`ours_no_picker`（picker ablation —— FT 全在但 slack picker 关掉）。每个配置三个 seed，报告 mean ± std。在跑压力测试之前，我们先验证 FT 机制在 healthy 低 QPS 下不带来实质 overhead（E_M3）：`ours` 在 `reroute_no_ckpt` 之上加约 30 毫秒 TTFT P50、throughput 差距在 0.5% 以内；router 自身基本免费（`vllm_fcfs ≈ reroute_no_ckpt`）。
 
 ### §4.1 压力下的 SLO attainment（3 段）
 
@@ -152,7 +152,7 @@ Figure 2：x 轴是 QPS，y 轴是 SLO attainment %，三条线（`ours`、`rero
 均匀 SLO 加均匀到达没法完全暴露 picker 的价值（所有人一样紧）。Figure 3 在三档 QoS 下画 per-class attainment vs QPS。`ours` 把 tight 这档保护住 —— 维持 ≥95%，远超 baseline 在 tight 上跌破 50% 的 QPS —— 同时不损害 loose（所有系统在所有 QPS 下 loose 都 >90%）。Picker 的重分配方向正确：把资源优先给「SLO 难以达成」的那档，也就是 scheduling 决策真正起作用的地方。
 
 **Para 4.1.3 —— SLO 紧度扫描（E_M2）**：
-QPS 固定在拐点，把 SLO 倍数从 1.5× 扫到 6×。Figure 4：x 是倍数，y 是 `ours` attainment 减 baseline attainment。差距在 1.5×（最紧）处最大，到 6×（最松）逐渐归零。结论：`ours` 赢在该赢的地方 —— SLO 不平凡的时候；SLO 松到所有系统都达标时，没有任何调度决策能改变结果。
+QPS 固定在拐点，把 SLO 倍数从 2× 扫到 6×。Figure 4：x 是倍数，y 是 `ours` attainment 减 baseline attainment。差距在 2×（最紧）处最大，到 6×（最松）逐渐归零。结论：`ours` 赢在该赢的地方 —— SLO 不平凡的时候；SLO 松到所有系统都达标时，没有任何调度决策能改变结果。
 
 ### §4.2 Mechanism vs policy ablation（1 段）
 

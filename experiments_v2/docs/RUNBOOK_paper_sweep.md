@@ -148,16 +148,147 @@ tail -f experiments_v2/eval/results/l40s/paper_sweep_*.log
 
 ---
 
-## 4. Which SLO each experiment uses
+## 4. RULER_16K sweep (both machines)
+
+The ShareGPT sweep above uses 500-token prompts where prefill is
+one-shot — picker has no mid-prefill window to fire in. RULER_16K
+(~13K-token NIAH prompts) gives the picker a real workload: chunked
+prefill splits each prompt into ~6 chunks, and picker can preempt a
+mid-prefill victim once its host checkpoint has caught up.
+
+Scope: E_M1 only (4 baselines × 3 QPS × 3 seeds = 36 runs, ~1.5h
+per machine). The driver is
+`experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh`.
+
+### 4a. A6000
+
+Calibration already exists at
+`experiments_v2/eval/results/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json`
+(baseline TTFT P95 = 2736 ms, TPOT P95 = 24.3 ms). The default SLO
+values in the sweep script (TTFT 5472/8208/16416 ms, TPOT 49/73/146 ms,
+i.e. baseline × {2, 3, 6}) are computed from this.
+
+```bash
+cd /home/yzhong76/code/my-vllm-serving-system
+
+rm -rf /dev/shm/vllm_ft_preempt_queue \
+       /dev/shm/vllm_ft_engine_status \
+       /dev/shm/vllm_ft_req_map \
+       /dev/shm/vllm_ft_checkpoints
+
+HARDWARE_TAG=a6000 nohup \
+  bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
+  > /tmp/a6000_ruler16k_sweep.log 2>&1 &
+echo "PID: $!"
+```
+
+Monitor:
+```bash
+tail -f experiments_v2/eval/results/a6000/ruler16k_sweep_*.log
+ls experiments_v2/eval/results/a6000/e_m1_*_ruler_16k_*_metrics.json | wc -l
+```
+
+### 4b. L40S calibration (first time only)
+
+L40S has never been profiled on RULER_16K. Run calibration first so
+the SLO thresholds reflect L40S's own baseline, not A6000's. Takes
+~30 minutes (30 requests at QPS 0.02).
+
+```bash
+cd <repo path on L40S>
+git checkout zoe/disruption
+git pull origin zoe/disruption
+
+rm -rf /dev/shm/vllm_ft_engine_status \
+       /dev/shm/vllm_ft_req_map \
+       /dev/shm/vllm_ft_checkpoints
+
+EVAL_RESULTS_DIR="$(pwd)/experiments_v2/eval/results/l40s" \
+PYTHONPATH="$(pwd)" \
+python -m experiments_v2.eval.scripts.slo_calibration \
+  --dataset ruler_16k \
+  --num-requests 30 \
+  --arrival-rate-qps 0.02 \
+  --seed 0
+
+# Verify file landed in the right place with the expected name
+ls experiments_v2/eval/results/l40s/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json
+```
+
+The QPS arg is mandatory: it must be `0.02` exactly, because the
+downstream E_M2 driver looks for the file by that name
+(see `e_m2_slo_tightness.py` `_CALIB_FILES`).
+
+### 4c. L40S — derive SLO numbers from L40S calibration
+
+```bash
+python -c "
+import json
+m = json.load(open('experiments_v2/eval/results/l40s/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json'))
+ttft = m['ttft_ms']['p95']
+tpot = m['tpot_ms']['p95']
+print(f'# L40S baseline: TTFT P95 {ttft:.0f}ms, TPOT P95 {tpot:.1f}ms')
+print(f'export E_M1_TTFT_TIGHT_MS={int(ttft*2)}')
+print(f'export E_M1_TTFT_NORMAL_MS={int(ttft*3)}')
+print(f'export E_M1_TTFT_LOOSE_MS={int(ttft*6)}')
+print(f'export E_M1_TPOT_TIGHT_MS={int(round(tpot*2))}')
+print(f'export E_M1_TPOT_NORMAL_MS={int(round(tpot*3))}')
+print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
+"
+```
+
+Copy-paste the `export` lines into your shell. They override the
+defaults in the sweep script (which are A6000-derived).
+
+### 4d. L40S full sweep
+
+```bash
+rm -rf /dev/shm/vllm_ft_preempt_queue \
+       /dev/shm/vllm_ft_engine_status \
+       /dev/shm/vllm_ft_req_map \
+       /dev/shm/vllm_ft_checkpoints
+
+HARDWARE_TAG=l40s nohup \
+  bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
+  > /tmp/l40s_ruler16k_sweep.log 2>&1 &
+echo "PID: $!"
+```
+
+Monitor:
+```bash
+tail -f experiments_v2/eval/results/l40s/ruler16k_sweep_*.log
+```
+
+### 4e. Sanity check — picker is actually firing
+
+Unlike ShareGPT (where the picker correctly fired 0 times after the
+manifest guard), RULER_16K runs should show picker fires. Look at
+the engine logs of an `ours` run:
+
+```bash
+grep "PICKER_DIAG" experiments_v2/eval/results/<hw>/e_m1_ours_ruler_16k_qps2.0_n60_seed0_engine*.log | head
+```
+
+`host_manifest_exists=True` should be the dominant case. If you see
+many fires with `host_manifest_exists=False`, the manifest guard is
+broken. If you see zero fires across all 3 seeds, the workload is
+not stressful enough — bump QPS or tighten SLO.
+
+---
+
+## 5. Which SLO each experiment uses
 
 Heads-up because this is non-obvious: only E_M2 reads the calibration
-file. The others use hardcoded SLO numbers (derived from A6000's
-historical calibration: baseline P95 × {1.5, 3, 6}).
+file. The others use hardcoded SLO numbers. The multiplier is baseline
+P95 × {2, 3, 6} for tight/normal/loose (tight was 1.5× before
+2026-05-13; bumped to 2× because 1.5× was inside the batch-size
+jitter on ShareGPT).
 
 | Experiment | Reads calibration? | SLO source |
 |---|---|---|
-| E_M1 | No | Hardcoded in master shell (684/1368/2736 ms TTFT, 33/66/132 ms TPOT) |
-| E_M2 | Yes | Per-hardware calibration × tightness factor × {1.5, 3, 6} |
+| E_M1 ShareGPT | No | Hardcoded in `run_paper_sweep_sharegpt.sh` |
+| E_M1 RULER_16K | No | Hardcoded defaults in `run_paper_sweep_ruler16k.sh` (overridable via env vars — see section 4c for L40S) |
+| E_M2 | Yes | Per-hardware calibration × tightness factor × {2, 3, 6} |
 | E_M3 | No | Just measures TTFT/TPOT, no SLO threshold |
 | E_M4 | No | Same hardcoded numbers as E_M1 |
 | E_D1 | No | Disruption demo — not SLO-bound |
@@ -170,7 +301,7 @@ hardware calibration matters.
 
 ---
 
-## 5. After both machines finish
+## 6. After both machines finish
 
 ```bash
 # Compare A6000 vs L40S tight-tier attainment at each QPS
@@ -196,7 +327,7 @@ becomes a portability check in the discussion or appendix.
 
 ---
 
-## 6. Cleanup / restart
+## 7. Cleanup / restart
 
 If a sweep gets interrupted and you want to retry, master shell is
 fail-tolerant (it doesn't `set -e`) — already-completed runs left
@@ -213,7 +344,7 @@ rm -rf experiments_v2/eval/results/a6000/
 
 ---
 
-## 7. Where things live
+## 8. Where things live
 
 ```
 experiments_v2/
@@ -225,7 +356,8 @@ experiments_v2/
 │   │   ├── e_m4_picker_ablation.py       # driver — wraps e_m1 ours vs ours_no_picker
 │   │   ├── e_d1_disruption_demo.py       # standalone (single-kill demo)
 │   │   ├── slo_calibration.py            # standalone, run once per (hardware, dataset)
-│   │   └── run_paper_sweep_sharegpt.sh   # master driver this runbook references
+│   │   ├── run_paper_sweep_sharegpt.sh   # ShareGPT master driver
+│   │   └── run_paper_sweep_ruler16k.sh   # RULER_16K master driver (E_M1 only)
 │   └── results/
 │       ├── *.json / *.log                # historical A6000-era files
 │       ├── a6000/                        # output of HARDWARE_TAG=a6000 runs
