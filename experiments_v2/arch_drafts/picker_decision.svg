@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" width="800" height="480" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker>
+  </defs>
+
+  <text x="400" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">Slack picker · pick laziest tail, admit most urgent head</text>
+
+  <!-- slack axis -->
+  <line x1="100" y1="240" x2="720" y2="240" stroke="#4a5568" stroke-width="1.2" marker-end="url(#ak)"/>
+  <text x="728" y="244" font-size="11" fill="#4a5568">slack (s)</text>
+
+  <!-- ticks -->
+  <g font-size="10" fill="#4a5568">
+    <line x1="100" y1="236" x2="100" y2="244" stroke="#4a5568"/>
+    <text x="100" y="258" text-anchor="middle">0</text>
+    <line x1="220" y1="236" x2="220" y2="244" stroke="#4a5568"/>
+    <text x="220" y="258" text-anchor="middle">0.5</text>
+    <line x1="340" y1="236" x2="340" y2="244" stroke="#4a5568"/>
+    <text x="340" y="258" text-anchor="middle">1.0</text>
+    <line x1="460" y1="236" x2="460" y2="244" stroke="#4a5568"/>
+    <text x="460" y="258" text-anchor="middle">1.5</text>
+    <line x1="580" y1="236" x2="580" y2="244" stroke="#4a5568"/>
+    <text x="580" y="258" text-anchor="middle">2.0</text>
+    <line x1="700" y1="236" x2="700" y2="244" stroke="#4a5568"/>
+    <text x="700" y="258" text-anchor="middle">2.5</text>
+  </g>
+
+  <!-- urgency labels -->
+  <text x="100" y="218" font-size="10" fill="#c53030" font-style="italic">← urgent</text>
+  <text x="720" y="218" text-anchor="end" font-size="10" fill="#22543d" font-style="italic">relaxed →</text>
+
+  <!-- waiting queue label -->
+  <text x="48" y="106" font-size="11" font-weight="600" fill="#553c9a">Waiting</text>
+  <text x="48" y="120" font-size="10" fill="#553c9a">queue</text>
+
+  <!-- waiting requests -->
+  <!-- R_urgent slack 0.2 (min) -->
+  <circle cx="148" cy="120" r="20" fill="#fed7d7" stroke="#c53030" stroke-width="2"/>
+  <text x="148" y="117" text-anchor="middle" font-size="11" font-weight="700" fill="#742a2a">R_u</text>
+  <text x="148" y="130" text-anchor="middle" font-size="9" fill="#742a2a">0.2 s</text>
+  <text x="148" y="86" text-anchor="middle" font-size="10" font-weight="700" fill="#c53030">head = argmin slack</text>
+  <line x1="148" y1="140" x2="148" y2="240" stroke="#c53030" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>
+
+  <!-- R_b slack 0.7 -->
+  <circle cx="268" cy="120" r="14" fill="#fff" stroke="#6b46c1"/>
+  <text x="268" y="118" text-anchor="middle" font-size="10" fill="#553c9a">R_b</text>
+  <text x="268" y="130" text-anchor="middle" font-size="9" fill="#553c9a">0.7</text>
+
+  <!-- R_c slack 1.1 -->
+  <circle cx="364" cy="120" r="14" fill="#fff" stroke="#6b46c1"/>
+  <text x="364" y="118" text-anchor="middle" font-size="10" fill="#553c9a">R_c</text>
+  <text x="364" y="130" text-anchor="middle" font-size="9" fill="#553c9a">1.1</text>
+
+  <!-- running queue label -->
+  <text x="48" y="356" font-size="11" font-weight="600" fill="#2b4365">Running</text>
+  <text x="48" y="370" font-size="10" fill="#2b4365">queue</text>
+
+  <!-- R_a slack 0.8 -->
+  <circle cx="292" cy="360" r="14" fill="#fff" stroke="#2b6cb0"/>
+  <text x="292" y="358" text-anchor="middle" font-size="10" fill="#2b4365">R_a</text>
+  <text x="292" y="370" text-anchor="middle" font-size="9" fill="#2b4365">0.8</text>
+
+  <!-- R_d slack 1.3 -->
+  <circle cx="412" cy="360" r="14" fill="#fff" stroke="#2b6cb0"/>
+  <text x="412" y="358" text-anchor="middle" font-size="10" fill="#2b4365">R_d</text>
+  <text x="412" y="370" text-anchor="middle" font-size="9" fill="#2b4365">1.3</text>
+
+  <!-- R_v slack 2.0 (max) -->
+  <circle cx="580" cy="360" r="20" fill="#c6e8d0" stroke="#2f855a" stroke-width="2"/>
+  <text x="580" y="358" text-anchor="middle" font-size="11" font-weight="700" fill="#22543d">R_v</text>
+  <text x="580" y="370" text-anchor="middle" font-size="9" fill="#22543d">2.0 s</text>
+  <text x="580" y="396" text-anchor="middle" font-size="10" font-weight="700" fill="#22543d">victim = argmax slack</text>
+  <line x1="580" y1="340" x2="580" y2="240" stroke="#22543d" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>
+
+  <!-- gap bracket -->
+  <line x1="148" y1="194" x2="580" y2="194" stroke="#1a202c" stroke-width="1.2"/>
+  <line x1="148" y1="194" x2="148" y2="204" stroke="#1a202c" stroke-width="1.2"/>
+  <line x1="580" y1="194" x2="580" y2="204" stroke="#1a202c" stroke-width="1.2"/>
+  <text x="364" y="188" text-anchor="middle" font-size="11" font-weight="600" fill="#1a202c">gap = slack(R_v) − slack(R_u) = 1.8 s</text>
+
+  <!-- preempt rule box -->
+  <rect x="40" y="416" width="720" height="50" rx="6" fill="#fef9e7" stroke="#b7791f" stroke-width="1.2"/>
+  <text x="56" y="436" font-size="12" font-weight="700" fill="#744210">Preempt R_v iff all three hold:</text>
+  <text x="76" y="455" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#744210">gap &gt; δ + replay_cost(R_v)  <tspan font-weight="700">AND</tspan>  num_checkpointed_tokens(R_v) &gt; 0  <tspan font-weight="700">AND</tspan>  time_since_last_preempt(R_v) &gt; cooldown</text>
+</svg>

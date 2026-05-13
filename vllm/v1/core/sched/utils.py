@@ -2,8 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import math
+import os
 
 from vllm.v1.request import Request, RequestStatus
+
+# Fixed per-fire switch cost in ms — the wall-clock spent on
+# preempt state machine + cross-engine HTTP forward + V3 reload
+# of the host checkpoint into the receiving engine + admit on
+# that engine. Paid in full every time the picker fires,
+# independent of how many tokens need replay. The picker rolls
+# this into replay_cost so the fire rule (slack_gap > δ +
+# replay_cost) naturally reflects the full cost of kicking a
+# victim, not just the per-token re-decode piece. Override via
+# FT_PICKER_SWITCH_COST_MS for sweeps.
+_SWITCH_COST_MS = float(os.environ.get("FT_PICKER_SWITCH_COST_MS", "1000"))
 
 
 def compute_slo_budgets(
@@ -61,33 +73,45 @@ def compute_slo_budgets(
 
 
 def compute_replay_cost(request: Request, now_sec: float) -> float:
-    """Estimate the replay cost (ms) of preempting `request` now.
+    """Estimate the total cost (ms) of preempting `request` now.
 
-    Host KV checkpoints lag behind GPU progress (saved per full block,
-    asynchronously). After preempt + reload, tokens between
-    num_checkpointed_tokens and num_computed_tokens must be re-run.
+    Two components:
 
-        replay_tokens = num_computed_tokens − num_checkpointed_tokens
-        per_token_ms = elapsed_since_arrival_ms / num_computed_tokens
-        replay_cost_ms = replay_tokens × per_token_ms
+    1. **switch_cost** (fixed, per-fire): wall-clock spent on the
+       preempt state machine + cross-engine HTTP forward + V3 reload
+       of the host checkpoint into the receiving engine + admit on
+       that engine. Paid in full every fire regardless of victim
+       progress. Module-level constant `_SWITCH_COST_MS`, overridable
+       via `FT_PICKER_SWITCH_COST_MS` env var (default 1000ms).
 
-    Using num_computed_tokens (prompt + decode) keeps the formula
-    meaningful for both prefill-stage and decode-stage victims; both
-    operands above are in the same units. A victim with checkpoint
-    fully caught up returns 0.
+    2. **variable replay** (per-token): host KV checkpoints lag
+       behind GPU progress (saved per full block, asynchronously).
+       After preempt + reload, tokens between
+       num_checkpointed_tokens and num_computed_tokens must be re-run.
 
-    The picker uses this to inflate the hysteresis gap so reqs that
-    have done more uncheckpointed work are harder to preempt than
-    fresh reqs with the same slack.
+           replay_tokens = num_computed_tokens − num_checkpointed_tokens
+           per_token_ms = elapsed_since_arrival_ms / num_computed_tokens
+           variable_ms = replay_tokens × per_token_ms
+
+       Using num_computed_tokens (prompt + decode) keeps the formula
+       meaningful for both prefill-stage and decode-stage victims.
+
+    Returns switch_cost + variable_ms. The picker rule
+    (slack_gap > δ + replay_cost) then reflects the FULL cost of
+    kicking, not just the per-token recompute piece — which alone
+    underestimates fires by ~1s on long-context workloads and made
+    the picker trade net-negative on RULER.
     """
+    elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
     replay_tokens = max(
         0, request.num_computed_tokens - request.num_checkpointed_tokens
     )
-    if replay_tokens == 0:
-        return 0.0
-    elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
-    per_token_ms = elapsed_ms / max(1, request.num_computed_tokens)
-    return replay_tokens * per_token_ms
+    if replay_tokens == 0 or request.num_computed_tokens == 0:
+        variable_ms = 0.0
+    else:
+        per_token_ms = elapsed_ms / max(1, request.num_computed_tokens)
+        variable_ms = replay_tokens * per_token_ms
+    return _SWITCH_COST_MS + variable_ms
 
 
 def remove_all(lst: list, items_to_remove: set) -> list:
