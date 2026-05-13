@@ -7365,6 +7365,236 @@ class GPUModelRunner(
     # query_restore_done lets the engine poll for async restore
     # completion before re-admitting the request.
 
+    def _batch_save_checkpoints(
+        self,
+        request_block_map: list[tuple[str, list[int], int]],
+    ) -> list[tuple[str, "Any", int]]:
+        """Batched checkpoint save: merge N requests' GPU→host copies
+        into one CUDA gather + one pin_memory alloc + one async H2D
+        copy on the pool's copy stream.
+
+        Preserves FT_DELTA_CHECKPOINT semantics: per-req existing
+        entries are detected; only newly added blocks (block_ids past
+        the previously published count) are copied; the delta is
+        torch.cat-appended into the existing entry. Requests in their
+        first save or in a block-count regression fall through to a
+        full-save path in the same batch.
+
+        Returns list of (request_id, CheckpointEntry, num_tokens) for
+        every successfully saved or metadata-updated request. The
+        method internally synchronizes the copy stream before doing
+        per-req slice + torch.cat (host data must be valid before
+        the cat reads from it).
+        """
+        from vllm.v1.core.kv_checkpoint_pool import CheckpointEntry
+
+        if not request_block_map or not self.kv_caches:
+            return []
+
+        pool = self._ft_checkpoint_pool
+        use_delta = os.environ.get("FT_DELTA_CHECKPOINT") == "1"
+        sample = self.kv_caches[0]
+        num_kv_blocks = sample.shape[1]
+        num_layers = len(self.kv_caches)
+        device = sample.device
+
+        # Stage A: per-req delta analysis. Build:
+        #   specs       — reqs that need GPU work this batch
+        #   req_slices  — (start, end) into the concatenated block list
+        #   skip_results — reqs that need only metadata bump (no GPU work)
+        specs: list[
+            tuple[str, int, list[int], "CheckpointEntry | None"]
+        ] = []
+        req_slices: list[tuple[int, int]] = []
+        all_delta_block_ids: list[int] = []
+        skip_results: list[tuple[str, "CheckpointEntry", int]] = []
+
+        for req_id, block_ids, num_tokens in request_block_map:
+            block_ids = [
+                bid for bid in block_ids if 0 <= bid < num_kv_blocks
+            ]
+            if not block_ids:
+                continue
+
+            existing: "CheckpointEntry | None" = None
+            delta_block_ids = block_ids
+            if use_delta:
+                with pool._lock:
+                    existing = pool._store.get(req_id)
+                if existing is not None:
+                    prev_n = len(existing.block_ids)
+                    if len(block_ids) > prev_n:
+                        delta_block_ids = block_ids[prev_n:]
+                        # Bump timestamp NOW so _evict_to_free in
+                        # Stage B (LRU by timestamp) won't pick the
+                        # entry we're about to append to. Without
+                        # this, a near-full pool can evict the very
+                        # entry we hold a reference to, then Stage F
+                        # would cat-append to a detached entry and
+                        # leak used_bytes accounting.
+                        existing.timestamp = time.time()
+                    elif len(block_ids) == prev_n:
+                        # Nothing new — metadata update only.
+                        existing.num_tokens = num_tokens
+                        existing.block_ids = list(block_ids)
+                        existing.timestamp = time.time()
+                        skip_results.append(
+                            (req_id, existing, num_tokens)
+                        )
+                        continue
+                    else:
+                        # Regression — fall back to full save.
+                        existing = None
+                        delta_block_ids = block_ids
+
+            start = len(all_delta_block_ids)
+            all_delta_block_ids.extend(delta_block_ids)
+            end = len(all_delta_block_ids)
+            specs.append((req_id, num_tokens, list(block_ids), existing))
+            req_slices.append((start, end))
+
+        if not all_delta_block_ids:
+            return skip_results
+
+        # Stage B: byte budget. Reserve up front so a concurrent save
+        # from another path can't over-commit the pool.
+        per_block_bytes = (
+            2  # K and V
+            * sample.shape[2]  # block_size
+            * sample.shape[3]  # num_kv_heads
+            * sample.shape[4]  # head_size
+            * sample.element_size()
+        )
+        estimated_bytes = (
+            per_block_bytes * len(all_delta_block_ids) * num_layers
+        )
+        with pool._lock:
+            if estimated_bytes > pool.available_bytes:
+                if not pool._evict_to_free(estimated_bytes):
+                    logger.warning(
+                        "Batch checkpoint: insufficient host memory "
+                        "(need %d, available %d); skipping batch.",
+                        estimated_bytes, pool.available_bytes,
+                    )
+                    return skip_results
+            pool._reserved_bytes += estimated_bytes
+
+        # Stage C: one pinned buffer per layer for the whole batch.
+        out_shape = (
+            (sample.shape[0], len(all_delta_block_ids))
+            + sample.shape[2:]
+        )
+        try:
+            pinned_buffers: dict[int, torch.Tensor] = {
+                layer_idx: torch.empty(
+                    out_shape, dtype=sample.dtype, device="cpu",
+                ).pin_memory()
+                for layer_idx in range(num_layers)
+            }
+        except RuntimeError:
+            logger.exception(
+                "Batch checkpoint: pin_memory alloc failed"
+            )
+            with pool._lock:
+                pool._reserved_bytes -= estimated_bytes
+            return skip_results
+
+        # Stage D: single GPU gather + single async H2D copy on the
+        # pool's copy_stream. Decode (default stream) is NOT blocked
+        # by this work; copy_stream waits via an event for default
+        # stream to reach the "writes done" point.
+        block_indices = torch.tensor(
+            all_delta_block_ids, dtype=torch.int64,
+        )
+        if torch.cuda.is_available():
+            copy_stream = pool._get_copy_stream()
+            event = torch.cuda.current_stream(device).record_event()
+            with torch.cuda.stream(copy_stream):
+                copy_stream.wait_event(event)
+                block_indices_gpu = block_indices.to(
+                    device, non_blocking=True,
+                )
+                for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                    gpu_buf = gpu_tensor[
+                        :, block_indices_gpu, :, :, :
+                    ].clone()
+                    pinned_buffers[layer_idx].copy_(
+                        gpu_buf, non_blocking=True,
+                    )
+        else:
+            block_indices_gpu = block_indices.to(device)
+            for layer_idx, gpu_tensor in enumerate(self.kv_caches):
+                gpu_buf = gpu_tensor[
+                    :, block_indices_gpu, :, :, :
+                ].clone()
+                pinned_buffers[layer_idx].copy_(
+                    gpu_buf, non_blocking=False,
+                )
+
+        # Stage E: sync. The per-req slice + torch.cat below reads the
+        # pinned host bytes, so the H2D copy must have committed first.
+        if torch.cuda.is_available():
+            copy_stream = pool._get_copy_stream()
+            if copy_stream is not None:
+                copy_stream.synchronize()
+
+        # Stage F: per-req slice + (append OR full save).
+        entries: list[tuple[str, "Any", int]] = []
+        for spec, (start, end) in zip(specs, req_slices):
+            req_id, num_tokens, full_block_ids, existing = spec
+
+            # Clone each slice so the entry owns independent host
+            # memory — evicting one entry then actually releases its
+            # bytes, instead of pinning the whole batch buffer alive.
+            per_req_tensors: dict[int, torch.Tensor] = {
+                layer_idx: pinned_buffers[layer_idx][
+                    :, start:end
+                ].clone()
+                for layer_idx in range(num_layers)
+            }
+            added_bytes = sum(
+                t.nelement() * t.element_size()
+                for t in per_req_tensors.values()
+            )
+
+            if existing is not None:
+                # Delta append: cat new delta onto existing host tensors.
+                for layer_idx in range(num_layers):
+                    existing.kv_tensors[layer_idx] = torch.cat(
+                        [existing.kv_tensors[layer_idx],
+                         per_req_tensors[layer_idx]],
+                        dim=1,
+                    )
+                existing.block_ids = list(full_block_ids)
+                existing.num_tokens = num_tokens
+                existing.timestamp = time.time()
+                entry = existing
+                entry.compute_size()
+                with pool._lock:
+                    pool._used_bytes += added_bytes
+            else:
+                # Full save (first save or block-count regression).
+                entry = CheckpointEntry(
+                    request_id=req_id,
+                    block_ids=list(full_block_ids),
+                    num_tokens=num_tokens,
+                    timestamp=time.time(),
+                )
+                entry.kv_tensors = per_req_tensors
+                actual_bytes = entry.compute_size()
+                with pool._lock:
+                    pool._evict_entry(req_id)
+                    pool._store[req_id] = entry
+                    pool._used_bytes += actual_bytes
+
+            entries.append((req_id, entry, num_tokens))
+
+        with pool._lock:
+            pool._reserved_bytes -= estimated_bytes
+
+        entries.extend(skip_results)
+        return entries
+
     def checkpoint_kv_blocks(
         self,
         request_block_map: list[tuple[str, list[int], int]],
@@ -7407,23 +7637,19 @@ class GPUModelRunner(
                 logger.exception("previous batch publish failed")
             self._ft_bg_publish_future = None
 
-        entries: list[tuple[str, "Any", int]] = []
-        for request_id, block_ids, num_tokens in request_block_map:
-            entry = self._ft_checkpoint_pool.save_checkpoint(
-                request_id=request_id,
-                gpu_kv_caches=self.kv_caches,
-                block_ids=block_ids,
-                num_tokens=num_tokens,
-                async_copy=True,
-            )
-            if entry is not None:
-                entries.append((request_id, entry, num_tokens))
+        # Batched save: one GPU gather + one pin_memory alloc + one
+        # async H2D copy for the whole batch. Internally synchronizes
+        # the copy stream before returning, so host bytes are valid
+        # by the time entries are handed back.
+        entries = self._batch_save_checkpoints(request_block_map)
 
         if not entries:
             return []
 
-        # Sync the copy stream once for the whole batch so the host
-        # pinned tensors are valid before the publish thread reads them.
+        # Defensive sync — _batch_save_checkpoints already synced
+        # the copy stream, so this is a no-op. Kept so a future
+        # refactor that bypasses the batch path can't silently
+        # introduce a copy-vs-publish race.
         if torch.cuda.is_available():
             copy_stream = getattr(
                 self._ft_checkpoint_pool, "_copy_stream", None
