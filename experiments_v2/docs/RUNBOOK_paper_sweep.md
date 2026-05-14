@@ -285,7 +285,13 @@ request decodes the full 1024 tokens regardless of natural answer
 length. Files get an `_out1024` suffix so they coexist with the
 default 128-output runs.
 
-**Step 1 — calibration (~30 min per machine, run once each)**
+**Step 1 — calibration (~50 min per machine, run once each)**
+
+Important. The calibration QPS is 0.005, not the 0.02 used for
+short-output calibration. At 1024 output each request lives 25 to 30
+seconds, so qps=0.02 would push per-engine utilization to ~30% and
+inflate both TTFT and TPOT through queueing. qps=0.005 keeps
+per-engine utilization under 10%, giving a clean unloaded baseline.
 
 A6000:
 ```bash
@@ -294,8 +300,8 @@ EVAL_RESULTS_DIR=experiments_v2/eval/results/a6000 \
 PYTHONPATH=. \
 python -m experiments_v2.eval.scripts.slo_calibration \
   --dataset ruler_16k \
-  --num-requests 30 \
-  --arrival-rate-qps 0.02 \
+  --num-requests 15 \
+  --arrival-rate-qps 0.005 \
   --seed 0 \
   --force-max-output-tokens 1024 \
   --ignore-eos
@@ -308,30 +314,34 @@ EVAL_RESULTS_DIR=experiments_v2/eval/results/l40s \
 PYTHONPATH=. \
 python -m experiments_v2.eval.scripts.slo_calibration \
   --dataset ruler_16k \
-  --num-requests 30 \
-  --arrival-rate-qps 0.02 \
+  --num-requests 15 \
+  --arrival-rate-qps 0.005 \
   --seed 0 \
   --force-max-output-tokens 1024 \
   --ignore-eos
 ```
 
 Output:
-`<results_dir>/slo_calib_ruler_16k_out1024_n30_qps0.02_seed0_metrics.json`
+`<results_dir>/slo_calib_ruler_16k_out1024_n15_qps0.005_seed0_metrics.json`
 
-**Step 2 — derive new TPOT SLO thresholds**
+**Step 2 — derive new TTFT and TPOT SLO thresholds**
 
-TTFT thresholds reuse the existing RULER 16K values (prefill is
-unchanged). Only TPOT needs to be re-calibrated because KV grows
-during the longer decode and TPOT P95 climbs accordingly.
+Both TTFT and TPOT are re-derived from the long-output calibration.
+TTFT can shift even though prefill is unchanged because the
+calibration workload itself differs (longer requests, different
+queueing pattern). TPOT shifts because KV grows over the 1024-token
+decode.
 
 ```bash
 python -c "
 import json
-m = json.load(open('experiments_v2/eval/results/<hw>/slo_calib_ruler_16k_out1024_n30_qps0.02_seed0_metrics.json'))
+m = json.load(open('experiments_v2/eval/results/<hw>/slo_calib_ruler_16k_out1024_n15_qps0.005_seed0_metrics.json'))
 ttft = m['ttft_ms']['p95']
 tpot = m['tpot_ms']['p95']
-print(f'TTFT P95={ttft:.0f}ms (reuse existing TTFT SLO)')
-print(f'TPOT P95={tpot:.1f}ms')
+print(f'TTFT P95={ttft:.0f}ms, TPOT P95={tpot:.1f}ms')
+print(f'export E_M1_TTFT_TIGHT_MS={int(round(ttft*2))}')
+print(f'export E_M1_TTFT_NORMAL_MS={int(round(ttft*3))}')
+print(f'export E_M1_TTFT_LOOSE_MS={int(round(ttft*6))}')
 print(f'export E_M1_TPOT_TIGHT_MS={int(round(tpot*2))}')
 print(f'export E_M1_TPOT_NORMAL_MS={int(round(tpot*3))}')
 print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
@@ -340,10 +350,19 @@ print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
 
 Copy-paste the printed `export` lines into your shell.
 
-**Step 3 — full long-output sweep (~3 hours per machine)**
+**Step 3 — full long-output sweep (~7-8 hours per machine)**
 
-A6000 (TTFT thresholds default to A6000 calibration values
-5472/8208/16416, set inside the sweep script):
+QPS changes. At 1024 output each request lives roughly 30 s on
+A6000, so per-engine capacity drops to about 0.035 req/s. The
+short-output QPS values 0.5/1.0/2.0 would all be in 8x to 30x
+overload here. The long-output sweep uses 0.05/0.1/0.2 QPS instead,
+which spans roughly 70% to 280% of capacity.
+
+SLO thresholds. Both TTFT and TPOT come from this machine's
+long-output calibration in step 2. Do not reuse the short-output
+SLOs.
+
+A6000:
 ```bash
 cd /home/yzhong76/code/my-vllm-serving-system
 
@@ -354,16 +373,19 @@ rm -rf /dev/shm/vllm_ft_preempt_queue \
 
 HARDWARE_TAG=a6000 \
   FORCE_OUTPUT_TOKENS=1024 \
-  E_M1_TPOT_TIGHT_MS=<from step 2> \
-  E_M1_TPOT_NORMAL_MS=<from step 2> \
-  E_M1_TPOT_LOOSE_MS=<from step 2> \
+  E_M1_QPS_SWEEP="0.05 0.1 0.2" \
+  E_M1_TTFT_TIGHT_MS=<from A6000 step 2> \
+  E_M1_TTFT_NORMAL_MS=<from A6000 step 2> \
+  E_M1_TTFT_LOOSE_MS=<from A6000 step 2> \
+  E_M1_TPOT_TIGHT_MS=<from A6000 step 2> \
+  E_M1_TPOT_NORMAL_MS=<from A6000 step 2> \
+  E_M1_TPOT_LOOSE_MS=<from A6000 step 2> \
   nohup bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
   > /tmp/a6000_ruler16k_out1024_sweep.log 2>&1 &
 echo "PID: $!"
 ```
 
-L40S (must explicitly export L40S TTFT thresholds because the script
-defaults are A6000-derived):
+L40S:
 ```bash
 cd <repo path on L40S>
 
@@ -374,12 +396,13 @@ rm -rf /dev/shm/vllm_ft_preempt_queue \
 
 HARDWARE_TAG=l40s \
   FORCE_OUTPUT_TOKENS=1024 \
-  E_M1_TTFT_TIGHT_MS=3335 \
-  E_M1_TTFT_NORMAL_MS=5003 \
-  E_M1_TTFT_LOOSE_MS=10006 \
-  E_M1_TPOT_TIGHT_MS=<from step 2> \
-  E_M1_TPOT_NORMAL_MS=<from step 2> \
-  E_M1_TPOT_LOOSE_MS=<from step 2> \
+  E_M1_QPS_SWEEP="0.05 0.1 0.2" \
+  E_M1_TTFT_TIGHT_MS=<from L40S step 2> \
+  E_M1_TTFT_NORMAL_MS=<from L40S step 2> \
+  E_M1_TTFT_LOOSE_MS=<from L40S step 2> \
+  E_M1_TPOT_TIGHT_MS=<from L40S step 2> \
+  E_M1_TPOT_NORMAL_MS=<from L40S step 2> \
+  E_M1_TPOT_LOOSE_MS=<from L40S step 2> \
   nohup bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
   > /tmp/l40s_ruler16k_out1024_sweep.log 2>&1 &
 echo "PID: $!"
