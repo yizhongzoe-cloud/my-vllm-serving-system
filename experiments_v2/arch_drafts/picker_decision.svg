@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" width="800" height="480" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 528" width="800" height="528" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="13">
   <defs>
     <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker>
   </defs>
@@ -80,7 +80,11 @@
   <text x="364" y="188" text-anchor="middle" font-size="11" font-weight="600" fill="#1a202c">gap = slack(R_v) − slack(R_u) = 1.8 s</text>
 
   <!-- preempt rule box -->
-  <rect x="40" y="416" width="720" height="50" rx="6" fill="#fef9e7" stroke="#b7791f" stroke-width="1.2"/>
-  <text x="56" y="436" font-size="12" font-weight="700" fill="#744210">Preempt R_v iff all three hold:</text>
-  <text x="76" y="455" font-family="Consolas, 'Courier New', monospace" font-size="11" fill="#744210">gap &gt; δ + replay_cost(R_v)  <tspan font-weight="700">AND</tspan>  num_checkpointed_tokens(R_v) &gt; 0  <tspan font-weight="700">AND</tspan>  time_since_last_preempt(R_v) &gt; cooldown</text>
+  <rect x="40" y="416" width="720" height="98" rx="6" fill="#fef9e7" stroke="#b7791f" stroke-width="1.2"/>
+  <text x="56" y="436" font-size="12" font-weight="700" fill="#744210">Preempt R_v iff all five hold:</text>
+  <text x="76" y="453" font-family="Consolas, 'Courier New', monospace" font-size="10.5" fill="#744210">(1) gap &gt; δ + replay_cost(R_v)        where replay_cost = switch_cost + per_token_ms × replay_tokens</text>
+  <text x="76" y="468" font-family="Consolas, 'Courier New', monospace" font-size="10.5" fill="#744210">(2) host_manifest_exists(R_v)         (eager counter lies; use the file)</text>
+  <text x="76" y="483" font-family="Consolas, 'Courier New', monospace" font-size="10.5" fill="#744210">(3) slack(R_u) &lt; r × S_TTFT(R_u)      (head genuinely close to deadline; r = 0.10)</text>
+  <text x="76" y="498" font-family="Consolas, 'Courier New', monospace" font-size="10.5" fill="#744210">(4) some peer engine has spare capacity   (kv_usage &lt; 0.85 ∧ running &lt; 0.8 × max_seqs ∧ alive)</text>
+  <text x="76" y="513" font-family="Consolas, 'Courier New', monospace" font-size="10.5" fill="#744210">(5) time_since_last_preempt(R_v) &gt; cooldown</text>
 </svg>

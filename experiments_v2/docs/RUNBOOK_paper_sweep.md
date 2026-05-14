@@ -274,6 +274,111 @@ many fires with `host_manifest_exists=False`, the manifest guard is
 broken. If you see zero fires across all 3 seeds, the workload is
 not stressful enough — bump QPS or tighten SLO.
 
+### 4f. Long-output variant (RULER 16K + 1024-token forced output)
+
+The default RULER NIAH workload outputs only ~128 tokens per request,
+so the request finishes shortly after prefill ends and the picker
+mostly preempts mid-prefill victims. To exercise the mid-decode
+resume path (cross-engine reroute preserving partial output), we
+override `max_tokens=1024` and set `ignore_eos=True` so every
+request decodes the full 1024 tokens regardless of natural answer
+length. Files get an `_out1024` suffix so they coexist with the
+default 128-output runs.
+
+**Step 1 — calibration (~30 min per machine, run once)**
+
+A6000:
+```bash
+EVAL_RESULTS_DIR=experiments_v2/eval/results/a6000 \
+PYTHONPATH=. \
+python -m experiments_v2.eval.scripts.slo_calibration \
+  --dataset ruler_16k \
+  --num-requests 30 \
+  --arrival-rate-qps 0.02 \
+  --seed 0 \
+  --force-max-output-tokens 1024 \
+  --ignore-eos
+```
+
+L40S: same command but `EVAL_RESULTS_DIR=experiments_v2/eval/results/l40s`.
+
+Output:
+`<results_dir>/slo_calib_ruler_16k_out1024_n30_qps0.02_seed0_metrics.json`
+
+**Step 2 — derive new TPOT SLO thresholds**
+
+TTFT thresholds reuse the existing RULER 16K values (prefill is
+unchanged). Only TPOT needs to be re-calibrated because KV grows
+during the longer decode and TPOT P95 climbs accordingly.
+
+```bash
+python -c "
+import json
+m = json.load(open('experiments_v2/eval/results/<hw>/slo_calib_ruler_16k_out1024_n30_qps0.02_seed0_metrics.json'))
+ttft = m['ttft_ms']['p95']
+tpot = m['tpot_ms']['p95']
+print(f'TTFT P95={ttft:.0f}ms (reuse existing TTFT SLO)')
+print(f'TPOT P95={tpot:.1f}ms')
+print(f'export E_M1_TPOT_TIGHT_MS={int(round(tpot*2))}')
+print(f'export E_M1_TPOT_NORMAL_MS={int(round(tpot*3))}')
+print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
+"
+```
+
+Copy-paste the printed `export` lines into your shell.
+
+**Step 3 — full long-output sweep**
+
+A6000:
+```bash
+cd /home/yzhong76/code/my-vllm-serving-system
+
+rm -rf /dev/shm/vllm_ft_preempt_queue \
+       /dev/shm/vllm_ft_engine_status \
+       /dev/shm/vllm_ft_req_map \
+       /dev/shm/vllm_ft_checkpoints
+
+HARDWARE_TAG=a6000 \
+  FORCE_OUTPUT_TOKENS=1024 \
+  E_M1_TPOT_TIGHT_MS=<from step 2> \
+  E_M1_TPOT_NORMAL_MS=<from step 2> \
+  E_M1_TPOT_LOOSE_MS=<from step 2> \
+  nohup bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
+  > /tmp/a6000_ruler16k_out1024_sweep.log 2>&1 &
+echo "PID: $!"
+```
+
+L40S: same command but `HARDWARE_TAG=l40s` and the L40S-derived
+TTFT thresholds too (3335/5003/10006). Estimated total time ~3
+hours per machine.
+
+Result files go to
+`experiments_v2/eval/results/<hw>/e_m1_<baseline>_ruler_16k_out1024_qps*_n60_seed*_metrics.json`.
+
+**Step 4 — analyze**
+
+Compare with the default 128-output runs to show that mid-decode
+resume adds value when output is long:
+
+```bash
+python -c "
+import json, statistics
+from pathlib import Path
+for hw in ['a6000', 'l40s']:
+    print(f'=== {hw} long-output (1024) ===')
+    for qps in [0.5, 1.0, 2.0]:
+        for b in ['vllm_fcfs', 'ours_no_picker', 'ours']:
+            slos = []
+            for s in [0,1,2]:
+                p = f'experiments_v2/eval/results/{hw}/e_m1_{b}_ruler_16k_out1024_qps{qps}_n60_seed{s}_metrics.json'
+                if Path(p).exists():
+                    slos.append(json.load(open(p))['slo_met_pct'])
+            if slos:
+                print(f'  qps={qps} {b:16s}: {statistics.mean(slos):.1f}%')
+        print()
+"
+```
+
 ---
 
 ## 5. Which SLO each experiment uses

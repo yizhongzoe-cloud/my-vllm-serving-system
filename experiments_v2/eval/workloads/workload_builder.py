@@ -62,6 +62,7 @@ def build_schedule(
     arrival_rate_qps: float,
     seed: int = 0,
     max_tokens_cap: int = DEFAULT_MAX_OUTPUT_CAP,
+    force_max_tokens: int | None = None,
 ) -> list[tuple[float, str, int]]:
     """Build a Poisson arrival schedule of (offset_s, prompt, max_tokens).
 
@@ -73,6 +74,15 @@ def build_schedule(
               inter-arrival sequence.
         max_tokens_cap: cap on per-request max_tokens, so a long expected
                         output in the dataset doesn't blow up our runs.
+        force_max_tokens: if set, OVERRIDE each request's max_tokens to
+                          this value, ignoring the dataset's
+                          expected_output_tokens. Used for long-output
+                          experiments where we want every request to
+                          decode N tokens regardless of the natural
+                          answer length (must be paired with
+                          ignore_eos=True on the client side, otherwise
+                          the model emits EOS early and never reaches
+                          this cap).
 
     Returns:
         List of (arrival_offset_s, prompt_text, max_tokens), sorted by
@@ -110,8 +120,15 @@ def build_schedule(
     # Step 3: assemble.
     schedule: list[tuple[float, str, int]] = []
     for i, rec in enumerate(records):
-        out_tokens = int(rec.get("expected_output_tokens", max_tokens_cap))
-        max_tokens = max(1, min(max_tokens_cap, out_tokens))
+        if force_max_tokens is not None:
+            # Caller wants a deterministic long-output workload — use
+            # the override directly, ignore dataset's natural answer
+            # length. Caller MUST set ignore_eos=True on the client
+            # for this to actually generate `force_max_tokens` tokens.
+            max_tokens = max(1, int(force_max_tokens))
+        else:
+            out_tokens = int(rec.get("expected_output_tokens", max_tokens_cap))
+            max_tokens = max(1, min(max_tokens_cap, out_tokens))
         schedule.append((float(offsets[i]), rec["prompt"], max_tokens))
     return schedule
 

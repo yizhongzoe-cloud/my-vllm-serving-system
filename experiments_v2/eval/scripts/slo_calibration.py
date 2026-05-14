@@ -33,7 +33,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from experiments_v2.eval.workloads.poisson_workload import (  # noqa: E402
+from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
     build_schedule, summarize_schedule,
 )
 
@@ -114,12 +114,13 @@ class Client(threading.Thread):
     """One non-streaming RULER 64K completion against a specific engine."""
 
     def __init__(self, idx: int, engine_url: str, prompt: str,
-                 max_tokens: int) -> None:
+                 max_tokens: int, ignore_eos: bool = False) -> None:
         super().__init__(daemon=True)
         self.idx = idx
         self.engine_url = engine_url
         self.prompt = prompt
         self.max_tokens = max_tokens
+        self.ignore_eos = ignore_eos
         self.fire_ts: float | None = None
         self.end_ts: float | None = None
         self.status_code: int | None = None
@@ -127,12 +128,15 @@ class Client(threading.Thread):
         self.completion_len: int = 0
 
     def run(self) -> None:
-        payload = json.dumps({
+        body: dict = {
             "model": MODEL,
             "prompt": self.prompt,
             "max_tokens": self.max_tokens,
             "temperature": 0.0,
-        }).encode("utf-8")
+        }
+        if self.ignore_eos:
+            body["ignore_eos"] = True
+        payload = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
             self.engine_url + "/v1/completions",
             data=payload,
@@ -204,9 +208,21 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset", default="ruler_64k",
                         choices=["ruler_64k", "ruler_16k", "sharegpt"])
+    parser.add_argument("--force-max-output-tokens", type=int, default=None,
+                        help="Override per-request max_tokens (paired with "
+                             "--ignore-eos) for long-output calibration.")
+    parser.add_argument("--ignore-eos", action="store_true",
+                        help="Set ignore_eos=True so model decodes full "
+                             "max_tokens regardless of EOS.")
     args = parser.parse_args()
 
-    tag = (f"slo_calib_{args.dataset}_n{args.num_requests}_"
+    # Tag pieces: dataset, optionally a "_out<N>" suffix for long-output
+    # variants. Default (no override) keeps the original tag so existing
+    # calibration files stay valid.
+    dataset_tag = args.dataset
+    if args.force_max_output_tokens is not None:
+        dataset_tag = f"{args.dataset}_out{int(args.force_max_output_tokens)}"
+    tag = (f"slo_calib_{dataset_tag}_n{args.num_requests}_"
            f"qps{args.arrival_rate_qps}_seed{args.seed}")
     engine_0_log = RESULTS_DIR / f"{tag}_engine0.log"
     engine_1_log = RESULTS_DIR / f"{tag}_engine1.log"
@@ -218,6 +234,7 @@ def main() -> int:
         num_requests=args.num_requests,
         arrival_rate_qps=args.arrival_rate_qps,
         seed=args.seed,
+        force_max_tokens=args.force_max_output_tokens,
     )
     sched_summary = summarize_schedule(schedule)
     print(f"[calib] schedule built: {sched_summary}")
@@ -252,7 +269,8 @@ def main() -> int:
             if target_t > now:
                 time.sleep(target_t - now)
             engine_url = engine_urls[i % len(engine_urls)]
-            c = Client(i, engine_url, prompt, max_tokens)
+            c = Client(i, engine_url, prompt, max_tokens,
+                       ignore_eos=args.ignore_eos)
             c.start()
             clients.append(c)
         print(f"[calib] fired {len(clients)} requests; waiting on completion")

@@ -355,25 +355,35 @@ client → Router 进程 (CPU, 1 个)
 | `last_preempted_at(r)` | 最近一次被踢的时间戳；从未被踢则为 −∞ | engine picker 写 |
 | **派生量（公式计算）** | | |
 | `slack(r, t)` | 距离 SLO 超时还有多少时间（见公式） | scheduler 算 |
-| `replay_cost(r, t) = (num_output_tokens − num_checkpointed_tokens) × avg_TPOT(r)` | 如果踢了它，恢复时要重跑的 decode 时间 | scheduler 算 |
+| `replay_cost(r, t) = switch_cost + (num_computed_tokens − num_checkpointed_tokens) × per_token_ms` | 踢了它的全部代价：固定切换开销 + 变量重算成本 | scheduler 算 |
+| `switch_cost` | 每次 fire 的固定成本：preempt 状态机 + 跨引擎 HTTP + V3 reload + admit。env 可调，默认 1000ms | `FT_PICKER_SWITCH_COST_MS` |
 | **决策变量（scheduler 输出）** | | |
 | `head` | 选出来的 waiting 队列里最急的请求 | engine picker |
 | `victim` | 选出来的 running 里最从容的请求 | engine picker |
 | `preempt ∈ {0,1}` | 这一步是否真踢 victim | engine picker |
 | `target_engine` | router 把请求派给哪个 engine | router |
 | **系统常数（可调参数）** | | |
-| `δ` | hysteresis 阈值，差距大于 δ 才踢人（防抖） | **1000ms 起步（后续 sweep 调）** |
-| `cooldown` | 一个 req 被踢之后多久内不能再被踢（防抖） | **5s 起步（后续 sweep 调）** |
+| `δ` | hysteresis 阈值，差距大于 δ 才踢人（防抖） | **1000ms 起步**（`SLO_PRIORITY_PREEMPT_MIN_GAP_MS`）|
+| `cooldown` | 一个 req 被踢之后多久内不能再被踢（防抖） | **5s 起步**（`SLO_PRIORITY_PREEMPT_PER_REQ_COOLDOWN_MS`）|
+| `switch_cost` | 每次 fire 的固定切换开销，加进 replay_cost | **1000ms 起步**（`FT_PICKER_SWITCH_COST_MS`，sweep 调） |
+| `head_danger_ratio` | head 离截止时间 < `ratio × S_TTFT` 才允许踢 | **0.10 起步**（`FT_PICKER_HEAD_DANGER_RATIO`，sweep 调）|
+| `peer_kv_usage_threshold` | peer engine kv_usage > 此阈值就当过载 | **0.85**（`FT_PEER_OVERLOAD_KV_USAGE`）|
+| `peer_load_gate_enable` | 是否启用 peer-load gate（ablation 用）| **1=开**（`FT_PICKER_PEER_LOAD_GATE`）|
+| `head_danger_gate_enable` | 是否启用 head-danger gate（ablation 用）| **1=开**（`FT_PICKER_HEAD_DANGER_GATE`）|
+| `cross_engine_output_resume` | 跨引擎 reroute 时是否恢复 output token id（mid-decode 恢复）| **1=开**（`FT_CROSS_ENGINE_OUTPUT_RESUME`）|
 | **硬件容量（vllm 底层管，scheduler 不显式建模）** | | |
 | `M_kv` | GPU KV pool 容量（block 数） | vllm 启动算 |
 | `kv_blocks(r)` | 请求当前占多少 KV block | vllm |
 | **集合** | | |
 | `waiting`, `running` | engine 内部的 waiting / running 队列 | vllm |
 | `alive engines` | router 认为还活着的 engine 集合 | router 读 shm status |
-| **Router-engine 通信总线（shm 文件）** | | |
-| `/dev/shm/vllm_ft_engine_status/engine_<id>.json` | 每个 engine 每 ~100ms 写一份：`{alive, running_count, waiting_count, kv_usage, ts}` | engine 写，router 读 |
-| `/dev/shm/vllm_ft_req_map/<user_req_id>` | engine 收到请求后立刻写：`{internal_req_id, engine_id, start_ts}` | engine 写，router 读（reroute 用） |
-| `/dev/shm/vllm_ft_checkpoints/<internal_req_id>/...` | publish 的 manifest + chunk + latest 三件套 | engine 写 + restore 时读 |
+| **shm 通信总线** | | |
+| `/dev/shm/vllm_ft_engine_status/engine_<id>.json` | 每个 engine 每 200ms 写一份：`{alive, running, waiting, kv_usage, ts}` | engine 写，**router 读（dead detection + dispatch）+ 其他 engine 读（picker peer-load gate）** |
+| `/dev/shm/vllm_ft_req_map/<router_req_id>` | engine 收到请求后立刻写：`{internal_req_id, engine_id, start_ts}` | engine 写，router 读（reroute 用） |
+| `/dev/shm/vllm_ft_preempt_queue/<req_id>.json` | engine 的 picker 决定踢人后写：`{engine_id, internal_req_id, router_req_id, num_checkpointed_tokens, preempt_ts}` | engine 写,router 读（触发跨引擎 reroute） |
+| `/dev/shm/vllm_ft_checkpoints/<internal_req_id>/...` | publish 的 manifest + chunk + latest 三件套。**manifest 加了 `output_token_ids` 字段,跨引擎 reroute 时新 engine 用它接续 mid-decode 状态**| engine 写 + restore 时读 |
+
+**Engine-to-engine 通信**：picker 决定踢人前同步读一次 peer 的 engine_status 文件（约 60μs/次,picker fire 稀疏,可忽略）。**没有专门的 engine ↔ engine 通道**,共用 router 已经在用的那批 shm 文件。设计原则：单向 pull（picker 想看时去读），不用 push 不用通知机制。
 
 ---
 
@@ -432,10 +442,12 @@ Engine 端（每次 `schedule()`）：
   - `TTFT(r) ≤ S_TTFT(r)`，`TPOT(r) ≤ S_TPOT(r)`（rerouted req 同样用这两个 SLO，不另设阈值）
 - KV pool 硬约束: `Σ_{r ∈ running} kv_blocks(r) ≤ M_kv`
 - **无 admission 约束**：所有请求都入系统（不像 QLM 用 backpressure 拒、不像 Scorpio 用 TTFT guard 拒）
-- **踢人触发条件（engine 端核心）** —— 三条都满足才踢：
-  - `slack(victim) − slack(head) > δ + replay_cost(victim)`（hysteresis，δ ≈ 1000ms 起步，paper ablate；加上 replay_cost 才能真正算"踢了划不划算"）
-  - `num_checkpointed_tokens(victim) > 0`（必须有 checkpoint 兜底，否则降级走 vanilla preempt = recompute）
-  - `now − last_preempted_at(victim) > cooldown`（cooldown ≈ 5s 起步，防同一个 req 被反复踢）
+- **踢人触发条件（engine 端核心）** —— **五条**都满足才踢：
+  1. `slack(victim) − slack(head) > δ + replay_cost(victim)`（hysteresis 阈值,δ ≈ 1000ms 起步，paper ablate；加上 replay_cost = switch_cost + 变量重算成本 才能真正算"踢了划不划算"）
+  2. **manifest 文件在 `/dev/shm` 上真存在**（必须有 host checkpoint 兜底，否则跨引擎 reroute 落回到全 prefill。这是 `num_checkpointed_tokens > 0` 检查的替代：counter 是 eager 提前加的、撒谎；manifest 文件是 worker 真写完才出现的、真理来源）
+  3. **head 离自己 TTFT 截止时间已经不到 `FT_PICKER_HEAD_DANGER_RATIO` × S_TTFT**（默认 10%。防止低负载下队列自然能 admit 时乱踢人。Niyama 启发的"绝对危险"检查）
+  4. **对面引擎有空位接 victim**（peer-load gate：扫 `/dev/shm/vllm_ft_engine_status/`，至少一台 peer engine alive + 心跳新鲜 < 2s + kv_usage < 0.85 + running < 0.8 × max_num_seqs。否则踢出去也是堵在对面）
+  5. `now − last_preempted_at(victim) > cooldown`（cooldown ≈ 5s 起步，防同一个 req 被反复踢）
 - shm publish 一致性: `published_blocks ≤ stable_full_blocks`（不 publish 还没稳的 block，避免 reader 读半成品）
 - Cross-engine restore 前提: shm `latest_rank0` + manifest + chunk 三件套都 visible（atomic write 保证）
 

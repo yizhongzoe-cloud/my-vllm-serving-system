@@ -110,10 +110,14 @@ Layer 1 是 in-process 的 `KVCheckpointPool`，存 pinned host memory。同 eng
 **Para 3.3.1 —— Slack 作为单一刻度**：
 定义 `slack(r, t)` = 请求 `r` 还有多少 wall-clock 时间才会错过 SLO。还没出第一个 token 的请求用 TTFT slack = `S_TTFT − elapsed_since_arrival`；已经在 decode 的请求用 TPOT slack = `S_TPOT − avg_per_token_so_far`。Slack 把两种 SLO 压到一个可比刻度上。关键：slack 是从 runtime *测* 出来的，不是从离线 profile 的 latency 模型预测出来的 —— §2.2.3 里宣告的从 prediction-heavy 到 measurement-heavy 的转变，在这里落地。
 
-**Para 3.3.2 —— Picker 规则和三道闸**：
-每个 scheduler step，从 running 队列里挑 slack 最大的（最闲的）、从 waiting 队列里挑 slack 最小的（最紧的）。当且仅当
-`slack(victim) − slack(head) > δ + replay_cost(victim) AND num_checkpointed_tokens(victim) > 0 AND time_since_last_preempt(victim) > cooldown`
-成立时才抢占。三道闸各管一个失败模式：hysteresis δ 防来回抢；`replay_cost`（= 新 engine 要补跑的 token 数 × TPOT）保证只有划算的交易才触发；cooldown 防止同一 victim 每个 step 都被翻牌。三者都可调，但默认值（δ = 1 秒、cooldown = 5 秒）在我们所有实验中表现稳定。
+**Para 3.3.2 —— Picker 规则和五道闸**：
+每个 scheduler step，从 running 队列里挑 slack 最大的（最闲的）、从 waiting 队列里挑 slack 最小的（最紧的）。**五条都满足才抢占：**
+(i) `slack(victim) − slack(head) > δ + replay_cost(victim)`，其中 `replay_cost = switch_cost + (num_computed_tokens − num_checkpointed_tokens) × per_token_ms`。`switch_cost` 是每次 fire 的固定 wall-clock 开销（preempt 状态机 + 跨引擎 HTTP forward + V3 reload + admit），默认 1000ms，按实测 P95 校准。`δ` 是 hysteresis（默认 1 秒）；
+(ii) victim 的 host checkpoint manifest 文件**真的存在**于 `/dev/shm`。`num_checkpointed_tokens` 计数器是 save RPC *发起*时就 eager 加上的，而 manifest 文件只有 worker 实际刷完 bytes 才出现。读文件等于用跨引擎 reroute 同一个真理来源，避免 picker fire 后悄悄 fallback 到全 prefill；
+(iii) 等待队列的 head 真的离截止时间不远了，即 `slack(head) < r × S_TTFT(head)`，`r` 默认 0.10（Niyama 风格的绝对截止时间检查）。没有这一道闸，picker 在 victim 比 head 闲很多时就会 fire，即便 head 远没到 SLO 危险线、队列自然推进完全来得及；
+(iv) **至少有一台 peer engine 有空位接 victim**。Picker stat `/dev/shm/vllm_ft_engine_status/engine_<peer>.json`（跟 router 死亡检测共用同一份心跳文件），要求 `alive` + 心跳新鲜 + `kv_usage < 0.85` + `running < 0.8 × max_num_seqs`。没有这一道闸，picker 会盲目把 victim 推到饱和的 peer 上排队（RULER 16K 实测 P95 等几十秒）；
+(v) `now − last_preempted_at(victim) > cooldown`（默认 5 秒），防止同一 victim 被反复翻牌。
+五道闸分别封堵五个我们实验中观察到的失败模式：(i) 交易抖动、(ii) 静默 fallback 到 reprefill、(iii) 健康负载下乱踢、(iv) 把 victim 推到饱和 peer、(v) 同一 victim 反复被踢。五个阈值都可调；默认值每个硬件 calibrate 一次后在所有 SLO sweep 中固定不变。
 
 **Para 3.3.3 —— Cheap preempt 解锁了什么（具体表述）**：
 没有 cheap preempt 的话，scheduler 必须依赖离线 profile 信号（Scorpio 的 α/β/γ/δ admission gate、JITServe 的 `v_token`、Llumnix 的 headroom 常量）。有 cheap preempt 之后，scheduler 在 runtime 观察 slack 漂移并 reactive 修正 —— 抢最闲的 tail，让位给最紧的 head。Slack 公式承担的角色跟那些 prior 预测信号相同，但**来自测量而不是离线 profile**，砍掉了一条脆弱的依赖以及附带的离线 profile pipeline。

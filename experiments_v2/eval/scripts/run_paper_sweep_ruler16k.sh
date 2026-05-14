@@ -26,6 +26,12 @@ E_M1_TPOT_TIGHT_MS="${E_M1_TPOT_TIGHT_MS:-49}"
 E_M1_TPOT_NORMAL_MS="${E_M1_TPOT_NORMAL_MS:-73}"
 E_M1_TPOT_LOOSE_MS="${E_M1_TPOT_LOOSE_MS:-146}"
 
+# Long-output variant: when FORCE_OUTPUT_TOKENS is set, every request
+# is forced to decode that many tokens (paired with ignore_eos). Output
+# files get an "_out<N>" suffix so they don't collide with the natural-
+# output runs. Leave unset for the default 128-token NIAH workload.
+FORCE_OUTPUT_TOKENS="${FORCE_OUTPUT_TOKENS:-}"
+
 RESULTS_DIR="experiments_v2/eval/results/${HARDWARE_TAG}"
 mkdir -p "${RESULTS_DIR}"
 
@@ -39,6 +45,9 @@ echo "[master] results dir:  ${RESULTS_DIR}"
 echo "[master] seeds:        ${SEEDS}"
 echo "[master] QPS sweep:    ${E_M1_QPS_SWEEP}"
 echo "[master] baselines:    ${BASELINES_M1}"
+if [ -n "${FORCE_OUTPUT_TOKENS}" ]; then
+  echo "[master] FORCE_OUTPUT_TOKENS=${FORCE_OUTPUT_TOKENS} (long-output variant with ignore_eos)"
+fi
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 cleanup_shm() {
@@ -52,6 +61,11 @@ echo ""
 echo "================================================"
 echo "[master] E_M1 — RULER_16K rate sweep"
 echo "================================================"
+EXTRA_ARGS=""
+if [ -n "${FORCE_OUTPUT_TOKENS}" ]; then
+  EXTRA_ARGS="--force-max-output-tokens ${FORCE_OUTPUT_TOKENS} --ignore-eos"
+fi
+
 for seed in ${SEEDS}; do
   for qps in ${E_M1_QPS_SWEEP}; do
     for baseline in ${BASELINES_M1}; do
@@ -70,6 +84,7 @@ for seed in ${SEEDS}; do
         --tpot-slo-tight-ms ${E_M1_TPOT_TIGHT_MS} \
         --tpot-slo-normal-ms ${E_M1_TPOT_NORMAL_MS} \
         --tpot-slo-loose-ms ${E_M1_TPOT_LOOSE_MS} \
+        ${EXTRA_ARGS} \
         2>&1 || echo "[master] WARNING: run failed (baseline=${baseline} qps=${qps} seed=${seed})"
     done
   done

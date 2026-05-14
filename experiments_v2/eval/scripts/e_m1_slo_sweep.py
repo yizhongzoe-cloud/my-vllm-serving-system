@@ -119,7 +119,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from experiments_v2.eval.workloads.poisson_workload import (  # noqa: E402
+from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
     build_schedule, summarize_schedule,
 )
 
@@ -268,7 +268,8 @@ class Client(threading.Thread):
 
     def __init__(self, idx: int, target_url: str, prompt: str,
                  max_tokens: int, ttft_slo_ms: float | None,
-                 tpot_slo_ms: float | None) -> None:
+                 tpot_slo_ms: float | None,
+                 ignore_eos: bool = False) -> None:
         super().__init__(daemon=True)
         self.idx = idx
         self.target_url = target_url
@@ -276,6 +277,7 @@ class Client(threading.Thread):
         self.max_tokens = max_tokens
         self.ttft_slo_ms = ttft_slo_ms
         self.tpot_slo_ms = tpot_slo_ms
+        self.ignore_eos = ignore_eos
         self.fire_ts: float | None = None
         self.end_ts: float | None = None
         self.status_code: int | None = None
@@ -289,6 +291,12 @@ class Client(threading.Thread):
             "max_tokens": self.max_tokens,
             "temperature": 0.0,
         }
+        if self.ignore_eos:
+            # vLLM's OpenAI server accepts ignore_eos as a top-level
+            # field; with it set the model decodes max_tokens tokens
+            # regardless of any EOS the sampler would emit. Required
+            # to make a "force long output" stress workload.
+            body["ignore_eos"] = True
         if self.ttft_slo_ms is not None or self.tpot_slo_ms is not None:
             xargs = {}
             if self.ttft_slo_ms is not None:
@@ -389,6 +397,18 @@ def main() -> int:
     parser.add_argument("--tpot-slo-tight-ms", type=float, default=None)
     parser.add_argument("--tpot-slo-normal-ms", type=float, default=None)
     parser.add_argument("--tpot-slo-loose-ms", type=float, default=None)
+    parser.add_argument("--force-max-output-tokens", type=int, default=None,
+                        help="If set, override every request's max_tokens "
+                             "to this value (ignore the dataset's "
+                             "expected_output_tokens). Pair with "
+                             "--ignore-eos to actually generate that many "
+                             "tokens — otherwise the sampler may emit EOS "
+                             "early. Used for long-output stress runs.")
+    parser.add_argument("--ignore-eos", action="store_true",
+                        help="Set ignore_eos=True on every request so the "
+                             "model decodes the full max_tokens regardless "
+                             "of EOS. Required to realize a long-output "
+                             "workload built with --force-max-output-tokens.")
     parser.add_argument("--max-model-len", type=int, default=None,
                         help="Engine --max-model-len. Auto-set by dataset.")
     args = parser.parse_args()
@@ -450,7 +470,14 @@ def main() -> int:
     else:
         max_model_len = args.max_model_len
 
-    tag = (f"e_m1_{args.baseline}_{args.dataset}_"
+    # Tag pieces: dataset, optionally an output-length tag for
+    # long-output sweeps (e.g. "ruler_16k_out1024"). Keeping the
+    # default (no override) producing the un-suffixed name avoids
+    # invalidating existing results on disk.
+    dataset_tag = args.dataset
+    if args.force_max_output_tokens is not None:
+        dataset_tag = f"{args.dataset}_out{int(args.force_max_output_tokens)}"
+    tag = (f"e_m1_{args.baseline}_{dataset_tag}_"
            f"qps{args.arrival_rate_qps}_n{args.num_requests}_seed{args.seed}")
     engine_0_log = RESULTS_DIR / f"{tag}_engine0.log"
     engine_1_log = RESULTS_DIR / f"{tag}_engine1.log"
@@ -462,6 +489,7 @@ def main() -> int:
         num_requests=args.num_requests,
         arrival_rate_qps=args.arrival_rate_qps,
         seed=args.seed,
+        force_max_tokens=args.force_max_output_tokens,
     )
     sched_summary = summarize_schedule(schedule)
     print(f"[E_M1] schedule: {sched_summary}")
@@ -532,7 +560,8 @@ def main() -> int:
                 client_ttft_slo = None
                 client_tpot_slo = None
             c = Client(i, engine_url, prompt, max_tokens,
-                       client_ttft_slo, client_tpot_slo)
+                       client_ttft_slo, client_tpot_slo,
+                       ignore_eos=args.ignore_eos)
             c.start()
             clients.append(c)
         print(f"[E_M1] fired {len(clients)} requests; waiting completion")

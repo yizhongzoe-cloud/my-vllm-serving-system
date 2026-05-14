@@ -41,7 +41,7 @@ experiments_v2/eval/
     e_d1_disruption_demo.py  # 已跑过
     slo_calibration.py       # 后台跑中
   workloads/
-    poisson_workload.py      # 通用 Poisson + 数据集加载
+    workload_builder.py      # 数据集加载 + Poisson 到达 + 请求 schedule 拼装
   analysis/
     aggregate.py             # 聚合 JSON results 出 mean±std 表
     plot_em1.py              # 主图 SLO_met vs QPS 折线
