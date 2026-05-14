@@ -285,10 +285,11 @@ request decodes the full 1024 tokens regardless of natural answer
 length. Files get an `_out1024` suffix so they coexist with the
 default 128-output runs.
 
-**Step 1 — calibration (~30 min per machine, run once)**
+**Step 1 — calibration (~30 min per machine, run once each)**
 
 A6000:
 ```bash
+cd /home/yzhong76/code/my-vllm-serving-system
 EVAL_RESULTS_DIR=experiments_v2/eval/results/a6000 \
 PYTHONPATH=. \
 python -m experiments_v2.eval.scripts.slo_calibration \
@@ -300,7 +301,19 @@ python -m experiments_v2.eval.scripts.slo_calibration \
   --ignore-eos
 ```
 
-L40S: same command but `EVAL_RESULTS_DIR=experiments_v2/eval/results/l40s`.
+L40S (after `git pull origin zoe/disruption`):
+```bash
+cd <repo path on L40S>
+EVAL_RESULTS_DIR=experiments_v2/eval/results/l40s \
+PYTHONPATH=. \
+python -m experiments_v2.eval.scripts.slo_calibration \
+  --dataset ruler_16k \
+  --num-requests 30 \
+  --arrival-rate-qps 0.02 \
+  --seed 0 \
+  --force-max-output-tokens 1024 \
+  --ignore-eos
+```
 
 Output:
 `<results_dir>/slo_calib_ruler_16k_out1024_n30_qps0.02_seed0_metrics.json`
@@ -327,9 +340,10 @@ print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
 
 Copy-paste the printed `export` lines into your shell.
 
-**Step 3 — full long-output sweep**
+**Step 3 — full long-output sweep (~3 hours per machine)**
 
-A6000:
+A6000 (TTFT thresholds default to A6000 calibration values
+5472/8208/16416, set inside the sweep script):
 ```bash
 cd /home/yzhong76/code/my-vllm-serving-system
 
@@ -348,12 +362,31 @@ HARDWARE_TAG=a6000 \
 echo "PID: $!"
 ```
 
-L40S: same command but `HARDWARE_TAG=l40s` and the L40S-derived
-TTFT thresholds too (3335/5003/10006). Estimated total time ~3
-hours per machine.
+L40S (must explicitly export L40S TTFT thresholds because the script
+defaults are A6000-derived):
+```bash
+cd <repo path on L40S>
 
-Result files go to
-`experiments_v2/eval/results/<hw>/e_m1_<baseline>_ruler_16k_out1024_qps*_n60_seed*_metrics.json`.
+rm -rf /dev/shm/vllm_ft_preempt_queue \
+       /dev/shm/vllm_ft_engine_status \
+       /dev/shm/vllm_ft_req_map \
+       /dev/shm/vllm_ft_checkpoints
+
+HARDWARE_TAG=l40s \
+  FORCE_OUTPUT_TOKENS=1024 \
+  E_M1_TTFT_TIGHT_MS=3335 \
+  E_M1_TTFT_NORMAL_MS=5003 \
+  E_M1_TTFT_LOOSE_MS=10006 \
+  E_M1_TPOT_TIGHT_MS=<from step 2> \
+  E_M1_TPOT_NORMAL_MS=<from step 2> \
+  E_M1_TPOT_LOOSE_MS=<from step 2> \
+  nohup bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
+  > /tmp/l40s_ruler16k_out1024_sweep.log 2>&1 &
+echo "PID: $!"
+```
+
+Result files:
+`experiments_v2/eval/results/<hw>/e_m1_<baseline>_ruler_16k_out1024_qps*_n60_seed*_metrics.json`
 
 **Step 4 — analyze**
 
