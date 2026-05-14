@@ -459,14 +459,21 @@ def main() -> int:
             return _TIER_CLASSES[idx % 3]  # fallback (post-hoc with extra events)
         return _labels[idx]
 
-    # Default max_model_len by dataset.
+    # Default max_model_len by dataset. The +N margin must cover the
+    # longest output we plan to generate. For long-output sweeps
+    # (--force-max-output-tokens), bump the margin so input+output fits.
+    if args.force_max_output_tokens is not None:
+        output_margin = int(args.force_max_output_tokens) + 256
+    else:
+        output_margin = 512  # default short-output (back-compat with prior runs)
     if args.max_model_len is None:
         if args.dataset == "ruler_64k":
-            max_model_len = 65536 + 256
+            max_model_len = 65536 + (256 if args.force_max_output_tokens is None
+                                     else output_margin)
         elif args.dataset == "ruler_16k":
-            max_model_len = 16384 + 512
+            max_model_len = 16384 + output_margin
         else:  # sharegpt
-            max_model_len = 4096 + 512
+            max_model_len = 4096 + output_margin
     else:
         max_model_len = args.max_model_len
 
