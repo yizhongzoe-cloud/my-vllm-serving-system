@@ -353,10 +353,11 @@ Copy-paste the printed `export` lines into your shell.
 **Step 3 — full long-output sweep (~7-8 hours per machine)**
 
 QPS changes. At 1024 output each request lives roughly 30 s on
-A6000, so per-engine capacity drops to about 0.035 req/s. The
-short-output QPS values 0.5/1.0/2.0 would all be in 8x to 30x
-overload here. The long-output sweep uses 0.05/0.1/0.2 QPS instead,
-which spans roughly 70% to 280% of capacity.
+A6000, so total cluster capacity (2 engines) drops to about
+0.07 req/s. The short-output QPS values 0.5/1.0/2.0 would all be in
+7x to 30x overload here. The long-output sweep uses 0.03/0.06/0.12
+QPS instead, which spans roughly 40% to 170% of capacity (light
+load, near saturation, moderate overload).
 
 SLO thresholds. Both TTFT and TPOT come from this machine's
 long-output calibration in step 2. Do not reuse the short-output
@@ -373,7 +374,7 @@ rm -rf /dev/shm/vllm_ft_preempt_queue \
 
 HARDWARE_TAG=a6000 \
   FORCE_OUTPUT_TOKENS=1024 \
-  E_M1_QPS_SWEEP="0.05 0.1 0.2" \
+  E_M1_QPS_SWEEP="0.03 0.06 0.12" \
   E_M1_TTFT_TIGHT_MS=<from A6000 step 2> \
   E_M1_TTFT_NORMAL_MS=<from A6000 step 2> \
   E_M1_TTFT_LOOSE_MS=<from A6000 step 2> \
@@ -396,7 +397,7 @@ rm -rf /dev/shm/vllm_ft_preempt_queue \
 
 HARDWARE_TAG=l40s \
   FORCE_OUTPUT_TOKENS=1024 \
-  E_M1_QPS_SWEEP="0.05 0.1 0.2" \
+  E_M1_QPS_SWEEP="0.03 0.06 0.12" \
   E_M1_TTFT_TIGHT_MS=<from L40S step 2> \
   E_M1_TTFT_NORMAL_MS=<from L40S step 2> \
   E_M1_TTFT_LOOSE_MS=<from L40S step 2> \
