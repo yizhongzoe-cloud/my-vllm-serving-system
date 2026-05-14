@@ -490,11 +490,58 @@ class EngineCore:
         ):
             prompt_tokens = len(request.prompt_token_ids or [])
             block_size = self.vllm_config.cache_config.block_size
-            # Largest block-aligned size that leaves >= 1 token to forward.
-            max_safe = ((prompt_tokens - 1) // block_size) * block_size
-            safe_ckpt = min(request.num_checkpointed_tokens, max_safe)
-            if safe_ckpt > 0:
-                request.num_checkpointed_tokens = safe_ckpt
+
+            # FT_CROSS_ENGINE_OUTPUT_RESUME=1 (default ON): when the
+            # origin engine's manifest carries output_token_ids, use
+            # the full block-aligned coverage (KV restore picks up
+            # mid-decode) instead of clamping to the prompt boundary.
+            # Setting =0 falls back to legacy prompt-end-resume.
+            output_resume_on = (
+                os.environ.get("FT_CROSS_ENGINE_OUTPUT_RESUME", "1") == "1"
+            )
+
+            resumed_output_ids: list[int] = []
+            used_full_ckpt = False
+            ckpt_tokens = int(request.num_checkpointed_tokens)
+            if output_resume_on:
+                manifest = self._ft_read_shared_manifest(
+                    request.original_internal_req_id
+                )
+                if manifest is not None:
+                    covered_tokens, output_ids = manifest
+                    # Router's num_checkpointed_tokens is what it read
+                    # from the same manifest at reroute time; usually
+                    # equal, but use the smaller of the two in case a
+                    # newer save snuck in between router-read and
+                    # engine-add_request and we want to be conservative.
+                    eff_ckpt = min(ckpt_tokens, covered_tokens)
+                    output_covered = eff_ckpt - prompt_tokens
+                    if eff_ckpt > 0 and output_covered > 0:
+                        # KV covers past prompt — there are output
+                        # tokens to resume.
+                        resumed_output_ids = output_ids[:output_covered]
+                        if len(resumed_output_ids) == output_covered:
+                            ckpt_tokens = eff_ckpt
+                            used_full_ckpt = True
+                        # else: manifest's output_ids list is shorter
+                        # than KV coverage suggests (legacy save with
+                        # missing output_token_ids field, or
+                        # truncated by from_json_dict). Don't try to
+                        # piece together a partial state — fall through
+                        # to the legacy prompt-only path. Trimming KV
+                        # to match the shorter id list would mis-align
+                        # position indices across the block boundary
+                        # and risk attention reading stale K/V from
+                        # the previous engine's later positions.
+
+            if used_full_ckpt:
+                # Mid-decode resume path: populate request output IDs
+                # so the receiving engine's CachedRequestState +
+                # scheduler resumed-admit path see a coherent
+                # (prompt + output) prefix.
+                request.num_checkpointed_tokens = ckpt_tokens
+                if resumed_output_ids:
+                    request.append_output_token_ids(resumed_output_ids)
                 request.status = RequestStatus.WAITING_FOR_RELOAD
                 if not hasattr(
                     self.scheduler, "slo_preempted_for_overlap_reload"
@@ -504,21 +551,50 @@ class EngineCore:
                     (request, request.num_checkpointed_tokens)
                 )
                 logger.info(
-                    "Cross-engine reroute: %s diverted to V3 reload state "
-                    "machine (original_internal_req_id=%s, ckpt_tokens=%d, "
-                    "prompt_tokens=%d)",
+                    "Cross-engine reroute (mid-decode): %s ckpt_tokens=%d "
+                    "(prompt=%d + output=%d) original_internal_req_id=%s",
                     request.request_id,
-                    request.original_internal_req_id,
-                    request.num_checkpointed_tokens,
+                    ckpt_tokens,
                     prompt_tokens,
+                    len(resumed_output_ids),
+                    request.original_internal_req_id,
                 )
             else:
-                logger.info(
-                    "Cross-engine reroute: %s prompt too short for "
-                    "checkpoint reuse (prompt_tokens=%d, block_size=%d); "
-                    "falling back to vanilla prefill",
-                    request.request_id, prompt_tokens, block_size,
-                )
+                # Legacy path: clamp to prompt boundary; new engine
+                # restarts decode from prompt end. Triggered when
+                # FT_CROSS_ENGINE_OUTPUT_RESUME=0, manifest absent,
+                # KV not yet past prompt, or output_token_ids missing.
+                # Largest block-aligned size that leaves >= 1 token
+                # to forward.
+                max_safe = ((prompt_tokens - 1) // block_size) * block_size
+                safe_ckpt = min(int(request.num_checkpointed_tokens), max_safe)
+                if safe_ckpt > 0:
+                    request.num_checkpointed_tokens = safe_ckpt
+                    request.status = RequestStatus.WAITING_FOR_RELOAD
+                    if not hasattr(
+                        self.scheduler, "slo_preempted_for_overlap_reload"
+                    ):
+                        self.scheduler.slo_preempted_for_overlap_reload = []
+                    self.scheduler.slo_preempted_for_overlap_reload.append(
+                        (request, request.num_checkpointed_tokens)
+                    )
+                    logger.info(
+                        "Cross-engine reroute (prompt-only): %s diverted "
+                        "to V3 reload state machine "
+                        "(original_internal_req_id=%s, ckpt_tokens=%d, "
+                        "prompt_tokens=%d)",
+                        request.request_id,
+                        request.original_internal_req_id,
+                        request.num_checkpointed_tokens,
+                        prompt_tokens,
+                    )
+                else:
+                    logger.info(
+                        "Cross-engine reroute: %s prompt too short for "
+                        "checkpoint reuse (prompt_tokens=%d, "
+                        "block_size=%d); falling back to vanilla prefill",
+                        request.request_id, prompt_tokens, block_size,
+                    )
 
         # Router-engine shm bus: publish router_req_id → internal_req_id
         # mapping so the router can reroute this request when this engine
@@ -556,6 +632,57 @@ class EngineCore:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    @staticmethod
+    def _ft_read_shared_manifest(
+        original_internal_req_id: str,
+    ) -> tuple[int, list[int]] | None:
+        """Read the latest shared checkpoint manifest published by the
+        *origin* engine for a rerouted request.
+
+        Returns (covered_tokens, output_token_ids) on success, or None
+        if the manifest can't be found / parsed. output_token_ids may
+        be longer than (covered_tokens - prompt_len): the per-token
+        output history is denser than the block-aligned KV. The caller
+        must clamp on use.
+
+        Robust to:
+          - missing latest pointer / manifest file (returns None)
+          - corrupt JSON (returns None)
+          - older manifests without output_token_ids key (treats as [])
+        """
+        ckpt_dir = Path(
+            "/dev/shm/vllm_ft_checkpoints"
+        ) / original_internal_req_id
+        latest_fp = ckpt_dir / "latest_rank0"
+        try:
+            manifest_filename = latest_fp.read_text().strip()
+        except OSError:
+            return None
+        if not manifest_filename:
+            return None
+        try:
+            data = json.loads(
+                (ckpt_dir / manifest_filename).read_text()
+            )
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            covered_tokens = int(data.get("covered_tokens", 0))
+        except (TypeError, ValueError):
+            return None
+        raw_output_ids = data.get("output_token_ids", [])
+        if not isinstance(raw_output_ids, list):
+            raw_output_ids = []
+        output_token_ids: list[int] = []
+        for tid in raw_output_ids:
+            try:
+                output_token_ids.append(int(tid))
+            except (TypeError, ValueError):
+                break  # stop at first bad entry, preserve prefix
+        return covered_tokens, output_token_ids
 
     def _ft_write_engine_status(self) -> None:
         """Atomically write current engine status to
@@ -1094,11 +1221,42 @@ class EngineCore:
             # engine's model_runner, so the resumed-from-preempt path
             # (scheduled_cached_reqs) would KeyError on lookup. Pre-
             # register it in model_runner.requests so the lookup works.
+            # output_token_ids was populated in add_request from the
+            # origin engine's manifest; pass it through so the
+            # CachedRequestState matches what the engine-side Request
+            # already shows.
             if request.is_rerouted:
+                prompt_len = len(request.prompt_token_ids or [])
+                # Clamp to KV-covered range. tokens_started is what
+                # restore_kv_blocks actually loaded; the engine-side
+                # request.output_token_ids was sized in add_request
+                # but the actually-restored KV might be smaller (a
+                # later checkpoint arrived but only part of it was
+                # restored). Take min to be safe.
+                resumed_output_count = max(0, tokens_started - prompt_len)
+                engine_side_output = list(request.output_token_ids)
+                resumed_output_ids = engine_side_output[:resumed_output_count]
+                # If the engine-side Request has MORE output ids than
+                # the worker will actually have (KV restore came back
+                # short), trim engine state to match — otherwise the
+                # engine and worker disagree on length and subsequent
+                # append_output_token_ids calls will index-mismatch.
+                if len(engine_side_output) > resumed_output_count:
+                    drop = len(engine_side_output) - resumed_output_count
+                    del request._output_token_ids[-drop:]
+                    del request._all_token_ids[-drop:]
+                    logger.warning(
+                        "FT overlap V3: %s trimmed engine-side output "
+                        "ids from %d to %d to match restored KV "
+                        "(tokens_started=%d, prompt_len=%d)",
+                        req_id, len(engine_side_output),
+                        resumed_output_count, tokens_started, prompt_len,
+                    )
                 self.collective_rpc(
                     "register_rerouted_request",
                     args=(req_id, request.prompt_token_ids,
-                          request.sampling_params, tokens_started),
+                          request.sampling_params, tokens_started,
+                          resumed_output_ids),
                 )
 
             request.status = RequestStatus.PREEMPTED
@@ -1168,8 +1326,20 @@ class EngineCore:
 
         # Build candidates list. num_checkpointed_tokens is advanced
         # eagerly below, before firing the RPC (see "fire-and-forget"
-        # block).
-        candidates: list[tuple[Request, tuple[str, list[int], int], int]] = []
+        # block). Each RPC tuple is
+        # (req_id, block_ids, num_computed_tokens, output_token_ids):
+        # the 4th element is published into the /dev/shm manifest so a
+        # cross-engine reroute can resume decode without re-sampling
+        # (see SharedCheckpointManifest.output_token_ids). It is the
+        # FULL per-token output sequence at save time; the receiving
+        # engine clamps to the KV-covered portion.
+        candidates: list[
+            tuple[
+                Request,
+                tuple[str, list[int], int, list[int]],
+                int,
+            ]
+        ] = []
         for req in list(base.running):
             stable_full_tokens = (
                 (req.num_computed_tokens // block_size) * block_size
@@ -1181,9 +1351,15 @@ class EngineCore:
             block_ids = list(all_ids[0]) if all_ids else []
             if not block_ids:
                 continue
+            # `output_token_ids` is a ConstantList read-only view onto
+            # request._output_token_ids; convert to a plain list so the
+            # RPC serializer (cloudpickle inside collective_rpc) sees a
+            # stable snapshot, not a live ref.
+            output_token_ids = list(getattr(req, "output_token_ids", []))
             candidates.append((
                 req,
-                (req.request_id, block_ids, req.num_computed_tokens),
+                (req.request_id, block_ids, req.num_computed_tokens,
+                 output_token_ids),
                 stable_full_tokens,
             ))
 

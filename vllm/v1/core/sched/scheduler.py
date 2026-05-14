@@ -325,6 +325,31 @@ class Scheduler(SchedulerInterface):
             self._ft_peer_overload_kv_usage = 0.85
         self._ft_engine_status_dir = "/dev/shm/vllm_ft_engine_status"
 
+        # Head-danger gate (Niyama-style absolute-deadline check). The
+        # slack-gap rule alone fires whenever a running victim has much
+        # more slack than the waiting head, even when the head is not
+        # actually close to its SLO deadline and the natural admit loop
+        # would have let it through in time. This wastes a preempt+
+        # reroute (1-13 s of wall-clock on RULER 16K) on a "save" that
+        # nobody needed. We require, in addition, that the head be
+        # within `FT_PICKER_HEAD_DANGER_RATIO` of its TTFT SLO before
+        # firing.
+        #
+        # TODO(tuning): 0.10 (= head must be inside the last 10% of its
+        # SLO budget) is an empirical starting point. The right value
+        # depends on the workload's natural queue-admit latency. Sweep
+        # 0.05 / 0.10 / 0.20 once long-output RULER is in to pick the
+        # best per-hardware default.
+        self._ft_picker_head_danger_gate = (
+            os.environ.get("FT_PICKER_HEAD_DANGER_GATE", "1") == "1"
+        )
+        try:
+            self._ft_picker_head_danger_ratio = float(
+                os.environ.get("FT_PICKER_HEAD_DANGER_RATIO", "0.10")
+            )
+        except ValueError:
+            self._ft_picker_head_danger_ratio = 0.10
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -1205,6 +1230,31 @@ class Scheduler(SchedulerInterface):
         if ((victim_slack - head_slack)
                 < (self._ft_slo_min_gap_ms + replay_cost_ms)):
             return None
+
+        # Head-danger gate (Niyama-style absolute-deadline check).
+        # Even when the slack gap is comfortable, only fire if the
+        # head is genuinely close to its TTFT deadline — i.e. inside
+        # the last `FT_PICKER_HEAD_DANGER_RATIO` fraction of its TTFT
+        # SLO. Above that, the natural admit loop has enough time to
+        # let the head through and a preempt would be wasted work.
+        # Disable with FT_PICKER_HEAD_DANGER_GATE=0 for ablation.
+        if self._ft_picker_head_danger_gate:
+            head_ttft_slo = getattr(most_urgent, "ttft_slo_ms", None)
+            if head_ttft_slo is not None and head_ttft_slo > 0:
+                head_danger_threshold = (
+                    head_ttft_slo * self._ft_picker_head_danger_ratio
+                )
+                if head_slack > head_danger_threshold:
+                    logger.info(
+                        "PICKER_HEAD_NOT_IN_DANGER: head=%s "
+                        "head_slack=%.0fms > %.0fms "
+                        "(ratio=%.2f × TTFT_SLO=%.0fms); skipping fire",
+                        most_urgent.request_id, head_slack,
+                        head_danger_threshold,
+                        self._ft_picker_head_danger_ratio,
+                        head_ttft_slo,
+                    )
+                    return None
 
         # Peer-load gate: only fire if at least one peer engine has
         # spare capacity to receive the victim. See _peer_overloaded

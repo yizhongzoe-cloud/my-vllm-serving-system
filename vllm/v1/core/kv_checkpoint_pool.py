@@ -45,6 +45,12 @@ class CheckpointEntry:
     timestamp: float = 0.0
     # Total size in bytes of the checkpoint.
     size_bytes: int = 0
+    # Output (sampled) token IDs at the moment of checkpoint, in order.
+    # Used by cross-engine reroute so the receiving engine can resume
+    # mid-decode without re-sampling. Length may exceed num_tokens-prompt
+    # tokens (KV is block-aligned, output_token_ids is per-token); the
+    # receiving engine clamps to the KV-covered portion.
+    output_token_ids: list[int] = field(default_factory=list)
 
     def compute_size(self) -> int:
         """Compute total size in bytes of stored tensors."""

@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, TypeAlias, cast
 
@@ -208,6 +208,14 @@ class SharedCheckpointManifest:
     covered_tokens: int
     num_blocks: int
     block_map: dict[int, tuple[str, int]]
+    # Sampled output token IDs at checkpoint time. May be longer than
+    # the KV-covered output portion (KV is block-aligned, IDs are per-
+    # token). Cross-engine reroute readers must clamp to
+    # max(0, covered_tokens - prompt_len). Older manifests without this
+    # field deserialize to []; readers gated by FT_CROSS_ENGINE_OUTPUT_
+    # RESUME treat that as "no resumable output state" and fall through
+    # to the legacy prompt-boundary path.
+    output_token_ids: list[int] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +228,7 @@ class SharedCheckpointManifest:
                 for logical_idx, (chunk_filename, chunk_slot_idx)
                 in self.block_map.items()
             },
+            "output_token_ids": list(self.output_token_ids),
         }
 
     @classmethod
@@ -233,12 +242,25 @@ class SharedCheckpointManifest:
                     f"{location!r}"
                 )
             block_map[int(logical_idx)] = (str(location[0]), int(location[1]))
+        raw_output_ids = data.get("output_token_ids", [])
+        # Defensive: accept missing key (old format) or non-list shapes.
+        output_token_ids: list[int] = []
+        if isinstance(raw_output_ids, list):
+            for tid in raw_output_ids:
+                try:
+                    output_token_ids.append(int(tid))
+                except (TypeError, ValueError):
+                    # Single bad entry shouldn't poison the whole list;
+                    # truncating at first bad token is safer than dropping
+                    # all subsequent good tokens of a different generation.
+                    break
         return cls(
             req_id=str(data["req_id"]),
             generation=int(data["generation"]),
             covered_tokens=int(data["covered_tokens"]),
             num_blocks=int(data["num_blocks"]),
             block_map=block_map,
+            output_token_ids=output_token_ids,
         )
 
 
@@ -7013,6 +7035,11 @@ class GPUModelRunner(
             covered_tokens=stable_full_blocks * block_size,
             num_blocks=stable_full_blocks,
             block_map=new_block_map,
+            # Carry the per-token output IDs at checkpoint time so a
+            # cross-engine reroute can resume mid-decode. May be longer
+            # than (covered_tokens - prompt_len); reader clamps. Empty
+            # for requests still in prefill (no output tokens yet).
+            output_token_ids=list(getattr(entry, "output_token_ids", []) or []),
         )
 
         # FT_INLINE_MANIFEST=1: when set together with FT_FAST_CHUNK_FORMAT,
@@ -7455,7 +7482,7 @@ class GPUModelRunner(
 
     def _batch_save_checkpoints(
         self,
-        request_block_map: list[tuple[str, list[int], int]],
+        request_block_map: list[tuple[str, list[int], int, list[int]]],
     ) -> list[tuple[str, "Any", int]]:
         """Batched checkpoint save: merge N requests' GPU→host copies
         into one CUDA gather + one pin_memory alloc + one async H2D
@@ -7467,6 +7494,14 @@ class GPUModelRunner(
         torch.cat-appended into the existing entry. Requests in their
         first save or in a block-count regression fall through to a
         full-save path in the same batch.
+
+        request_block_map is a list of 4-tuples (req_id, block_ids,
+        num_tokens, output_token_ids). The 4th element is the request's
+        per-token sampled output IDs at the moment of save; the
+        checkpoint pool stores it on the corresponding CheckpointEntry
+        so the downstream manifest publish path can put it in /dev/shm
+        for cross-engine resume. Pass an empty list for requests in
+        pure prefill (no output tokens yet).
 
         Returns list of (request_id, CheckpointEntry, num_tokens) for
         every successfully saved or metadata-updated request. The
@@ -7491,13 +7526,13 @@ class GPUModelRunner(
         #   req_slices  — (start, end) into the concatenated block list
         #   skip_results — reqs that need only metadata bump (no GPU work)
         specs: list[
-            tuple[str, int, list[int], "CheckpointEntry | None"]
+            tuple[str, int, list[int], "CheckpointEntry | None", list[int]]
         ] = []
         req_slices: list[tuple[int, int]] = []
         all_delta_block_ids: list[int] = []
         skip_results: list[tuple[str, "CheckpointEntry", int]] = []
 
-        for req_id, block_ids, num_tokens in request_block_map:
+        for req_id, block_ids, num_tokens, output_token_ids in request_block_map:
             block_ids = [
                 bid for bid in block_ids if 0 <= bid < num_kv_blocks
             ]
@@ -7525,6 +7560,7 @@ class GPUModelRunner(
                         # Nothing new — metadata update only.
                         existing.num_tokens = num_tokens
                         existing.block_ids = list(block_ids)
+                        existing.output_token_ids = list(output_token_ids)
                         existing.timestamp = time.time()
                         skip_results.append(
                             (req_id, existing, num_tokens)
@@ -7538,7 +7574,10 @@ class GPUModelRunner(
             start = len(all_delta_block_ids)
             all_delta_block_ids.extend(delta_block_ids)
             end = len(all_delta_block_ids)
-            specs.append((req_id, num_tokens, list(block_ids), existing))
+            specs.append((
+                req_id, num_tokens, list(block_ids), existing,
+                list(output_token_ids),
+            ))
             req_slices.append((start, end))
 
         if not all_delta_block_ids:
@@ -7629,7 +7668,9 @@ class GPUModelRunner(
         # Stage F: per-req slice + (append OR full save).
         entries: list[tuple[str, "Any", int]] = []
         for spec, (start, end) in zip(specs, req_slices):
-            req_id, num_tokens, full_block_ids, existing = spec
+            req_id, num_tokens, full_block_ids, existing, output_token_ids = (
+                spec
+            )
 
             # Clone each slice so the entry owns independent host
             # memory — evicting one entry then actually releases its
@@ -7655,6 +7696,7 @@ class GPUModelRunner(
                     )
                 existing.block_ids = list(full_block_ids)
                 existing.num_tokens = num_tokens
+                existing.output_token_ids = list(output_token_ids)
                 existing.timestamp = time.time()
                 entry = existing
                 entry.compute_size()
@@ -7667,6 +7709,7 @@ class GPUModelRunner(
                     block_ids=list(full_block_ids),
                     num_tokens=num_tokens,
                     timestamp=time.time(),
+                    output_token_ids=list(output_token_ids),
                 )
                 entry.kv_tensors = per_req_tensors
                 actual_bytes = entry.compute_size()
@@ -7685,14 +7728,23 @@ class GPUModelRunner(
 
     def checkpoint_kv_blocks(
         self,
-        request_block_map: list[tuple[str, list[int], int]],
+        request_block_map: list[tuple[str, list[int], int, list[int]]],
     ) -> list[tuple[str, int, int]]:
         """Copy the KV blocks listed in `request_block_map` from GPU to
         host pinned memory via the V3 checkpoint pool.
 
         Called via collective_rpc from EngineCore each step (or every
-        N steps depending on cadence policy). Returns one tuple per
-        successfully-saved request: (request_id, size_bytes, num_tokens).
+        N steps depending on cadence policy). Each entry of
+        `request_block_map` is a 4-tuple
+        `(request_id, block_ids, num_computed_tokens, output_token_ids)`.
+        `output_token_ids` is the per-token sampled output sequence at
+        save time — written into the on-host CheckpointEntry and the
+        published /dev/shm manifest so a cross-engine reroute can
+        resume decode without re-sampling. Pass `[]` for requests still
+        in pure prefill.
+
+        Returns one tuple per successfully-saved request:
+        (request_id, size_bytes, num_tokens).
         """
         if not self.kv_caches:
             return []
@@ -7855,6 +7907,7 @@ class GPUModelRunner(
         prompt_token_ids: list[int],
         sampling_params: SamplingParams,
         num_computed_tokens: int,
+        output_token_ids: list[int] | None = None,
     ) -> bool:
         """Pre-register a cross-engine rerouted request in self.requests
         so the resumed-from-preempt path (scheduled_cached_reqs) can
@@ -7862,6 +7915,14 @@ class GPUModelRunner(
         already in self.requests from its first scheduling — but cross-
         engine reroute creates a brand-new req on this engine that the
         model_runner has never seen.
+
+        `output_token_ids` is the sequence of sampled tokens the
+        original engine had generated at the moment of checkpoint;
+        the caller is responsible for clamping it to the KV-covered
+        portion so length aligns with num_computed_tokens − prompt_len.
+        Defaults to [] for back-compat with older callers (= legacy
+        behavior where cross-engine reroute restarts decode from
+        prompt end).
 
         block_ids are placeholder (empty per-group lists); the scheduler's
         resumed admit path overwrites them with `req_state.block_ids =
@@ -7881,7 +7942,7 @@ class GPUModelRunner(
             generator=None,
             block_ids=block_ids,
             num_computed_tokens=num_computed_tokens,
-            output_token_ids=[],
+            output_token_ids=list(output_token_ids or []),
             lora_request=None,
         )
         return True

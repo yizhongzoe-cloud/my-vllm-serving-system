@@ -40,6 +40,7 @@ Naming conventions:
 | `FT_CKPT_SKIP_PUBLISH` | unset | worker save path | debug flag: skip the /dev/shm publish step (compute the save but don't publish). |
 | `FT_CKPT_STATS_LOG` | unset | engine | turn on per-step ckpt save stats logging (for analysis). |
 | `FT_REDISPATCH_TIMEOUT_S` | `5.0` | engine core init | if router doesn't pick up a redispatch entry within this many seconds, the engine resumes the victim locally via V3 reload (host KV → GPU). Failsafe for router death / partition. |
+| `FT_CROSS_ENGINE_OUTPUT_RESUME` | `1` (on) | engine core `add_request` | when on, cross-engine reroute reads the origin engine's manifest output_token_ids and resumes mid-decode (full KV coverage). When 0, falls back to clamping num_checkpointed_tokens to the prompt boundary and re-decoding from prompt end. Off matches pre-feature behavior; useful as an ablation to isolate the contribution of mid-decode resume. |
 
 ## Picker policy
 
@@ -54,6 +55,8 @@ Naming conventions:
 | `FT_PICKER_SWITCH_COST_MS` | `1000` | `compute_replay_cost` (utils.py) | fixed per-fire cost (wall ms) of preempt + cross-engine forward + V3 reload + admit. Added to `replay_cost` so the picker rule reflects the *full* cost of firing, not just the per-token replay piece. Tune via empirical measurement (see `measure_switch_cost.py`). |
 | `FT_PICKER_PEER_LOAD_GATE` | `1` (on) | scheduler init | when on, picker reads peer engine status files and refuses to fire if all peer engines are overloaded or unreachable. Disable for ablation that isolates the gate's contribution. |
 | `FT_PEER_OVERLOAD_KV_USAGE` | `0.85` | scheduler init | a peer is "overloaded" if its kv_usage exceeds this fraction (0-1). KV cache is the real bottleneck for long-context workloads. |
+| `FT_PICKER_HEAD_DANGER_GATE` | `1` (on) | scheduler init | when on, picker only fires if the waiting head is within the last `FT_PICKER_HEAD_DANGER_RATIO` fraction of its TTFT SLO budget. Prevents firing on heads that the natural admit loop would have let through in time. Disable for ablation. |
+| `FT_PICKER_HEAD_DANGER_RATIO` | `0.10` | scheduler init | head must be within this fraction of its TTFT SLO before picker fires. Empirical starting value; TODO sweep 0.05 / 0.10 / 0.20 per-hardware to pick best. Lower = stricter (picker fires less), higher = looser (picker fires more). |
 
 ## Non-tunable constants (hardcoded, but document them here so they don't get lost)
 
