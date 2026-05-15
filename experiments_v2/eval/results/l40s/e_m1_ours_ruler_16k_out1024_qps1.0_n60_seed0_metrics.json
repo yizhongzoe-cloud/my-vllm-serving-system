@@ -24,9 +24,9 @@
     "max_tokens_p50": 1024,
     "max_tokens_p95": 1024
   },
-  "n_events": 0,
-  "slo_met_pct": 0.0,
-  "slo_met_count": 0,
+  "n_events": 1,
+  "slo_met_pct": 100.0,
+  "slo_met_count": 1,
   "per_class": {
     "tight": {
       "n": 0,
@@ -41,32 +41,49 @@
       "tpot_p95": null
     },
     "loose": {
-      "n": 0,
-      "slo_met_pct": null,
-      "ttft_p95": null,
-      "tpot_p95": null
+      "n": 1,
+      "slo_met_count": 1,
+      "slo_met_pct": 100.0,
+      "ttft_p50": 1663.07,
+      "ttft_p95": 1663.07,
+      "tpot_p95": 118.527
     }
   },
   "ttft_ms": {
-    "p50": null,
-    "p95": null,
-    "mean": null
+    "p50": 1663.07,
+    "p95": 1663.07,
+    "mean": 1663.07
   },
   "tpot_ms": {
-    "p50": null,
-    "p95": null,
-    "mean": null
+    "p50": 118.527,
+    "p95": 118.527,
+    "mean": 118.527
   },
   "e2e_ms": {
-    "p50": null,
-    "p95": null
+    "p50": 122916.815,
+    "p95": 122916.815
   },
-  "window_s": null,
-  "total_output_tokens": 0,
-  "throughput_tok_per_s": null,
+  "window_s": 124.14049339294434,
+  "total_output_tokens": 1024,
+  "throughput_tok_per_s": 8.248718625265269,
   "client_outcomes": {
     "200_ok": 60,
     "errored": 0
   },
-  "per_request": []
+  "per_request": [
+    {
+      "req_id": "cmpl-be5ac45fa86a826a-0-841fc2a6",
+      "arrival_ts": 1778822081.673126,
+      "ttft_ms": 1663.07,
+      "tpot_ms": 118.527,
+      "e2e_ms": 122916.815,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 9336.0,
+      "slo_tpot_ms": 142.0,
+      "slo_met": true
+    }
+  ]
 }

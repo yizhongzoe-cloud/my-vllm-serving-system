@@ -24,23 +24,25 @@
     "max_tokens_p50": 1024,
     "max_tokens_p95": 1024
   },
-  "n_events": 1,
+  "n_events": 2,
   "slo_met_pct": 0.0,
   "slo_met_count": 0,
   "per_class": {
     "tight": {
-      "n": 0,
-      "slo_met_pct": null,
-      "ttft_p95": null,
-      "tpot_p95": null
+      "n": 1,
+      "slo_met_count": 0,
+      "slo_met_pct": 0.0,
+      "ttft_p50": 2805.544,
+      "ttft_p95": 2805.544,
+      "tpot_p95": 118.014
     },
     "normal": {
       "n": 1,
       "slo_met_count": 0,
       "slo_met_pct": 0.0,
-      "ttft_p50": 1612.282,
-      "ttft_p95": 1612.282,
-      "tpot_p95": 112.749
+      "ttft_p50": 1680.315,
+      "ttft_p95": 1680.315,
+      "tpot_p95": 116.247
     },
     "loose": {
       "n": 0,
@@ -50,39 +52,53 @@
     }
   },
   "ttft_ms": {
-    "p50": 1612.282,
-    "p95": 1612.282,
-    "mean": 1612.282
+    "p50": 1680.315,
+    "p95": 2805.544,
+    "mean": 2242.9295
   },
   "tpot_ms": {
-    "p50": 112.749,
-    "p95": 112.749,
-    "mean": 112.749
+    "p50": 116.247,
+    "p95": 118.014,
+    "mean": 117.1305
   },
   "e2e_ms": {
-    "p50": 116955.711,
-    "p95": 116955.711
+    "p50": 120601.034,
+    "p95": 123534.253
   },
-  "window_s": 125.62871789932251,
-  "total_output_tokens": 1024,
-  "throughput_tok_per_s": 8.151002550393155,
+  "window_s": 125.8343563079834,
+  "total_output_tokens": 2048,
+  "throughput_tok_per_s": 16.275364376541635,
   "client_outcomes": {
     "200_ok": 60,
     "errored": 0
   },
   "per_request": [
     {
-      "req_id": "cmpl-a4401f5ec2c83eb3-0-ba5b487d",
-      "arrival_ts": 1778802301.834445,
-      "ttft_ms": 1612.282,
-      "tpot_ms": 112.749,
-      "e2e_ms": 116955.711,
+      "req_id": "cmpl-9cc9f8d9391d6feb-0-aade8fd2",
+      "arrival_ts": 1778824804.341164,
+      "ttft_ms": 1680.315,
+      "tpot_ms": 116.247,
+      "e2e_ms": 120601.034,
       "num_output": 1024,
       "prompt_len": 16384,
       "finish": "LENGTH",
       "class": "normal",
       "slo_ttft_ms": 4668.0,
       "slo_tpot_ms": 71.0,
+      "slo_met": false
+    },
+    {
+      "req_id": "cmpl-a2b3225d6f766c39-0-b9371b20",
+      "arrival_ts": 1778824804.635976,
+      "ttft_ms": 2805.544,
+      "tpot_ms": 118.014,
+      "e2e_ms": 123534.253,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 3112.0,
+      "slo_tpot_ms": 47.0,
       "slo_met": false
     }
   ]
