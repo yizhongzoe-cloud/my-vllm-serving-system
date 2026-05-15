@@ -7048,10 +7048,14 @@ class GPUModelRunner(
         # Restore must scan the request directory for chunk files and pick
         # the highest generation. Saves 2 of 3 file ops per save (~2-5 ms
         # per RPC). Requires FAST_CHUNK_FORMAT to be on; ignored otherwise.
-        use_fast_chunk = os.environ.get("FT_FAST_CHUNK_FORMAT") == "1"
+        # Both default ON — the legacy pickle / 3-file path is kept only for
+        # opt-out (FT_FAST_CHUNK_FORMAT=0) since pickle serialization +
+        # 3 atomic renames per save dominates publish time under
+        # long-output / high-QPS load.
+        use_fast_chunk = os.environ.get("FT_FAST_CHUNK_FORMAT", "1") != "0"
         inline_manifest = (
             use_fast_chunk
-            and os.environ.get("FT_INLINE_MANIFEST") == "1"
+            and os.environ.get("FT_INLINE_MANIFEST", "1") != "0"
         )
 
         try:
