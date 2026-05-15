@@ -1,0 +1,89 @@
+{
+  "baseline": "ours",
+  "dataset": "ruler_16k",
+  "num_requests": 60,
+  "arrival_rate_qps": 1.0,
+  "seed": 1,
+  "slo_mode": "tiered",
+  "slo": {
+    "tier_ttft_ms": {
+      "tight": 5415.0,
+      "normal": 8122.0,
+      "loose": 16245.0
+    },
+    "tier_tpot_ms": {
+      "tight": 49.0,
+      "normal": 73.0,
+      "loose": 147.0
+    }
+  },
+  "schedule_summary": {
+    "n": 60,
+    "window_s": 66.93924631153148,
+    "empirical_qps": 0.8813962398891874,
+    "max_tokens_p50": 1024,
+    "max_tokens_p95": 1024
+  },
+  "n_events": 1,
+  "slo_met_pct": 0.0,
+  "slo_met_count": 0,
+  "per_class": {
+    "tight": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    },
+    "normal": {
+      "n": 1,
+      "slo_met_count": 0,
+      "slo_met_pct": 0.0,
+      "ttft_p50": 2707.528,
+      "ttft_p95": 2707.528,
+      "tpot_p95": 149.894
+    },
+    "loose": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    }
+  },
+  "ttft_ms": {
+    "p50": 2707.528,
+    "p95": 2707.528,
+    "mean": 2707.528
+  },
+  "tpot_ms": {
+    "p50": 149.894,
+    "p95": 149.894,
+    "mean": 149.894
+  },
+  "e2e_ms": {
+    "p50": 156050.248,
+    "p95": 156050.248
+  },
+  "window_s": 156.65867948532104,
+  "total_output_tokens": 1024,
+  "throughput_tok_per_s": 6.536503456841337,
+  "client_outcomes": {
+    "200_ok": 60,
+    "errored": 0
+  },
+  "per_request": [
+    {
+      "req_id": "cmpl-9908bd0c5b366a1a-0-b58c392d",
+      "arrival_ts": 1778836799.979452,
+      "ttft_ms": 2707.528,
+      "tpot_ms": 149.894,
+      "e2e_ms": 156050.248,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "normal",
+      "slo_ttft_ms": 8122.0,
+      "slo_tpot_ms": 73.0,
+      "slo_met": false
+    }
+  ]
+}

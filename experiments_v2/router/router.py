@@ -433,11 +433,23 @@ def create_app(router: Router) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        # scan_engine_status is sync (Path.glob + fp.read_text +
+        # json.loads). Running it directly on the event loop blocks for
+        # the duration of each filesystem call; under long-output /
+        # high-concurrency load this serialises with the forwards on the
+        # same loop and adds TTFT tail latency. Push the sync work to a
+        # worker thread — engine_state field writes are individually
+        # atomic under the GIL, so no extra locking needed.
         async def status_poll_loop():
             while True:
-                router.scan_engine_status()
+                await asyncio.to_thread(router.scan_engine_status)
                 await asyncio.sleep(STATUS_POLL_INTERVAL_S)
 
+        # scan_preempt_queue stays inline on the event loop: it calls
+        # task.cancel() on InFlightReq.task which lives on this loop,
+        # and Python doesn't officially support cross-thread Task.cancel.
+        # The cost is bounded since the preempt queue dir is usually
+        # empty (glob over 0 files), so blocking is rare.
         async def preempt_poll_loop():
             while True:
                 router.scan_preempt_queue()

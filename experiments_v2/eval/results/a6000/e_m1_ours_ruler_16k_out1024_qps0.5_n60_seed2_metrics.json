@@ -1,0 +1,103 @@
+{
+  "baseline": "ours",
+  "dataset": "ruler_16k",
+  "num_requests": 60,
+  "arrival_rate_qps": 0.5,
+  "seed": 2,
+  "slo_mode": "tiered",
+  "slo": {
+    "tier_ttft_ms": {
+      "tight": 5415.0,
+      "normal": 8122.0,
+      "loose": 16245.0
+    },
+    "tier_tpot_ms": {
+      "tight": 49.0,
+      "normal": 73.0,
+      "loose": 147.0
+    }
+  },
+  "schedule_summary": {
+    "n": 60,
+    "window_s": 107.95752735225624,
+    "empirical_qps": 0.5465112201716886,
+    "max_tokens_p50": 1024,
+    "max_tokens_p95": 1024
+  },
+  "n_events": 2,
+  "slo_met_pct": 0.0,
+  "slo_met_count": 0,
+  "per_class": {
+    "tight": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    },
+    "normal": {
+      "n": 2,
+      "slo_met_count": 0,
+      "slo_met_pct": 0.0,
+      "ttft_p50": 2979.353,
+      "ttft_p95": 2991.409,
+      "tpot_p95": 173.961
+    },
+    "loose": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    }
+  },
+  "ttft_ms": {
+    "p50": 2979.353,
+    "p95": 2991.409,
+    "mean": 2985.3810000000003
+  },
+  "tpot_ms": {
+    "p50": 148.955,
+    "p95": 173.961,
+    "mean": 161.45800000000003
+  },
+  "e2e_ms": {
+    "p50": 155360.619,
+    "p95": 180953.345
+  },
+  "window_s": 181.80811023712158,
+  "total_output_tokens": 2048,
+  "throughput_tok_per_s": 11.26462398915491,
+  "client_outcomes": {
+    "200_ok": 60,
+    "errored": 0
+  },
+  "per_request": [
+    {
+      "req_id": "cmpl-9da23e8307a60f51-0-a60733d0",
+      "arrival_ts": 1778842545.379927,
+      "ttft_ms": 2979.353,
+      "tpot_ms": 148.955,
+      "e2e_ms": 155360.619,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "normal",
+      "slo_ttft_ms": 8122.0,
+      "slo_tpot_ms": 73.0,
+      "slo_met": false
+    },
+    {
+      "req_id": "cmpl-a89c5244379e346a-0-870d5106",
+      "arrival_ts": 1778842545.638507,
+      "ttft_ms": 2991.409,
+      "tpot_ms": 173.961,
+      "e2e_ms": 180953.345,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "normal",
+      "slo_ttft_ms": 8122.0,
+      "slo_tpot_ms": 73.0,
+      "slo_met": false
+    }
+  ]
+}

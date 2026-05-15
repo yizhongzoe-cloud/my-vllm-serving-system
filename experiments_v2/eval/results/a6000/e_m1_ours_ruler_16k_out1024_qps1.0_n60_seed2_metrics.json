@@ -1,0 +1,72 @@
+{
+  "baseline": "ours",
+  "dataset": "ruler_16k",
+  "num_requests": 60,
+  "arrival_rate_qps": 1.0,
+  "seed": 2,
+  "slo_mode": "tiered",
+  "slo": {
+    "tier_ttft_ms": {
+      "tight": 5415.0,
+      "normal": 8122.0,
+      "loose": 16245.0
+    },
+    "tier_tpot_ms": {
+      "tight": 49.0,
+      "normal": 73.0,
+      "loose": 147.0
+    }
+  },
+  "schedule_summary": {
+    "n": 60,
+    "window_s": 53.97876367612812,
+    "empirical_qps": 1.0930224403433773,
+    "max_tokens_p50": 1024,
+    "max_tokens_p95": 1024
+  },
+  "n_events": 0,
+  "slo_met_pct": 0.0,
+  "slo_met_count": 0,
+  "per_class": {
+    "tight": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    },
+    "normal": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    },
+    "loose": {
+      "n": 0,
+      "slo_met_pct": null,
+      "ttft_p95": null,
+      "tpot_p95": null
+    }
+  },
+  "ttft_ms": {
+    "p50": null,
+    "p95": null,
+    "mean": null
+  },
+  "tpot_ms": {
+    "p50": null,
+    "p95": null,
+    "mean": null
+  },
+  "e2e_ms": {
+    "p50": null,
+    "p95": null
+  },
+  "window_s": null,
+  "total_output_tokens": 0,
+  "throughput_tok_per_s": null,
+  "client_outcomes": {
+    "200_ok": 60,
+    "errored": 0
+  },
+  "per_request": []
+}
