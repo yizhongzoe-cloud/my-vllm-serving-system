@@ -120,7 +120,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
-    build_schedule, summarize_schedule,
+    build_schedule, build_mixed_schedule, summarize_schedule,
 )
 
 MODEL = os.path.expanduser("~/model/Qwen2.5-7B-Instruct")
@@ -374,8 +374,13 @@ def main() -> int:
     parser.add_argument("--dataset",
                         choices=["ruler_64k", "ruler_16k", "ruler_8k",
                                  "ruler_4k", "ruler_2k", "ruler_1k",
-                                 "ruler_mixed", "sharegpt", "arxivsumm"],
+                                 "ruler_mixed", "sharegpt", "arxivsumm",
+                                 "mixed_short_long"],
                         required=True)
+    parser.add_argument("--mixed-short-ratio", type=float, default=0.7,
+                        help="(dataset=mixed_short_long) fraction of "
+                             "requests from short dataset (sharegpt). "
+                             "Long fraction = 1 - this. Default 0.7.")
     parser.add_argument("--num-requests", type=int, required=True)
     parser.add_argument("--arrival-rate-qps", type=float, required=True)
     parser.add_argument("--seed", type=int, default=0)
@@ -387,18 +392,29 @@ def main() -> int:
                         help="(uniform mode) Single SLO threshold for TPOT.")
     # ---- Tiered mode (Niyama-style 3 QoS classes) ----
     parser.add_argument("--slo-mode",
-                        choices=["uniform", "tiered"],
+                        choices=["uniform", "tiered", "mixed"],
                         default="uniform",
                         help="uniform: every request has same SLO. "
-                             "tiered: requests are split into 3 classes "
-                             "(tight/normal/loose) by idx %% 3, each with "
-                             "its own SLO threshold. Inspired by Niyama.")
+                             "tiered: 3 random classes (Niyama-style). "
+                             "mixed: 2 classes by origin dataset "
+                             "(short=sharegpt, long=arxivsumm), each "
+                             "with its own SLO. Requires "
+                             "--dataset mixed_short_long.")
     parser.add_argument("--ttft-slo-tight-ms", type=float, default=None)
     parser.add_argument("--ttft-slo-normal-ms", type=float, default=None)
     parser.add_argument("--ttft-slo-loose-ms", type=float, default=None)
     parser.add_argument("--tpot-slo-tight-ms", type=float, default=None)
     parser.add_argument("--tpot-slo-normal-ms", type=float, default=None)
     parser.add_argument("--tpot-slo-loose-ms", type=float, default=None)
+    # ---- Mixed mode (2 classes by origin dataset) ----
+    parser.add_argument("--short-ttft-slo-ms", type=float, default=None,
+                        help="(mixed mode) TTFT SLO for short-class "
+                             "requests (origin=sharegpt).")
+    parser.add_argument("--short-tpot-slo-ms", type=float, default=None)
+    parser.add_argument("--long-ttft-slo-ms", type=float, default=None,
+                        help="(mixed mode) TTFT SLO for long-class "
+                             "requests (origin=arxivsumm).")
+    parser.add_argument("--long-tpot-slo-ms", type=float, default=None)
     parser.add_argument("--force-max-output-tokens", type=int, default=None,
                         help="If set, override every request's max_tokens "
                              "to this value (ignore the dataset's "
@@ -424,7 +440,7 @@ def main() -> int:
         # Treat uniform as a degenerate 3-tier: same SLO across tiers.
         tier_ttft = {c: args.ttft_slo_ms for c in _TIER_CLASSES}
         tier_tpot = {c: args.tpot_slo_ms for c in _TIER_CLASSES}
-    else:  # tiered
+    elif args.slo_mode == "tiered":
         for k in ("ttft_slo_tight_ms", "ttft_slo_normal_ms",
                   "ttft_slo_loose_ms", "tpot_slo_tight_ms",
                   "tpot_slo_normal_ms", "tpot_slo_loose_ms"):
@@ -440,26 +456,50 @@ def main() -> int:
             "normal": args.tpot_slo_normal_ms,
             "loose": args.tpot_slo_loose_ms,
         }
+    else:  # mixed
+        if args.dataset != "mixed_short_long":
+            parser.error("--slo-mode mixed requires --dataset mixed_short_long")
+        for k in ("short_ttft_slo_ms", "short_tpot_slo_ms",
+                  "long_ttft_slo_ms", "long_tpot_slo_ms"):
+            if getattr(args, k) is None:
+                parser.error(f"--slo-mode mixed requires --{k.replace('_', '-')}")
+        tier_ttft = {
+            "short": args.short_ttft_slo_ms,
+            "long": args.long_ttft_slo_ms,
+        }
+        tier_tpot = {
+            "short": args.short_tpot_slo_ms,
+            "long": args.long_tpot_slo_ms,
+        }
 
-    # Precompute a balanced, shuffled class assignment for tiered mode.
-    # Each class appears ⌊N/3⌋ or ⌈N/3⌉ times, in random order seeded by
-    # args.seed (different stream from prompt sampling so prompt content
-    # and class label are independent).
+    # Class assignment for tiered mode: balanced random shuffle. For
+    # mixed mode: class comes from the schedule tuple itself (origin
+    # dataset tag). For uniform mode: random tiered assignment is
+    # used internally but every class maps to the same SLO so it
+    # doesn't matter.
     import random as _stdrand
-    _n = args.num_requests
-    _per_class = _n // 3
-    _remainder = _n - 3 * _per_class
-    _labels = (["tight"] * _per_class
-               + ["normal"] * _per_class
-               + ["loose"] * _per_class
-               + list(_TIER_CLASSES[:_remainder]))
-    _class_rng = _stdrand.Random(args.seed * 7919 + 31)
-    _class_rng.shuffle(_labels)
-
-    def class_of(idx: int) -> str:
-        if idx < 0 or idx >= len(_labels):
-            return _TIER_CLASSES[idx % 3]  # fallback (post-hoc with extra events)
-        return _labels[idx]
+    # Per-request class list, populated after schedule is built when
+    # dataset=mixed_short_long. Unused in uniform/tiered modes.
+    _per_request_class: list[str] = []
+    if args.slo_mode == "mixed":
+        def class_of(idx: int) -> str:
+            if 0 <= idx < len(_per_request_class):
+                return _per_request_class[idx]
+            return "long"  # safe fallback
+    else:
+        _n = args.num_requests
+        _per_class = _n // 3
+        _remainder = _n - 3 * _per_class
+        _labels = (["tight"] * _per_class
+                   + ["normal"] * _per_class
+                   + ["loose"] * _per_class
+                   + list(_TIER_CLASSES[:_remainder]))
+        _class_rng = _stdrand.Random(args.seed * 7919 + 31)
+        _class_rng.shuffle(_labels)
+        def class_of(idx: int) -> str:
+            if idx < 0 or idx >= len(_labels):
+                return _TIER_CLASSES[idx % 3]
+            return _labels[idx]
 
     # Default max_model_len by dataset. The +N margin must cover the
     # longest output we plan to generate. For long-output sweeps
@@ -487,6 +527,10 @@ def main() -> int:
         elif args.dataset == "arxivsumm":
             # arxivsumm prompts capped at 30K; need 32K headroom for output.
             max_model_len = 32768
+        elif args.dataset == "mixed_short_long":
+            # Mixed contains arxivsumm prompts up to 30K + sharegpt up
+            # to ~4K. Set to 32K so engine fits both.
+            max_model_len = 32768
         else:  # sharegpt
             max_model_len = 4096 + output_margin
     else:
@@ -506,20 +550,42 @@ def main() -> int:
     router_log = RESULTS_DIR / f"{tag}_router.log"
     metrics_out = RESULTS_DIR / f"{tag}_metrics.json"
 
-    schedule = build_schedule(
-        dataset_name=args.dataset,
-        num_requests=args.num_requests,
-        arrival_rate_qps=args.arrival_rate_qps,
-        seed=args.seed,
-        force_max_tokens=args.force_max_output_tokens,
-    )
+    if args.dataset == "mixed_short_long":
+        schedule_full = build_mixed_schedule(
+            short_dataset="sharegpt",
+            long_dataset="arxivsumm",
+            short_ratio=args.mixed_short_ratio,
+            num_requests=args.num_requests,
+            arrival_rate_qps=args.arrival_rate_qps,
+            seed=args.seed,
+        )
+        # Strip class tag to keep downstream code 3-tuple-compatible;
+        # remember per-request class for class_of().
+        schedule: list[tuple[float, str, int]] = [
+            (s[0], s[1], s[2]) for s in schedule_full
+        ]
+        _per_request_class[:] = [s[3] for s in schedule_full]
+    else:
+        schedule = build_schedule(
+            dataset_name=args.dataset,
+            num_requests=args.num_requests,
+            arrival_rate_qps=args.arrival_rate_qps,
+            seed=args.seed,
+            force_max_tokens=args.force_max_output_tokens,
+        )
     sched_summary = summarize_schedule(schedule)
     print(f"[E_M1] schedule: {sched_summary}")
     print(f"[E_M1] expected fire window: ~{sched_summary['window_s']:.0f}s")
     print(f"[E_M1] SLO mode: {args.slo_mode}")
-    for c in _TIER_CLASSES:
+    _CLASS_LIST = (("short", "long") if args.slo_mode == "mixed"
+                   else _TIER_CLASSES)
+    for c in _CLASS_LIST:
         print(f"[E_M1]   {c}: TTFT≤{tier_ttft[c]:.0f}ms, "
               f"TPOT≤{tier_tpot[c]:.1f}ms")
+    if args.dataset == "mixed_short_long":
+        n_short = sum(1 for c in _per_request_class if c == "short")
+        n_long = sum(1 for c in _per_request_class if c == "long")
+        print(f"[E_M1]   composition: short={n_short} long={n_long}")
 
     cleanup_shm()
     e0 = start_engine(0, ENGINE_0_PORT, "0", engine_0_log,
@@ -617,9 +683,11 @@ def main() -> int:
         slo_met_pct = (100.0 * sum(slo_met_flags) / len(slo_met_flags)
                        if slo_met_flags else 0.0)
 
-        # Per-class breakdown.
+        # Per-class breakdown. Class set depends on slo_mode.
+        _CLASS_LIST_AGG = (("short", "long") if args.slo_mode == "mixed"
+                           else _TIER_CLASSES)
         per_class: dict[str, dict] = {}
-        for cls in _TIER_CLASSES:
+        for cls in _CLASS_LIST_AGG:
             cls_events = [e for e in events_sorted if e["class"] == cls]
             if not cls_events:
                 per_class[cls] = {"n": 0, "slo_met_pct": None,
@@ -661,8 +729,8 @@ def main() -> int:
 
         print(f"[E_M1] SLO_met overall: {slo_met_pct:.1f}% "
               f"({sum(slo_met_flags)}/{len(slo_met_flags)})")
-        if args.slo_mode == "tiered":
-            for cls in _TIER_CLASSES:
+        if args.slo_mode in ("tiered", "mixed"):
+            for cls in _CLASS_LIST_AGG:
                 p = per_class[cls]
                 pct = (f"{p['slo_met_pct']:.1f}%"
                        if p["slo_met_pct"] is not None else "n/a")

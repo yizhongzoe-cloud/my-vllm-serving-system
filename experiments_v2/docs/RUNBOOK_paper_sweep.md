@@ -1,529 +1,222 @@
-# Paper sweep runbook
+# Paper sweep runbook (2026-05-16 v2 — mixed short+long)
 
-How to run the 4-experiment (E_M1/M2/M3/M4) paper sweep on each
-hardware platform, and how the results are kept separate so we can
-compare A6000 vs L40S and pick the one that gives the better story.
+## What this runs
+
+Single master script `experiments_v2/eval/scripts/run_paper_sweep_master.sh`
+that does, in sequence:
+
+1. **PHASE 1: E_M1 mixed_short_long** — main per-class SLO attainment sweep.
+   - Workload: 70% ShareGPT (short) + 30% ArXiv-Summarization (long), interleaved Poisson arrival.
+   - Per-class SLO (JITServe-style): short tier from ShareGPT P95×2, long tier from ArXiv P95×2.
+   - 4 baselines (vllm_fcfs / reroute_no_ckpt / ours_no_picker / ours) × 5 QPS × 3 seeds = 60 runs.
+
+2. **PHASE 2: E_M2 mixed_short_long tightness** — SLO sensitivity at fixed QPS.
+   - Same mixed workload; fixed QPS=1.5; SLO tightness factor ∈ {1.5, 2, 3, 4}× baseline P95.
+   - 4 baselines × 4 tightness × 2 seeds = 32 runs (seed 100/101 to avoid collision with PHASE 1).
+
+3. **PHASE 3: E_M3 sharegpt** — no-load overhead microbench.
+   - ShareGPT, 40 req at 5s fixed inter-arrival (~0.2 QPS, single-request batches).
+   - 3 baselines (vllm_fcfs / reroute_no_ckpt / ours) × 3 seeds = 9 runs.
+
+**E_M4** (picker ablation) reuses PHASE 1's `ours` and `ours_no_picker` columns; no separate run.
+**E_D1** (failover) already done in earlier sweep (RULER 16K); not repeated.
+
+Total time on A6000: ~4.5h. On L40S: ~3-4h (faster prefill).
 
 ---
 
-## 1. Output layout
+## Prerequisites
 
-Every eval script reads an `EVAL_RESULTS_DIR` environment variable
-that overrides the default results directory.
+### 1. Per-GPU calibration must already exist
 
-| `HARDWARE_TAG` | Output goes to |
-|---|---|
-| (unset, default) | `experiments_v2/eval/results/` |
-| `a6000` | `experiments_v2/eval/results/a6000/` |
-| `l40s` | `experiments_v2/eval/results/l40s/` |
+For each GPU box, run **once** before any sweep:
 
-Pre-existing data (historical runs before we introduced the env var)
-stays in the root `results/` directory. Calibration `read_calibration()`
-in `e_m2_slo_tightness.py` looks at the hardware-specific dir first,
-then falls back to root so the A6000-era data still wires up.
+```bash
+cd ~/code/my-vllm-serving-system
+PYTHONPATH=. python -m experiments_v2.eval.scripts.slo_calibration \
+  --dataset sharegpt --num-requests 30 --arrival-rate-qps 0.1 --seed 0
+PYTHONPATH=. python -m experiments_v2.eval.scripts.slo_calibration \
+  --dataset arxivsumm --num-requests 30 --arrival-rate-qps 0.05 --seed 0
+```
+
+Writes `experiments_v2/eval/results/<gpu>/slo_calib_<ds>_n30_qps0.<x>_seed0_metrics.json`.
+
+Read `ttft_ms.p95` and `tpot_ms.p95` from each calibration JSON. These are
+the `SHORT_P95_*` (from sharegpt calib) and `LONG_P95_*` (from arxivsumm calib)
+env vars passed to the master sweep.
+
+### 2. ArXiv-Summ dataset must be cached locally
+
+`experiments_v2/datasets/cached/arxivsumm.jsonl` is **NOT in git** (198MB > GitHub limit). Each box must build it once:
+
+```bash
+python3 experiments_v2/datasets/make_arxivsumm.py
+```
+
+Downloads ccdv/arxiv-summarization test split (~5 min, ~200MB cached), filters
+to prompt_tokens ∈ [1K, 30K], shuffles seed=42.
+
+### 3. GPU must be clean
+
+```bash
+nvidia-smi --query-gpu=memory.used --format=csv,noheader
+```
+
+Both GPUs should show <2GB. If higher, kill zombies first:
+
+```bash
+# 1. Kill api_server frontends
+pkill -9 -f "api_server" 2>/dev/null
+
+# 2. Find leftover VLLM::EngineCore workers (these are the real memory hogs)
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+
+# 3. Kill each by PID
+kill -9 <PID1> <PID2>
+
+# 4. Recheck
+nvidia-smi --query-gpu=memory.used --format=csv,noheader
+```
+
+The master script also does a `check_gpu_free` guard on startup and aborts
+if >2GB used. **Do not skip this guard**; running with leftover memory was
+the cause of the previous all-fail sweep.
+
+### 4. Clean shm
+
+```bash
+rm -rf /dev/shm/vllm_ft_engine_status /dev/shm/vllm_ft_req_map \
+       /dev/shm/vllm_ft_checkpoints /dev/shm/vllm_ft_preempt_queue
+```
 
 ---
 
-## 2. A6000 (this machine)
+## Launching the master sweep
 
-### 2a. Calibration
-
-Already done historically. The files
-
-```
-experiments_v2/eval/results/slo_calib_sharegpt_n30_qps0.1_seed0_metrics.json
-experiments_v2/eval/results/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json
-experiments_v2/eval/results/slo_calib_ruler_64k_n30_qps0.04_seed0_metrics.json
-```
-
-live at the project default `results/` path. E_M2's fallback picks
-them up automatically when sweeping on A6000 with
-`HARDWARE_TAG=a6000`.
-
-### 2b. Full sweep
+### A6000
 
 ```bash
-cd /home/yzhong76/code/my-vllm-serving-system
+cd ~/code/my-vllm-serving-system
 
-# Cleanup leftover shm from any previous run
-rm -rf /dev/shm/vllm_ft_preempt_queue \
-       /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-# Kick off — ~13-15 hours for 3 seeds × 4 experiments × ShareGPT.
-# Use nohup if running over SSH so disconnects don't kill it.
-HARDWARE_TAG=a6000 nohup \
-  bash experiments_v2/eval/scripts/run_paper_sweep_sharegpt.sh \
-  > /tmp/a6000_sweep.log 2>&1 &
-echo "PID: $!"
+nohup setsid env HARDWARE_TAG=a6000 \
+  SHORT_P95_TTFT_MS=456 SHORT_P95_TPOT_MS=22 \
+  LONG_P95_TTFT_MS=1951 LONG_P95_TPOT_MS=26 \
+  bash experiments_v2/eval/scripts/run_paper_sweep_master.sh \
+  > /tmp/master_a6000.log 2>&1 &
+disown
+echo "PID=$!"
 ```
 
-### 2c. Monitor
+### L40S
+
+Read your own per-GPU calibration P95 values first by inspecting the
+calibration JSONs in `experiments_v2/eval/results/l40s/slo_calib_*.json`.
 
 ```bash
-# Master driver log (tee'd into both stdout and a file in results/)
-tail -f experiments_v2/eval/results/a6000/paper_sweep_*.log
+cd ~/code/my-vllm-serving-system
 
-# What's running on the GPUs right now
+nohup setsid env HARDWARE_TAG=l40s \
+  SHORT_P95_TTFT_MS=268 SHORT_P95_TPOT_MS=21 \
+  LONG_P95_TTFT_MS=<your_L40S_arxivsumm_p95_ttft> \
+  LONG_P95_TPOT_MS=<your_L40S_arxivsumm_p95_tpot> \
+  bash experiments_v2/eval/scripts/run_paper_sweep_master.sh \
+  > /tmp/master_l40s.log 2>&1 &
+disown
+```
+
+---
+
+## Monitoring
+
+```bash
+# Master log (high-level phase progression)
+tail -f /tmp/master_a6000.log
+
+# Or via the in-results-dir copy (preserves across /tmp clears)
+tail -f experiments_v2/eval/results/a6000/master_sweep_*.log
+
+# Watch GPU
 watch -n 5 nvidia-smi
-
-# How many metrics.json files have been written
-ls experiments_v2/eval/results/a6000/*_metrics.json | wc -l
 ```
+
+### Check progress mid-run
+
+```bash
+# Count completed metrics.json by phase
+ls experiments_v2/eval/results/a6000/e_m1_*_mixed_short_long_*_metrics.json | wc -l
+# expected: phase 1 = 60, phase 2 = 32 (seeds 100/101)
+
+ls experiments_v2/eval/results/a6000/e_m3_*_sharegpt_*_metrics.json | wc -l
+# expected: phase 3 = 9
+```
+
+### What "healthy" looks like in the master log
+
+```
+[master] GPU pre-check OK: max used 15 MiB
+[master] PHASE 1: E_M1 mixed_short_long — per-class SLO
+[master] E_M1 mixed baseline=vllm_fcfs qps=0.5 seed=0
+[E_M1] schedule: {'n': 60, ...}
+[E_M1]   composition: short=42 long=18
+[E_M1]   short: TTFT≤912ms, TPOT≤44.0ms
+[E_M1]   long: TTFT≤3902ms, TPOT≤52.0ms
+[E_M1] both engines ready
+[E_M1] fired 60 requests; waiting completion
+[E_M1] outcomes: 60/60 200 OK, 0 errored
+[E_M1] SLO_met overall: 93.3% (56/60)
+[E_M1]   short: SLO_met=95.2% (n=42)
+[E_M1]   long: SLO_met=88.9% (n=18)
+```
+
+### Red flags
+
+- `[master] FAIL: GPU has XXXX MiB used at startup` — zombie processes. Kill and restart (see Prerequisites #3).
+- `[E_M1] FAIL: an engine never became healthy` — engine OOM or import error. Check `engine0.log` / `engine1.log` for stack trace.
+- `[E_M1] WARN: ... FAILED` repeatedly — same as above. Stop and diagnose; don't let it grind through 100 failed runs.
+- `composition: short=0 long=N` or `short=N long=0` — workload builder broke; check `mixed_short_long` registry in `workload_builder.py`.
 
 ---
 
-## 3. L40S (other machine)
+## Recovery
 
-### 3a. Sync code first
+If sweep dies mid-way, the master script is not resumable from a checkpoint;
+just re-launch. Existing metrics.json files will be **overwritten** without
+warning, so back up or move them aside first if you care about partial data.
 
-```bash
-cd <repo path on L40S>
-git checkout zoe/disruption
-git pull origin zoe/disruption
-```
-
-### 3b. Calibration (must run before sweep)
-
-L40S has never been profiled on this branch. Without a fresh
-calibration, `E_M2` would fall back to the A6000 calibration in
-`results/` root — which produces SLO thresholds that don't match
-L40S's actual baseline P95. Run this once per dataset you intend to
-sweep.
-
-```bash
-# ShareGPT calibration — required for the current sweep
-rm -rf /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-EVAL_RESULTS_DIR="$(pwd)/experiments_v2/eval/results/l40s" \
-PYTHONPATH="$(pwd)" \
-python -m experiments_v2.eval.scripts.slo_calibration \
-  --dataset sharegpt \
-  --num-requests 30 \
-  --arrival-rate-qps 0.1 \
-  --seed 0
-
-# Verify the output landed in the right place
-ls experiments_v2/eval/results/l40s/slo_calib_sharegpt_*.json
-```
-
-Takes about 10 minutes (engine startup + 30 requests at QPS 0.1).
-
-Eyeball the P95 numbers to make sure they look sane (TTFT P95 in the
-few-hundred ms range, TPOT P95 ~20-30 ms on Qwen2.5-7B):
-
-```bash
-python -c "
-import json
-d = json.load(open('experiments_v2/eval/results/l40s/slo_calib_sharegpt_n30_qps0.1_seed0_metrics.json'))
-print('TTFT p95:', d['ttft_ms']['p95'], 'ms')
-print('TPOT p95:', d['tpot_ms']['p95'], 'ms')
-"
-```
-
-### 3c. Full sweep
-
-```bash
-cd <repo path on L40S>
-
-rm -rf /dev/shm/vllm_ft_preempt_queue \
-       /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-HARDWARE_TAG=l40s nohup \
-  bash experiments_v2/eval/scripts/run_paper_sweep_sharegpt.sh \
-  > /tmp/l40s_sweep.log 2>&1 &
-echo "PID: $!"
-```
-
-### 3d. Monitor
-
-```bash
-tail -f experiments_v2/eval/results/l40s/paper_sweep_*.log
-```
+To resume only the remaining work, manually edit the `SEEDS` / `E_M1_QPS` /
+`E_M2_TIGHTNESS_FACTORS` env vars in your launch command to skip already-
+completed combinations.
 
 ---
 
-## 4. RULER_16K sweep (both machines)
-
-The ShareGPT sweep above uses 500-token prompts where prefill is
-one-shot — picker has no mid-prefill window to fire in. RULER_16K
-(~13K-token NIAH prompts) gives the picker a real workload: chunked
-prefill splits each prompt into ~6 chunks, and picker can preempt a
-mid-prefill victim once its host checkpoint has caught up.
-
-Scope: E_M1 only (4 baselines × 3 QPS × 3 seeds = 36 runs, ~1.5h
-per machine). The driver is
-`experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh`.
-
-### 4a. A6000
-
-Calibration already exists at
-`experiments_v2/eval/results/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json`
-(baseline TTFT P95 = 2736 ms, TPOT P95 = 24.3 ms). The default SLO
-values in the sweep script (TTFT 5472/8208/16416 ms, TPOT 49/73/146 ms,
-i.e. baseline × {2, 3, 6}) are computed from this.
-
-```bash
-cd /home/yzhong76/code/my-vllm-serving-system
-
-rm -rf /dev/shm/vllm_ft_preempt_queue \
-       /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-HARDWARE_TAG=a6000 nohup \
-  bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
-  > /tmp/a6000_ruler16k_sweep.log 2>&1 &
-echo "PID: $!"
-```
-
-Monitor:
-```bash
-tail -f experiments_v2/eval/results/a6000/ruler16k_sweep_*.log
-ls experiments_v2/eval/results/a6000/e_m1_*_ruler_16k_*_metrics.json | wc -l
-```
-
-### 4b. L40S calibration (first time only)
-
-L40S has never been profiled on RULER_16K. Run calibration first so
-the SLO thresholds reflect L40S's own baseline, not A6000's. Takes
-~30 minutes (30 requests at QPS 0.02).
-
-```bash
-cd <repo path on L40S>
-git checkout zoe/disruption
-git pull origin zoe/disruption
-
-rm -rf /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-EVAL_RESULTS_DIR="$(pwd)/experiments_v2/eval/results/l40s" \
-PYTHONPATH="$(pwd)" \
-python -m experiments_v2.eval.scripts.slo_calibration \
-  --dataset ruler_16k \
-  --num-requests 30 \
-  --arrival-rate-qps 0.02 \
-  --seed 0
-
-# Verify file landed in the right place with the expected name
-ls experiments_v2/eval/results/l40s/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json
-```
-
-The QPS arg is mandatory: it must be `0.02` exactly, because the
-downstream E_M2 driver looks for the file by that name
-(see `e_m2_slo_tightness.py` `_CALIB_FILES`).
-
-### 4c. L40S — derive SLO numbers from L40S calibration
-
-```bash
-python -c "
-import json
-m = json.load(open('experiments_v2/eval/results/l40s/slo_calib_ruler_16k_n30_qps0.02_seed0_metrics.json'))
-ttft = m['ttft_ms']['p95']
-tpot = m['tpot_ms']['p95']
-print(f'# L40S baseline: TTFT P95 {ttft:.0f}ms, TPOT P95 {tpot:.1f}ms')
-print(f'export E_M1_TTFT_TIGHT_MS={int(ttft*2)}')
-print(f'export E_M1_TTFT_NORMAL_MS={int(ttft*3)}')
-print(f'export E_M1_TTFT_LOOSE_MS={int(ttft*6)}')
-print(f'export E_M1_TPOT_TIGHT_MS={int(round(tpot*2))}')
-print(f'export E_M1_TPOT_NORMAL_MS={int(round(tpot*3))}')
-print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
-"
-```
-
-Copy-paste the `export` lines into your shell. They override the
-defaults in the sweep script (which are A6000-derived).
-
-### 4d. L40S full sweep
-
-```bash
-rm -rf /dev/shm/vllm_ft_preempt_queue \
-       /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-HARDWARE_TAG=l40s nohup \
-  bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
-  > /tmp/l40s_ruler16k_sweep.log 2>&1 &
-echo "PID: $!"
-```
-
-Monitor:
-```bash
-tail -f experiments_v2/eval/results/l40s/ruler16k_sweep_*.log
-```
-
-### 4e. Sanity check — picker is actually firing
-
-Unlike ShareGPT (where the picker correctly fired 0 times after the
-manifest guard), RULER_16K runs should show picker fires. Look at
-the engine logs of an `ours` run:
-
-```bash
-grep "PICKER_DIAG" experiments_v2/eval/results/<hw>/e_m1_ours_ruler_16k_qps2.0_n60_seed0_engine*.log | head
-```
-
-`host_manifest_exists=True` should be the dominant case. If you see
-many fires with `host_manifest_exists=False`, the manifest guard is
-broken. If you see zero fires across all 3 seeds, the workload is
-not stressful enough — bump QPS or tighten SLO.
-
-### 4f. Long-output variant (RULER 16K + 1024-token forced output)
-
-The default RULER NIAH workload outputs only ~128 tokens per request,
-so the request finishes shortly after prefill ends and the picker
-mostly preempts mid-prefill victims. To exercise the mid-decode
-resume path (cross-engine reroute preserving partial output), we
-override `max_tokens=1024` and set `ignore_eos=True` so every
-request decodes the full 1024 tokens regardless of natural answer
-length. Files get an `_out1024` suffix so they coexist with the
-default 128-output runs.
-
-**Step 1 — calibration (~50 min per machine, run once each)**
-
-Important. The calibration QPS is 0.005, not the 0.02 used for
-short-output calibration. At 1024 output each request lives 25 to 30
-seconds, so qps=0.02 would push per-engine utilization to ~30% and
-inflate both TTFT and TPOT through queueing. qps=0.005 keeps
-per-engine utilization under 10%, giving a clean unloaded baseline.
-
-A6000:
-```bash
-cd /home/yzhong76/code/my-vllm-serving-system
-EVAL_RESULTS_DIR=experiments_v2/eval/results/a6000 \
-PYTHONPATH=. \
-python -m experiments_v2.eval.scripts.slo_calibration \
-  --dataset ruler_16k \
-  --num-requests 15 \
-  --arrival-rate-qps 0.005 \
-  --seed 0 \
-  --force-max-output-tokens 1024 \
-  --ignore-eos
-```
-
-L40S (after `git pull origin zoe/disruption`):
-```bash
-cd <repo path on L40S>
-EVAL_RESULTS_DIR=experiments_v2/eval/results/l40s \
-PYTHONPATH=. \
-python -m experiments_v2.eval.scripts.slo_calibration \
-  --dataset ruler_16k \
-  --num-requests 15 \
-  --arrival-rate-qps 0.005 \
-  --seed 0 \
-  --force-max-output-tokens 1024 \
-  --ignore-eos
-```
-
-Output:
-`<results_dir>/slo_calib_ruler_16k_out1024_n15_qps0.005_seed0_metrics.json`
-
-**Step 2 — derive new TTFT and TPOT SLO thresholds**
-
-Both TTFT and TPOT are re-derived from the long-output calibration.
-TTFT can shift even though prefill is unchanged because the
-calibration workload itself differs (longer requests, different
-queueing pattern). TPOT shifts because KV grows over the 1024-token
-decode.
-
-```bash
-python -c "
-import json
-m = json.load(open('experiments_v2/eval/results/<hw>/slo_calib_ruler_16k_out1024_n15_qps0.005_seed0_metrics.json'))
-ttft = m['ttft_ms']['p95']
-tpot = m['tpot_ms']['p95']
-print(f'TTFT P95={ttft:.0f}ms, TPOT P95={tpot:.1f}ms')
-print(f'export E_M1_TTFT_TIGHT_MS={int(round(ttft*2))}')
-print(f'export E_M1_TTFT_NORMAL_MS={int(round(ttft*3))}')
-print(f'export E_M1_TTFT_LOOSE_MS={int(round(ttft*6))}')
-print(f'export E_M1_TPOT_TIGHT_MS={int(round(tpot*2))}')
-print(f'export E_M1_TPOT_NORMAL_MS={int(round(tpot*3))}')
-print(f'export E_M1_TPOT_LOOSE_MS={int(round(tpot*6))}')
-"
-```
-
-Copy-paste the printed `export` lines into your shell.
-
-**Step 3 — full long-output sweep (~7-8 hours per machine)**
-
-QPS changes. At 1024 output each request lives roughly 30 s on
-A6000, so total cluster capacity (2 engines) drops to about
-0.07 req/s. The short-output QPS values 0.5/1.0/2.0 would all be in
-7x to 30x overload here. The long-output sweep uses 0.03/0.06/0.12
-QPS instead, which spans roughly 40% to 170% of capacity (light
-load, near saturation, moderate overload).
-
-SLO thresholds. Both TTFT and TPOT come from this machine's
-long-output calibration in step 2. Do not reuse the short-output
-SLOs.
-
-A6000:
-```bash
-cd /home/yzhong76/code/my-vllm-serving-system
-
-rm -rf /dev/shm/vllm_ft_preempt_queue \
-       /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-HARDWARE_TAG=a6000 \
-  FORCE_OUTPUT_TOKENS=1024 \
-  E_M1_QPS_SWEEP="0.03 0.06 0.12" \
-  E_M1_TTFT_TIGHT_MS=<from A6000 step 2> \
-  E_M1_TTFT_NORMAL_MS=<from A6000 step 2> \
-  E_M1_TTFT_LOOSE_MS=<from A6000 step 2> \
-  E_M1_TPOT_TIGHT_MS=<from A6000 step 2> \
-  E_M1_TPOT_NORMAL_MS=<from A6000 step 2> \
-  E_M1_TPOT_LOOSE_MS=<from A6000 step 2> \
-  nohup bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
-  > /tmp/a6000_ruler16k_out1024_sweep.log 2>&1 &
-echo "PID: $!"
-```
-
-L40S:
-```bash
-cd <repo path on L40S>
-
-rm -rf /dev/shm/vllm_ft_preempt_queue \
-       /dev/shm/vllm_ft_engine_status \
-       /dev/shm/vllm_ft_req_map \
-       /dev/shm/vllm_ft_checkpoints
-
-HARDWARE_TAG=l40s \
-  FORCE_OUTPUT_TOKENS=1024 \
-  E_M1_QPS_SWEEP="0.03 0.06 0.12" \
-  E_M1_TTFT_TIGHT_MS=<from L40S step 2> \
-  E_M1_TTFT_NORMAL_MS=<from L40S step 2> \
-  E_M1_TTFT_LOOSE_MS=<from L40S step 2> \
-  E_M1_TPOT_TIGHT_MS=<from L40S step 2> \
-  E_M1_TPOT_NORMAL_MS=<from L40S step 2> \
-  E_M1_TPOT_LOOSE_MS=<from L40S step 2> \
-  nohup bash experiments_v2/eval/scripts/run_paper_sweep_ruler16k.sh \
-  > /tmp/l40s_ruler16k_out1024_sweep.log 2>&1 &
-echo "PID: $!"
-```
-
-Result files:
-`experiments_v2/eval/results/<hw>/e_m1_<baseline>_ruler_16k_out1024_qps*_n60_seed*_metrics.json`
-
-**Step 4 — analyze**
-
-Compare with the default 128-output runs to show that mid-decode
-resume adds value when output is long:
-
-```bash
-python -c "
-import json, statistics
-from pathlib import Path
-for hw in ['a6000', 'l40s']:
-    print(f'=== {hw} long-output (1024) ===')
-    for qps in [0.5, 1.0, 2.0]:
-        for b in ['vllm_fcfs', 'ours_no_picker', 'ours']:
-            slos = []
-            for s in [0,1,2]:
-                p = f'experiments_v2/eval/results/{hw}/e_m1_{b}_ruler_16k_out1024_qps{qps}_n60_seed{s}_metrics.json'
-                if Path(p).exists():
-                    slos.append(json.load(open(p))['slo_met_pct'])
-            if slos:
-                print(f'  qps={qps} {b:16s}: {statistics.mean(slos):.1f}%')
-        print()
-"
-```
-
----
-
-## 5. Which SLO each experiment uses
-
-Heads-up because this is non-obvious: only E_M2 reads the calibration
-file. The others use hardcoded SLO numbers. The multiplier is baseline
-P95 × {2, 3, 6} for tight/normal/loose (tight was 1.5× before
-2026-05-13; bumped to 2× because 1.5× was inside the batch-size
-jitter on ShareGPT).
-
-| Experiment | Reads calibration? | SLO source |
-|---|---|---|
-| E_M1 ShareGPT | No | Hardcoded in `run_paper_sweep_sharegpt.sh` |
-| E_M1 RULER_16K | No | Hardcoded defaults in `run_paper_sweep_ruler16k.sh` (overridable via env vars — see section 4c for L40S) |
-| E_M2 | Yes | Per-hardware calibration × tightness factor × {2, 3, 6} |
-| E_M3 | No | Just measures TTFT/TPOT, no SLO threshold |
-| E_M4 | No | Same hardcoded numbers as E_M1 |
-| E_D1 | No | Disruption demo — not SLO-bound |
-
-Reasoning: the paper main figure (E_M1) needs both machines plotted
-against the same SLO bar so the curves are comparable. E_M2 is
-specifically a tightness sweep where each machine's curve is plotted
-against its own baseline — that's the only experiment where per-
-hardware calibration matters.
-
----
-
-## 6. After both machines finish
-
-```bash
-# Compare A6000 vs L40S tight-tier attainment at each QPS
-python -c "
-import json
-for hw in ('a6000', 'l40s'):
-    print(f'\n=== {hw} ===')
-    for qps in (1.0, 2.0, 4.0, 6.0, 8.0):
-        for b in ('vllm_fcfs', 'reroute_no_ckpt', 'ours'):
-            f = f'experiments_v2/eval/results/{hw}/e_m1_{b}_sharegpt_qps{qps}_n60_seed0_metrics.json'
-            try:
-                d = json.load(open(f))
-                t = d['per_class']['tight']['slo_met_pct']
-                print(f'  qps={qps} {b:18s} tight={t:.0f}%')
-            except FileNotFoundError:
-                pass
-"
-```
-
-Pick the hardware where ours' margin over baselines is biggest (or
-the only one where it wins) and submit that to the paper. The other
-becomes a portability check in the discussion or appendix.
-
----
-
-## 7. Cleanup / restart
-
-If a sweep gets interrupted and you want to retry, master shell is
-fail-tolerant (it doesn't `set -e`) — already-completed runs left
-their `metrics.json` on disk and the new run will overwrite. If you
-want a clean slate:
-
-```bash
-# Wipe one hardware's results
-rm -rf experiments_v2/eval/results/a6000/
-# or l40s/
-
-# Then rerun the calibration (L40S) and sweep
-```
-
----
-
-## 8. Where things live
+## Where output ends up
 
 ```
-experiments_v2/
-├── eval/
-│   ├── scripts/
-│   │   ├── e_m1_slo_sweep.py            # main sweep (used by all of these)
-│   │   ├── e_m2_slo_tightness.py         # driver — wraps e_m1 across tightness levels
-│   │   ├── e_m3_overhead.py             # standalone (no e_m1 wrap)
-│   │   ├── e_m4_picker_ablation.py       # driver — wraps e_m1 ours vs ours_no_picker
-│   │   ├── e_d1_disruption_demo.py       # standalone (single-kill demo)
-│   │   ├── slo_calibration.py            # standalone, run once per (hardware, dataset)
-│   │   ├── run_paper_sweep_sharegpt.sh   # ShareGPT master driver
-│   │   └── run_paper_sweep_ruler16k.sh   # RULER_16K master driver (E_M1 only)
-│   └── results/
-│       ├── *.json / *.log                # historical A6000-era files
-│       ├── a6000/                        # output of HARDWARE_TAG=a6000 runs
-│       └── l40s/                         # output of HARDWARE_TAG=l40s runs
-└── docs/
-    └── RUNBOOK_paper_sweep.md            # this file
+experiments_v2/eval/results/<HARDWARE_TAG>/
+  master_sweep_<timestamp>.log                                  ← master log
+  e_m1_<baseline>_mixed_short_long_qps<q>_n60_seed<s>_metrics.json
+  e_m1_<baseline>_mixed_short_long_qps<q>_n60_seed<s>_engine0.log
+  e_m1_<baseline>_mixed_short_long_qps<q>_n60_seed<s>_engine1.log
+  e_m1_<baseline>_mixed_short_long_qps<q>_n60_seed<s>_router.log (if applicable)
+  e_m3_<baseline>_sharegpt_n40_seed<s>_metrics.json
+```
+
+For analysis, key fields in metrics.json:
+
+```python
+{
+  "baseline": "...",
+  "dataset": "mixed_short_long",
+  "slo_mode": "mixed",
+  "slo": {
+    "tier_ttft_ms": {"short": ..., "long": ...},  # short/long, not tight/normal/loose
+    "tier_tpot_ms": {"short": ..., "long": ...},
+  },
+  "slo_met_pct": float,         # overall
+  "per_class": {
+    "short": {"n": ..., "slo_met_pct": ..., "ttft_p50": ..., "ttft_p95": ..., "tpot_p95": ...},
+    "long":  {"n": ..., "slo_met_pct": ..., "ttft_p50": ..., "ttft_p95": ..., "tpot_p95": ...},
+  },
+  "per_request": [...],          # per-request details with class tag
+}
 ```

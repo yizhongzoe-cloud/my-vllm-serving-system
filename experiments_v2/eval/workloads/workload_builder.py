@@ -162,3 +162,96 @@ def summarize_schedule(
         "max_tokens_p50": int(np.percentile(max_toks, 50)),
         "max_tokens_p95": int(np.percentile(max_toks, 95)),
     }
+
+
+def build_mixed_schedule(
+    short_dataset: str,
+    long_dataset: str,
+    short_ratio: float,
+    num_requests: int,
+    arrival_rate_qps: float,
+    seed: int = 0,
+    max_tokens_cap: int = DEFAULT_MAX_OUTPUT_CAP,
+) -> list[tuple[float, str, int, str]]:
+    """Build a Poisson schedule mixing two datasets.
+
+    For modeling realistic deployments where short interactive queries
+    (e.g. ShareGPT chatbot) coexist with long document analysis
+    (e.g. ArXiv-Summarization) on the same engine pool. Each request
+    is tagged with its origin class ("short" or "long") so the caller
+    can apply per-class SLO thresholds (JITServe-style).
+
+    Args:
+        short_dataset: workload_builder dataset name for the short class
+                       (e.g. 'sharegpt').
+        long_dataset: workload_builder dataset name for the long class
+                      (e.g. 'arxivsumm').
+        short_ratio: fraction of requests drawn from short_dataset.
+                     Long fraction = 1 - short_ratio.
+        num_requests: total request count across both classes.
+        arrival_rate_qps: Poisson rate λ over the combined stream.
+        seed: reproducibility.
+        max_tokens_cap: per-request max_tokens cap.
+
+    Returns:
+        List of (arrival_offset_s, prompt, max_tokens, class), sorted
+        by arrival_offset. `class` is "short" or "long".
+    """
+    if not 0.0 < short_ratio < 1.0:
+        raise ValueError(f"short_ratio must be in (0,1), got {short_ratio}")
+    n_short = int(round(num_requests * short_ratio))
+    n_long = num_requests - n_short
+    if n_short < 1 or n_long < 1:
+        raise ValueError(
+            f"num_requests={num_requests} with short_ratio={short_ratio} "
+            f"gives n_short={n_short}, n_long={n_long}; need both >= 1"
+        )
+
+    # Load each dataset independently; reuse seed for reproducibility.
+    short_path, short_tag = resolve_dataset_info(short_dataset)
+    long_path, long_tag = resolve_dataset_info(long_dataset)
+    short_recs = load_dataset(
+        dataset_name=short_tag, dataset_path=short_path,
+        max_samples=n_short, seed=seed,
+    )
+    long_recs = load_dataset(
+        dataset_name=long_tag, dataset_path=long_path,
+        max_samples=n_long, seed=seed + 1,  # different seed offset
+    )
+    if len(short_recs) < n_short:
+        raise RuntimeError(
+            f"short dataset {short_dataset} only has {len(short_recs)} "
+            f"records, need {n_short}"
+        )
+    if len(long_recs) < n_long:
+        raise RuntimeError(
+            f"long dataset {long_dataset} only has {len(long_recs)} "
+            f"records, need {n_long}"
+        )
+
+    # Tag each record with its class.
+    tagged: list[tuple[dict, str]] = (
+        [(r, "short") for r in short_recs] +
+        [(r, "long") for r in long_recs]
+    )
+
+    # Shuffle so short/long are interleaved in arrival order (not
+    # blocked into "all shorts first then all longs").
+    rng = np.random.default_rng(seed)
+    rng.shuffle(tagged)
+
+    # Poisson inter-arrival sequence over the combined stream.
+    if num_requests == 1:
+        offsets = np.array([0.0])
+    else:
+        inter = rng.exponential(
+            scale=1.0 / arrival_rate_qps, size=num_requests - 1,
+        )
+        offsets = np.concatenate([[0.0], np.cumsum(inter)])
+
+    schedule: list[tuple[float, str, int, str]] = []
+    for i, (rec, cls) in enumerate(tagged):
+        out_tokens = int(rec.get("expected_output_tokens", max_tokens_cap))
+        max_tokens = max(1, min(max_tokens_cap, out_tokens))
+        schedule.append((float(offsets[i]), rec["prompt"], max_tokens, cls))
+    return schedule

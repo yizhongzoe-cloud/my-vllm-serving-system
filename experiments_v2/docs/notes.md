@@ -1206,3 +1206,91 @@ L40S 需自跑 calibration 拿自家 P95（GPU 间 prefill 速度不同）。
 - E_M2 / E_M3 在两台都跑
 - E_D1 已经 OK，不重跑
 
+
+
+## Workload 第二次大改 (2026-05-16 下午) — 转 mixed short+long
+
+### 为啥再改
+
+第一次改方案（pure arxivsumm + uniform SLO）跑了 L40S 全量数据，**结论：故事不成立**。
+
+L40S E_M1 arxivsumm 主图数据：
+
+| baseline | QPS 0.3 | 0.5 | 1.0 | 1.5 | 2.0 |
+|---|---|---|---|---|---|
+| ours | 97.8 | 95.0 | 84.4 | 52.2 | 25.6 |
+| ours_no_picker | 97.8 | 95.0 | 87.8 | 53.3 | 27.2 |
+| reroute_no_ckpt | 97.8 | 95.0 | 86.7 | 57.8 | 28.3 |
+| **vllm_fcfs** | **97.8** | **97.8** | **89.4** | **56.7** | 24.4 |
+
+**ours 在所有中间 QPS 段都比 FCFS 差 2-5%**。Picker 实际上拉低 SLO attainment。
+
+### 根因
+
+拉 seed=0/1/2 的 prompt 长度分布看，ArXiv-Summ 60 个请求里：
+
+| seed | <2K | 2-4K | 4-8K | 8-16K | >16K |
+|---|---|---|---|---|---|
+| 0 | 2 | 6 | 29 | 22 | 1 |
+| 1 | 1 | 15 | 26 | 14 | 4 |
+| 2 | 2 | 6 | 30 | 13 | 9 |
+
+**绝大多数请求集中在 4-12K，连续分布，没 bimodal**。FCFS HoL 严重的前提是"短被长堵"——但这个 workload 短请求只有 1-2 个，picker 救短的机会几乎没有。Picker scan + reroute 的开销反而拖了后腿。
+
+ArXiv-Summ 是科学论文 abstracts，大多数论文 5-10K tokens，**自然分布就是 unimodal**，不暴露 HoL。
+
+### 新方案：70% ShareGPT + 30% ArXiv-Summ 混合
+
+Subagent 查了 8 篇 paper（Mooncake / Llumnix / DistServe / JITServe / TokenFlow / BurstGPT / Sarathi / Andes）后的结论：
+
+- **真正"interleaved 短 + 真 long-context"是空白**——Llumnix 最接近但他们的 "L" 才 ~5K
+- 主流生产系统（ChatGPT / Claude / Kimi / Gemini）都**单 endpoint 共服务长短**，没有"短引擎/长引擎"分开部署
+- BurstGPT 真 trace 比例约 90% 短 / 10% 长（Zipf）；Mooncake 是 70% 短 / 30% 长
+
+**我们选 70:30（介于 BurstGPT 和 Mooncake 之间）**。Paper §4 可以写：
+
+> "Following Llumnix [Sun'24] for mixed-stream construction methodology and JITServe [Foo'26] for per-application SLO assignment, we evaluate on a mixed workload combining ShareGPT (70%, mean 300 tokens, representing chat queries) with ArXiv-Summarization (30%, mean 8K tokens, representing document analysis). This 70:30 ratio matches the long-tail distribution observed in production traces such as Mooncake's Kimi data and BurstGPT."
+
+### SLO 也改：per-class（JITServe-style 2-class）
+
+不再 uniform。每请求**按来源 dataset** 自动带上自己的 SLO：
+
+| 类 | 来源 | SLO TTFT (A6000) | SLO TTFT (L40S) |
+|---|---|---|---|
+| short | ShareGPT | 912ms (2× 456) | 536ms (2× 268) |
+| long | ArXiv-Summ | 3902ms (2× 1951) | 2088ms (2× 1044) |
+
+**关键效果**：sharegpt 请求 SLO 紧（536/912ms），低负载下 TTFT 200ms 还有 300-700ms 余量。**只要前面堵 1 个长 prompt (~2s 排队) 就直接漏 SLO**。Picker 不抢长保短，sharegpt 批量漏——FCFS HoL story 暴露。
+
+### 代码改动 (commit 待定)
+
+- `workload_builder.py`：加 `build_mixed_schedule()` 函数，从两个 jsonl 按比例抽取 + 交错打乱 + Poisson 到达。返回 `(offset, prompt, max_tokens, class)` 4-tuple
+- `e_m1_slo_sweep.py`：
+  - `--dataset` choices 加 `mixed_short_long`
+  - 加 `--slo-mode mixed`（与 uniform/tiered 并列）
+  - 加 `--short-ttft-slo-ms / --short-tpot-slo-ms / --long-ttft-slo-ms / --long-tpot-slo-ms` 4 个 CLI 参数
+  - `class_of(idx)` 在 mixed 模式下读 schedule 自带的 class tag
+  - per-class 聚合时 class 集合从 (tight/normal/loose) 切到 (short/long)
+- `run_paper_sweep_master.sh` 重写：
+  - 砍 pure-arxivsumm 和 pure-sharegpt 的 E_M1 sweep（旧的不成立 + L40S 已经跑过）
+  - PHASE 1 跑 mixed E_M1
+  - PHASE 2 跑 mixed E_M2 tightness
+  - PHASE 3 保留 sharegpt E_M3 overhead
+  - **加 GPU pre-check**：启动前 `nvidia-smi` 显存 >2GB 直接 abort，防止上次那种 zombie OOM 失败
+
+### 5 个实验更新后的 owner
+
+| 实验 | Workload | SLO | 来源 |
+|---|---|---|---|
+| **E_M1** 主图 | mixed_short_long | per-class 2× P95 | A6000 + L40S 新跑 |
+| **E_M2** SLO tightness | mixed_short_long | per-class × {1.5, 2, 3, 4}×P95 | A6000 + L40S 新跑 |
+| **E_M3** overhead | sharegpt (低负载) | 无 SLO | A6000 + L40S 新跑（L40S 旧的有但用旧 baselines，可重用如 baseline 列不变） |
+| **E_M4** picker ablation | (mixed E_M1 数据复用) | (同 E_M1) | 0 新 run，分析 pivot |
+| **E_D1** failover | RULER 16K | — | v4 已 OK，不动 |
+
+### A6000 OOM 教训
+
+第一次启 A6000 master sweep 时 GPU 上还残留 ~44GB（calibration / smoke 留下的 VLLM::EngineCore zombie），engine 启不起来，**60 个 run 全部 OOM 失败**，空跑 4h。
+
+修复：master 脚本启动时强制 `nvidia-smi` 检查，>2GB 占用就 abort。kill 之前要 `nvidia-smi --query-compute-apps=pid` 找出真正占显存的 worker PID（不只是 api_server），逐个 `kill -9`。
+
