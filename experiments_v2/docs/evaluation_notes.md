@@ -52,8 +52,7 @@ restore 在 batched 路径下从多线程被调用，CUDA stream context + scatt
 | Env flag | 默认 | 干嘛 |
 |---|---|---|
 | `FT_CKPT_SKIP_PUBLISH` | OFF | 跳过 /dev/shm 写，只算 size。Ablation：隔离 GPU gather+copy vs 文件 IO 开销 |
-| `FT_FAST_CHUNK_FORMAT` | OFF | 用自定义二进制格式（5-10× 快于 torch.save） |
-| `FT_INLINE_MANIFEST` | OFF | 配合 FAST_CHUNK，manifest 嵌入 chunk header，省 2/3 文件 op |
+| `FT_FAST_CHUNK_FORMAT` | ON (默认) | 用自定义二进制格式（5-10× 快于 torch.save）。设 =0 退回 torch.save 调试用 |
 | `FT_FAST_TMPFS_WRITE` | OFF | 跳过 flush+fsync（tmpfs 上 fsync 没意义） |
 | `FT_NOGIL_WRITE` | OFF | ctypes-based libc write，跳过 GIL（依赖 checkpoint_write_ext.py） |
 | `FT_MERGE_LAYER_WRITE` | OFF | 32 layer 一次性 cat + tobytes + write（减 GIL acquire/release） |
@@ -65,7 +64,7 @@ restore 在 batched 路径下从多线程被调用，CUDA stream context + scatt
 
 **实验 / 性能跑分建议组合**：
 - `FT_BG_PUBLISH=1` —— publish 不阻塞主线程（推荐 paper evaluation 默认开）
-- `FT_FAST_CHUNK_FORMAT=1` + `FT_FAST_TMPFS_WRITE=1` + `FT_INLINE_MANIFEST=1` —— 三件套把 publish 单次成本从 ~50ms 降到 ~3-5ms（推荐 paper evaluation 默认开）
+- `FT_FAST_CHUNK_FORMAT` 默认就开，`FT_FAST_TMPFS_WRITE=1` 进一步省 fsync —— publish 单次成本从 ~50ms 降到 ~10ms。早期还有一个 `FT_INLINE_MANIFEST` 把 manifest 嵌进 chunk header 省 2/3 文件 op，但那条路径 router / picker 都靠 latest 指针文件定位有效 checkpoint，省 ~100us 不值得，已经删除。
 
 ### Proposal mapping
 

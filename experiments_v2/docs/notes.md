@@ -37,13 +37,12 @@ Cheap preempt：scheduler 想踢一个正在跑的请求让紧急请求上，踢
 性能档位（每次 publish 的开销）：
 
 配置	耗时	备注
-默认 (torch.save + fsync)	~50 ms	round 1 我们 smoke 跑的就是这个
+默认 (torch.save + fsync)	~50 ms	round 1 smoke 跑的就是这个
 FT_FAST_TMPFS_WRITE=1	~30 ms	跳 fsync，tmpfs 上 fsync 是冗余的
-FT_FAST_CHUNK_FORMAT=1	~10 ms	用自定义二进制格式跳 pickle 序列化
-上面两个一起 + FT_INLINE_MANIFEST=1	~3-5 ms	manifest 嵌进 chunk header，只写一个文件
+FT_FAST_CHUNK_FORMAT=1（默认开） ~10 ms	用自定义二进制格式跳 pickle 序列化；写 1 个 chunk + 1 个 manifest JSON + 1 个 latest 指针
 Publish 只在请求积累了新 block 时触发（增量，不是全量），所以每次写的实际数据量是 30KB-100KB，IO 不是瓶颈，syscall + fsync 是瓶颈。
 
-实际 paper evaluation 时 默认就该用 FAST_CHUNK + FAST_TMPFS_WRITE + INLINE_MANIFEST 三件套，跟 vLLM 默认 prefill 路径比开销可忽略（prefill 单步 100-200 ms）。
+实际 paper evaluation 默认就跑 FAST_CHUNK + FAST_TMPFS_WRITE，跟 vLLM 默认 prefill 路径比开销可忽略（prefill 单步 100-200 ms）。早期试过的 inline-manifest 优化已经删除，因为它跳过 latest 指针文件，picker 和 router 都靠这个文件定位 victim 的有效 checkpoint，省 2 个文件 op 的收益 < 1ms / save 不值得 broken cross-engine reroute。
 
 老分支 round 1/2 跑 30-concurrent 16K 没爆，说明这套组合性能 OK。
 

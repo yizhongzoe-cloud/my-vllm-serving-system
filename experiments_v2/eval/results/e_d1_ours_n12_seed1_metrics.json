@@ -2,44 +2,36 @@
   "baseline": "ours",
   "seed": 1,
   "num_requests": 12,
-  "kill_ts": 1778581239.4097867,
+  "kill_ts": 1778907233.4546564,
   "pre_kill_engine_counts": {
     "0": 6,
     "1": 6
   },
-  "num_first_token_events": 6,
+  "num_first_token_events": 4,
   "failover_gaps_ms": [
     {
-      "req_id": "cmpl-9679365888b00cd3-0-9de70b23",
-      "gap_ms": 1625.8172988891602
+      "req_id": "cmpl-a7552242a388939d-0-8ae3b608",
+      "gap_ms": 3761.2826824188232
     },
     {
-      "req_id": "cmpl-b200e24625b08820-0-aa25435a",
-      "gap_ms": 1626.007318496704
+      "req_id": "cmpl-83c6a16651f623a4-0-903279d0",
+      "gap_ms": 3761.3775730133057
     },
     {
-      "req_id": "cmpl-b7078ec9fd70c3bc-0-9bb05c81",
-      "gap_ms": 1626.0812282562256
+      "req_id": "cmpl-9c06312a49cf90ad-0-9838ba30",
+      "gap_ms": 3761.427640914917
     },
     {
-      "req_id": "cmpl-88f7c69e981ba46d-0-85c1de93",
-      "gap_ms": 1626.1482238769531
-    },
-    {
-      "req_id": "cmpl-8b971ddda37f274e-0-b8086451",
-      "gap_ms": 1626.211404800415
-    },
-    {
-      "req_id": "cmpl-8a378b5c0f762a6b-0-a8db3553",
-      "gap_ms": 1626.2762546539307
+      "req_id": "cmpl-8d708f134a4b38b2-0-959a00a5",
+      "gap_ms": 3761.467695236206
     }
   ],
   "failover_gap_stats_ms": {
-    "n": 6,
-    "min": 1625.8172988891602,
-    "p50": 1626.1147260665894,
-    "mean": 1626.0902881622314,
-    "max": 1626.2762546539307
+    "n": 4,
+    "min": 3761.2826824188232,
+    "p50": 3761.4026069641113,
+    "mean": 3761.388897895813,
+    "max": 3761.467695236206
   },
   "client_outcomes": {
     "200_ok": 12,
@@ -49,91 +41,91 @@
         "idx": 0,
         "status_code": 200,
         "error": null,
-        "completion_len": 900,
-        "total_s": 15.319648265838623
+        "completion_len": 158,
+        "total_s": 15.617582559585571
       },
       {
         "idx": 1,
         "status_code": 200,
         "error": null,
-        "completion_len": 882,
-        "total_s": 14.98580026626587
+        "completion_len": 892,
+        "total_s": 25.522509813308716
       },
       {
         "idx": 2,
         "status_code": 200,
         "error": null,
-        "completion_len": 1094,
-        "total_s": 15.318335771560669
+        "completion_len": 303,
+        "total_s": 28.640690088272095
       },
       {
         "idx": 3,
         "status_code": 200,
         "error": null,
-        "completion_len": 900,
-        "total_s": 15.038928747177124
+        "completion_len": 750,
+        "total_s": 26.543595552444458
       },
       {
         "idx": 4,
         "status_code": 200,
         "error": null,
-        "completion_len": 953,
-        "total_s": 15.316906452178955
+        "completion_len": 229,
+        "total_s": 18.019245147705078
       },
       {
         "idx": 5,
         "status_code": 200,
         "error": null,
-        "completion_len": 925,
-        "total_s": 15.092548847198486
+        "completion_len": 828,
+        "total_s": 27.929381370544434
       },
       {
         "idx": 6,
         "status_code": 200,
         "error": null,
-        "completion_len": 1269,
-        "total_s": 15.312763214111328
+        "completion_len": 389,
+        "total_s": 29.12637448310852
       },
       {
         "idx": 7,
         "status_code": 200,
         "error": null,
-        "completion_len": 905,
-        "total_s": 15.144970178604126
+        "completion_len": 772,
+        "total_s": 28.16663098335266
       },
       {
         "idx": 8,
         "status_code": 200,
         "error": null,
-        "completion_len": 200,
-        "total_s": 15.314478397369385
+        "completion_len": 830,
+        "total_s": 28.39254331588745
       },
       {
         "idx": 9,
         "status_code": 200,
         "error": null,
-        "completion_len": 900,
-        "total_s": 15.233531713485718
+        "completion_len": 80,
+        "total_s": 25.48275852203369
       },
       {
         "idx": 10,
         "status_code": 200,
         "error": null,
-        "completion_len": 900,
-        "total_s": 15.282768487930298
+        "completion_len": 498,
+        "total_s": 29.528557300567627
       },
       {
         "idx": 11,
         "status_code": 200,
         "error": null,
-        "completion_len": 883,
-        "total_s": 15.313149213790894
+        "completion_len": 794,
+        "total_s": 28.60733437538147
       }
     ]
   },
   "router_metrics_at_end": {
     "dispatch_count": 12,
-    "reroute_count": 6,
+    "reroute_count": 4,
     "dead_event_count": 1,
     "in_flight": 0
   }

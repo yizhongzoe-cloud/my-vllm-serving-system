@@ -54,14 +54,15 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ENGINE_READY_TIMEOUT_S = 240
 ROUTER_READY_TIMEOUT_S = 30
-PROMPT_TOKENS = 4096
+PROMPT_TOKENS = 16384               # RULER 16K — matches main SLO sweep
 MAX_OUTPUT_TOKENS = 200
 NUM_REQUESTS = 12
-DISPATCH_WAIT_TIMEOUT_S = 30        # all N req_map files appear
-CHUNK_WAIT_TIMEOUT_S = 60           # at least one ckpt chunk lands (ours only)
-PRE_KILL_DECODE_WAIT_S = 4          # extra settle time so decode is well underway
-REROUTE_DETECT_TIMEOUT_S = 15
-REQUEST_TIMEOUT_S = 180             # generous; reroute_no_ckpt reprefills 4K tokens
+DATASET_NAME = "ruler_16k"
+DISPATCH_WAIT_TIMEOUT_S = 60        # all N req_map files appear (slower at 16K)
+CHUNK_WAIT_TIMEOUT_S = 120          # at least one ckpt chunk lands (ours only)
+PRE_KILL_DECODE_WAIT_S = 20         # extra settle time so decode is well underway (16K needs more)
+REROUTE_DETECT_TIMEOUT_S = 30
+REQUEST_TIMEOUT_S = 300             # generous; reroute_no_ckpt reprefills 16K tokens
 
 FIRST_TOKEN_LOG_RE = re.compile(
     r"FT first_post_reroute_token req=(\S+) ts=(\d+\.\d+)"
@@ -94,8 +95,8 @@ def start_engine(
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", MODEL,
         "--port", str(port),
-        "--max-model-len", str(PROMPT_TOKENS + MAX_OUTPUT_TOKENS + 256),
-        "--gpu-memory-utilization", "0.5",
+        "--max-model-len", str(PROMPT_TOKENS + MAX_OUTPUT_TOKENS + 768),
+        "--gpu-memory-utilization", "0.9",
         "--dtype", "float16",
         "--enforce-eager",
         "--no-enable-prefix-caching",
@@ -160,17 +161,19 @@ def wait_both_engines_alive_in_router(timeout_s: int = 10) -> bool:
     return False
 
 
-def build_prompt_template() -> str:
-    """Build the shared prompt body (truncated to PROMPT_TOKENS−8 tokens).
-    Called once from main thread to avoid concurrent transformers imports
-    inside worker threads."""
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(MODEL)
-    base = "The quick brown fox jumps over the lazy dog. " * 16
-    ids = tok.encode(base)
-    repeats = PROMPT_TOKENS // max(1, len(ids)) + 2
-    text = base * repeats
-    return tok.decode(tok.encode(text)[:PROMPT_TOKENS - 8])
+def build_prompts(num_requests: int, seed: int) -> list[str]:
+    """Load num_requests distinct RULER 16K prompts via workload_builder, so
+    E_D1 uses the same dataset as the main SLO sweep (E_M1).
+    arrival_rate_qps is set high so offsets are tight; we ignore offsets
+    because E_D1 fires all requests roughly simultaneously."""
+    from experiments_v2.eval.workloads.workload_builder import build_schedule
+    schedule = build_schedule(
+        dataset_name=DATASET_NAME,
+        num_requests=num_requests,
+        arrival_rate_qps=1000.0,
+        seed=seed,
+    )
+    return [prompt for _, prompt, _ in schedule]
 
 
 class Client(threading.Thread):
@@ -335,8 +338,8 @@ def main() -> int:
             return 1
         print("[E_D1] router ready")
 
-        prompt_body = build_prompt_template()
-        clients = [Client(i, prompt_body) for i in range(n_req)]
+        prompts = build_prompts(n_req, args.seed)
+        clients = [Client(i, prompts[i]) for i in range(n_req)]
         for c in clients:
             c.start()
         fire_ts = time.time()

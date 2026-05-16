@@ -6568,15 +6568,10 @@ class GPUModelRunner(
     # the same dict-of-tensors structure that torch.save produced, so the
     # caller (_restore_shared_checkpoint) doesn't need to change.
     _FAST_CKPT_MAGIC = b"VLMCKPT\x00"
-    # Version 1: header + tensors only.  Manifest written to a separate
-    #            JSON file by _publish_shared_checkpoint.
-    # Version 2: header + inlined manifest JSON + tensors.  When set, the
-    #            manifest + latest pointer files are skipped entirely;
-    #            restore scans the request directory for chunk files
-    #            and picks the highest generation.  Enabled when
-    #            FT_INLINE_MANIFEST=1 is set together with FAST_CHUNK.
+    # Version 1: header + tensors only. Manifest is always written to a
+    # separate JSON file by _publish_shared_checkpoint so the picker and
+    # the router can locate it through the per-request latest pointer.
     _FAST_CKPT_VERSION_BASIC = 1
-    _FAST_CKPT_VERSION_INLINE_MANIFEST = 2
     _FAST_CKPT_DTYPE_MAP = {
         torch.float16: 0,
         torch.bfloat16: 1,
@@ -6590,15 +6585,8 @@ class GPUModelRunner(
         generation: int,
         layer_indices: list[int],
         sample_tensor: torch.Tensor,
-        manifest_bytes_len: int = 0,
     ) -> bytes:
-        """Build the 48-byte fixed header + per-layer index list.
-
-        Slot 9 of the fixed header is `manifest_bytes_len` (was reserved
-        in v1). When non-zero, it indicates that an inlined manifest
-        JSON of that length follows the header (after 8-byte align)
-        before the raw tensor bytes.
-        """
+        """Build the 48-byte fixed header + per-layer index list."""
         import struct
         shape = tuple(sample_tensor.shape)
         if len(shape) != 5:
@@ -6610,11 +6598,8 @@ class GPUModelRunner(
             raise ValueError(
                 f"FT_FAST_CHUNK_FORMAT unsupported dtype: {sample_tensor.dtype}"
             )
-        version = (
-            cls._FAST_CKPT_VERSION_INLINE_MANIFEST
-            if manifest_bytes_len > 0
-            else cls._FAST_CKPT_VERSION_BASIC
-        )
+        version = cls._FAST_CKPT_VERSION_BASIC
+        manifest_bytes_len = 0
         # 8 + 4*10 = 48 bytes fixed, then 4*N for layer indices
         head = (
             cls._FAST_CKPT_MAGIC
@@ -6644,20 +6629,12 @@ class GPUModelRunner(
         final_path: str,
         chunk_tensors: dict[int, torch.Tensor],
         generation: int,
-        manifest: Optional[dict] = None,
     ) -> None:
         """Save chunk_tensors to a single binary file with raw bytes.
 
         ~5-10x faster than torch.save for typical KV chunks because it
         skips pickle/zipfile overhead. The caller is responsible for
         atomicity (rename) and parent directory creation.
-
-        If `manifest` is provided (a JSON-serializable dict), it is
-        embedded into the chunk file (v2 format). When the inline
-        manifest is present, callers can skip writing the separate
-        manifest + latest-pointer files and the restore path can
-        scan the request directory for chunks instead of reading
-        the latest pointer.
         """
         if not chunk_tensors:
             raise ValueError("FT_FAST_CHUNK_FORMAT: chunk_tensors is empty")
@@ -6676,15 +6653,7 @@ class GPUModelRunner(
                     f"{sample.dtype}"
                 )
 
-        manifest_payload: bytes = b""
-        if manifest is not None:
-            manifest_payload = json.dumps(
-                manifest, sort_keys=True, separators=(",", ":"),
-            ).encode("utf-8")
-
-        header = self._fast_chunk_header(
-            generation, layer_indices, sample, len(manifest_payload),
-        )
+        header = self._fast_chunk_header(generation, layer_indices, sample)
 
         tmp_path = f"{final_path}.tmp.{os.getpid()}.{time.time_ns()}"
         os.makedirs(os.path.dirname(final_path), exist_ok=True)
@@ -6696,13 +6665,6 @@ class GPUModelRunner(
         # This removes ~2-3ms of GIL-hold time per checkpoint cycle
         # that previously contended with main-thread forward.
         from vllm.v1.worker.checkpoint_write_ext import fast_write_chunk
-
-        manifest_padded = b""
-        if manifest_payload:
-            pad = (-len(manifest_payload)) % 8
-            manifest_padded = (
-                manifest_payload + (b"\x00" * pad if pad else b"")
-            )
 
         tensors = []
         for li in layer_indices:
@@ -6719,9 +6681,7 @@ class GPUModelRunner(
         # cleanup. We add an outer try/except so write failures (where
         # fd is closed but tmp file is left behind) also get cleaned.
         try:
-            fast_write_chunk(
-                tmp_path, final_path, header, manifest_padded, tensors,
-            )
+            fast_write_chunk(tmp_path, final_path, header, b"", tensors)
         except Exception:
             try:
                 os.remove(tmp_path)
@@ -6734,11 +6694,7 @@ class GPUModelRunner(
         """Read a fast-format chunk file and return the same dict shape
         that torch.save produced (for backward compat with restore code):
             {"kv_tensors": {layer_idx: tensor},
-             "generation": int,
-             "manifest": dict | None}
-
-        Auto-detects v1 (no inlined manifest) vs v2 (inlined manifest)
-        via the manifest_bytes slot in the header.
+             "generation": int}
         """
         import struct
         with open(chunk_path, "rb") as f:
@@ -6751,13 +6707,10 @@ class GPUModelRunner(
         offset = len(cls._FAST_CKPT_MAGIC)
         (
             version, generation, num_layers,
-            d0, d1, d2, d3, d4, dtype_id, manifest_bytes_len,
+            d0, d1, d2, d3, d4, dtype_id, _reserved,
         ) = struct.unpack_from("<10I", data, offset)
         offset += 4 * 10
-        if version not in (
-            cls._FAST_CKPT_VERSION_BASIC,
-            cls._FAST_CKPT_VERSION_INLINE_MANIFEST,
-        ):
+        if version != cls._FAST_CKPT_VERSION_BASIC:
             raise ValueError(
                 f"FT_FAST_CHUNK_FORMAT: unknown version {version}"
             )
@@ -6767,19 +6720,6 @@ class GPUModelRunner(
         offset += 4 * num_layers
         # Pad to 8-byte alignment
         offset = (offset + 7) & ~7
-
-        manifest: Optional[dict] = None
-        if manifest_bytes_len > 0:
-            manifest_bytes = data[offset:offset + manifest_bytes_len]
-            try:
-                manifest = json.loads(manifest_bytes.decode("utf-8"))
-            except Exception as exc:
-                raise ValueError(
-                    f"FT_FAST_CHUNK_FORMAT: failed to parse inlined "
-                    f"manifest in {chunk_path}: {exc}"
-                ) from exc
-            offset += manifest_bytes_len
-            offset = (offset + 7) & ~7
 
         dtype = cls._FAST_CKPT_DTYPE_REV.get(dtype_id)
         if dtype is None:
@@ -6812,7 +6752,6 @@ class GPUModelRunner(
         return {
             "kv_tensors": kv_tensors,
             "generation": int(generation),
-            "manifest": manifest,
         }
 
     @classmethod
@@ -6858,69 +6797,6 @@ class GPUModelRunner(
         with open(manifest_path, encoding="utf-8") as f:
             data = json.load(f)
         return SharedCheckpointManifest.from_json_dict(data)
-
-    def _scan_latest_inline_manifest(
-        self,
-        request_id: str,
-    ) -> Optional[SharedCheckpointManifest]:
-        """FT_INLINE_MANIFEST restore path: scan the request directory
-        for chunk files written by this rank, find the highest
-        generation, read its embedded manifest.
-
-        Returns None if no v2 (inline-manifest) chunks are found —
-        callers should fall back to the legacy manifest+latest path.
-        """
-        request_dir = self._shared_request_dir(request_id)
-        if not os.path.isdir(request_dir):
-            return None
-        rank_tag = self._shared_rank_tag()
-        chunk_prefix = f"chunk_{rank_tag}_"
-        suffix = ".pt"
-        # Find the chunk file with the highest generation written by
-        # this rank.
-        best_gen = -1
-        best_path: Optional[str] = None
-        try:
-            for entry in os.scandir(request_dir):
-                name = entry.name
-                if not (
-                    name.startswith(chunk_prefix) and name.endswith(suffix)
-                ):
-                    continue
-                try:
-                    gen_str = name[len(chunk_prefix):-len(suffix)]
-                    gen = int(gen_str)
-                except ValueError:
-                    continue
-                if gen > best_gen:
-                    best_gen = gen
-                    best_path = entry.path
-        except OSError:
-            return None
-        if best_path is None:
-            return None
-        if not self._is_fast_chunk(best_path):
-            return None
-        try:
-            chunk_data = self._fast_load_chunk(best_path)
-        except Exception:
-            logger.exception(
-                "FT_INLINE_MANIFEST restore: failed to load chunk %s",
-                best_path,
-            )
-            return None
-        manifest_dict = chunk_data.get("manifest")
-        if manifest_dict is None:
-            # v1 chunk (no inlined manifest) — caller should fall back.
-            return None
-        try:
-            return SharedCheckpointManifest.from_json_dict(manifest_dict)
-        except Exception:
-            logger.exception(
-                "FT_INLINE_MANIFEST restore: malformed inlined manifest "
-                "in %s", best_path,
-            )
-            return None
 
     def _load_shared_ckpt_state(
         self,
@@ -7042,21 +6918,13 @@ class GPUModelRunner(
             output_token_ids=list(getattr(entry, "output_token_ids", []) or []),
         )
 
-        # FT_INLINE_MANIFEST=1: when set together with FT_FAST_CHUNK_FORMAT,
-        # embed the cumulative manifest into the chunk header (v2 format)
-        # and skip the separate manifest JSON + latest pointer file writes.
-        # Restore must scan the request directory for chunk files and pick
-        # the highest generation. Saves 2 of 3 file ops per save (~2-5 ms
-        # per RPC). Requires FAST_CHUNK_FORMAT to be on; ignored otherwise.
-        # Both default ON — the legacy pickle / 3-file path is kept only for
-        # opt-out (FT_FAST_CHUNK_FORMAT=0) since pickle serialization +
-        # 3 atomic renames per save dominates publish time under
-        # long-output / high-QPS load.
+        # Chunk write uses the fast binary format by default (raw struct +
+        # tensor bytes, skipping pickle). Set FT_FAST_CHUNK_FORMAT=0 to fall
+        # back to the legacy torch.save pickle path for debugging. Either
+        # way we always write the separate manifest JSON + latest pointer
+        # files, because the picker and the router both consume the latest
+        # pointer to discover whether a victim has a valid checkpoint.
         use_fast_chunk = os.environ.get("FT_FAST_CHUNK_FORMAT", "1") != "0"
-        inline_manifest = (
-            use_fast_chunk
-            and os.environ.get("FT_INLINE_MANIFEST", "1") != "0"
-        )
 
         try:
             if use_fast_chunk:
@@ -7064,10 +6932,6 @@ class GPUModelRunner(
                     chunk_path,
                     chunk_tensors,
                     next_generation,
-                    manifest=(
-                        manifest.to_json_dict()
-                        if inline_manifest else None
-                    ),
                 )
             else:
                 chunk_payload = {
@@ -7086,20 +6950,16 @@ class GPUModelRunner(
             )
             return prev_size_bytes, prev_covered_tokens
 
-        if not inline_manifest:
-            # Legacy path: separate manifest + latest pointer files.
-            try:
-                self._atomic_write_json(
-                    manifest_path, manifest.to_json_dict(),
-                )
-                self._atomic_write_latest(latest_path, manifest_filename)
-            except Exception:
-                logger.exception(
-                    "Checkpoint %s: failed to publish shared manifest %s",
-                    request_id,
-                    manifest_path,
-                )
-                return prev_size_bytes, prev_covered_tokens
+        try:
+            self._atomic_write_json(manifest_path, manifest.to_json_dict())
+            self._atomic_write_latest(latest_path, manifest_filename)
+        except Exception:
+            logger.exception(
+                "Checkpoint %s: failed to publish shared manifest %s",
+                request_id,
+                manifest_path,
+            )
+            return prev_size_bytes, prev_covered_tokens
 
         state.current_generation = next_generation
         state.published_full_blocks = stable_full_blocks
@@ -7124,11 +6984,8 @@ class GPUModelRunner(
     ) -> int:
         """Restore the latest published shared checkpoint generation.
 
-        Tries the legacy manifest+latest path first. If the latest
-        pointer is missing (e.g. publisher used FT_INLINE_MANIFEST=1),
-        falls back to scanning the request directory for chunk files
-        and reading the embedded manifest from the highest-generation
-        chunk.
+        Reads the per-request latest pointer file, loads the manifest it
+        references, and restores the listed KV blocks onto the worker.
 
         Args:
             sync: If True (default), sync the CUDA stream before
@@ -7157,13 +7014,9 @@ class GPUModelRunner(
                 )
 
         if manifest is None:
-            # FT_INLINE_MANIFEST publisher path — scan the dir.
-            manifest = self._scan_latest_inline_manifest(request_id)
-
-        if manifest is None:
             logger.warning(
-                "Restore %s: no manifest available (no latest pointer "
-                "and no v2 chunk in %s)",
+                "Restore %s: no manifest available "
+                "(no latest pointer in %s)",
                 request_id, request_dir,
             )
             return 0

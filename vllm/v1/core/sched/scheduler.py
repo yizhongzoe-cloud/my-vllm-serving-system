@@ -2178,9 +2178,18 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            # The "first post-reroute token" log measures the failover
+            # gap from a router-side kill timestamp to the next token
+            # emitted on the surviving peer. For reroute_no_ckpt this
+            # is the first decode token after reprefill (num_output==0).
+            # For ours the V3 reload state machine pre-loads the prior
+            # engine's output tokens via append_output_token_ids, so
+            # num_output is already non-zero; we still want to log the
+            # first token this engine actually generates. Use a one-shot
+            # flag instead of num_output==0.
             is_first_post_reroute = (
                 getattr(request, "is_rerouted", False)
-                and request.num_output_tokens == 0
+                and not getattr(request, "_ft_first_post_reroute_logged", False)
             )
             request.append_output_token_ids(output_token_id)
             if is_first_post_reroute:
@@ -2188,6 +2197,7 @@ class Scheduler(SchedulerInterface):
                     "FT first_post_reroute_token req=%s ts=%.6f",
                     request.request_id, time.time(),
                 )
+                request._ft_first_post_reroute_logged = True
 
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.

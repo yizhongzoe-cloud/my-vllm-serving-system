@@ -34,8 +34,7 @@ Naming conventions:
 | `FT_CAPACITY_PREEMPT_RELOAD` | unset (=0) | engine core init | master switch for the V3 reload path. When 0, capacity preempt falls back to vanilla vLLM recompute. |
 | `FT_CAPACITY_PREEMPT_RELOAD_OVERLAP` | unset (=0) | engine core init | enables the overlap reload state machine (alloc → reload → admit pipelined across scheduler steps). Without this, V3 reload is synchronous and ties up a scheduler step. |
 | `FT_DELTA_CHECKPOINT` | unset (=0) | engine core init | enables incremental (per-new-block) ckpt save instead of full snapshot. |
-| `FT_INLINE_MANIFEST` | unset | worker save path | optional optimization: inline manifest bytes into chunk file instead of separate manifest write. |
-| `FT_FAST_CHUNK_FORMAT` | unset | worker save path | use the raw fast chunk format (ctypes libc.write) instead of pickle. |
+| `FT_FAST_CHUNK_FORMAT` | `1` (default on) | worker save path | use the raw fast chunk format (ctypes libc.write) instead of pickle. Set to `0` to fall back to the legacy `torch.save` path for debugging. |
 | `FT_CKPT_FIXED_BLOCKS` | `1` | engine `_save_checkpoints_if_needed` | how many new full blocks must accumulate before a save RPC is fired. 1 = save every block. |
 | `FT_CKPT_SKIP_PUBLISH` | unset | worker save path | debug flag: skip the /dev/shm publish step (compute the save but don't publish). |
 | `FT_CKPT_STATS_LOG` | unset | engine | turn on per-step ckpt save stats logging (for analysis). |
