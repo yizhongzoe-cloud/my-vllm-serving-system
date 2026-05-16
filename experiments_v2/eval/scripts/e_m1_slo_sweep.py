@@ -372,7 +372,9 @@ def main() -> int:
                                  "ours_no_picker", "ours"],
                         required=True)
     parser.add_argument("--dataset",
-                        choices=["ruler_64k", "ruler_16k", "sharegpt"],
+                        choices=["ruler_64k", "ruler_16k", "ruler_8k",
+                                 "ruler_4k", "ruler_2k", "ruler_1k",
+                                 "ruler_mixed", "sharegpt"],
                         required=True)
     parser.add_argument("--num-requests", type=int, required=True)
     parser.add_argument("--arrival-rate-qps", type=float, required=True)
@@ -470,8 +472,18 @@ def main() -> int:
         if args.dataset == "ruler_64k":
             max_model_len = 65536 + (256 if args.force_max_output_tokens is None
                                      else output_margin)
-        elif args.dataset == "ruler_16k":
+        elif args.dataset in ("ruler_16k", "ruler_mixed"):
+            # ruler_mixed has prompts up to 16K; engine needs the 16K
+            # cap so the longest record fits.
             max_model_len = 16384 + output_margin
+        elif args.dataset == "ruler_8k":
+            max_model_len = 8192 + output_margin
+        elif args.dataset == "ruler_4k":
+            max_model_len = 4096 + output_margin
+        elif args.dataset == "ruler_2k":
+            max_model_len = 2048 + output_margin
+        elif args.dataset == "ruler_1k":
+            max_model_len = 1024 + output_margin
         else:  # sharegpt
             max_model_len = 4096 + output_margin
     else:

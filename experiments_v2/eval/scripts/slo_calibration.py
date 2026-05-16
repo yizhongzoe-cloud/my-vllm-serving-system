@@ -207,7 +207,9 @@ def main() -> int:
                              "service time so no queueing.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset", default="ruler_64k",
-                        choices=["ruler_64k", "ruler_16k", "sharegpt"])
+                        choices=["ruler_64k", "ruler_16k", "ruler_8k",
+                                 "ruler_4k", "ruler_2k", "ruler_1k",
+                                 "ruler_mixed", "sharegpt"])
     parser.add_argument("--force-max-output-tokens", type=int, default=None,
                         help="Override per-request max_tokens (paired with "
                              "--ignore-eos) for long-output calibration.")

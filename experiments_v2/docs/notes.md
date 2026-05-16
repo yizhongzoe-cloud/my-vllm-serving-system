@@ -1099,3 +1099,33 @@ PYTHONPATH=. python -m experiments_v2.eval.scripts.e_m1_slo_sweep \
 数据文件：`experiments_v2/eval/results/e_m1_*_sharegpt_qps*_n60_seed*_metrics.json`，bug 修复前的备份后缀是 `.prebugfix`
 
 
+
+## Cross-engine picker thrashing (2026-05-16) — option B applied, option A deferred
+
+发现：picker 在 saturation 下乒乓——同一个 request 在 engine 0 / engine 1 之间来回被踢。**根因**：picker 的 cooldown 表 `_priority_preempt_history[req_id]` 用的是 engine 内部 internal_req_id。请求跨 engine 后 vLLM 给它新 internal_id，新 engine 不知道它刚被踢过，可以立刻再踢。
+
+具体实验数据（A6000 RULER 16K short, qps=1.0, seed=0, 60 个请求）：
+- engine0 picker fire 23 次，preempt-for-cross-engine 46 次
+- engine1 picker fire 22 次，preempt-for-cross-engine 44 次
+- 总 90 次 preempt 事件，60 个请求 → 平均每个请求被踢 1.5 次
+- 32 个请求 produce request_done log，28 个"消失"（client 拿到 200 但 engine 没记录完成）
+
+### 备选修法
+
+**A. 共享 cooldown via /dev/shm**
+- 两个 engine 把 "(router_req_id, last_preempt_ts)" 写到共享文件
+- picker 每次 fire 决策前读共享文件，确认 victim 没在全局 cooldown 内
+- 优点：全局视图，3+ engine 也正确；语义最严格
+- 缺点：picker 每次 fire 多一次 shm read（增加 ~10us）；shm 并发写要 atomic；多一个 shm 协调表
+- 工作量：~30 行代码 + 测试
+
+**B. 新到豁免（已应用 2026-05-16）**
+- engine 在 add_request 看到 `is_rerouted=True` 且要走 V3 reload 路径时，把
+  `scheduler._priority_preempt_history[request_id] = time.time()` 写好
+- picker 自然在 cooldown 期内 skip 这个 victim（无需改 picker 代码）
+- 优点：5 行代码；复用现有 cooldown 机制；零额外 runtime 开销
+- 缺点：只防"刚跨过来"，不防 A→B→C→A 这种长链；对 2 engine 够用
+- 实现位置：`vllm/v1/engine/core.py` add_request 函数，is_rerouted 处理块的最开头
+
+### 选 B 的理由
+2 engine setup 下 A 和 B 实战效果几乎一样（都把 thrashing 周期拉到 ≥cooldown_ms）。B 简单 5 行，无 runtime 代价。**3+ engine 部署时再升级到 A**。

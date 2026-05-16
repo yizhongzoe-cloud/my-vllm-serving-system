@@ -488,6 +488,20 @@ class EngineCore:
             and request.original_internal_req_id is not None
             and request.num_checkpointed_tokens > 0
         ):
+            # Newly-admitted exemption from picker. Prime the scheduler's
+            # per-request preempt history so this rerouted request enjoys
+            # one cooldown period before this engine's picker can fire on
+            # it. Without this exemption the picker on the receiving
+            # engine sees a fresh internal request_id, has no cooldown
+            # record, and can preempt the request again immediately,
+            # producing cross-engine ping-pong. The picker cooldown gate
+            # consumes _priority_preempt_history; setting it to "now"
+            # makes the gate skip this victim until cooldown_ms elapses.
+            if not hasattr(self.scheduler, "_priority_preempt_history"):
+                self.scheduler._priority_preempt_history = {}
+            self.scheduler._priority_preempt_history[request.request_id] = (
+                time.time()
+            )
             prompt_tokens = len(request.prompt_token_ids or [])
             block_size = self.vllm_config.cache_config.block_size
 

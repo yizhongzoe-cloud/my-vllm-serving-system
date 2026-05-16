@@ -33,6 +33,13 @@ DEFAULT_MAX_OUTPUT_CAP = 200
 _DATASET_INFO: dict[str, tuple[str, str]] = {
     "ruler_64k": ("ruler_64k_niah.jsonl", "ruler_64k_niah"),
     "ruler_16k": ("ruler_16384_niah_trunc.jsonl", "ruler_16384_niah_trunc"),
+    "ruler_8k": ("ruler_8192_niah_trunc.jsonl", "ruler_8192_niah_trunc"),
+    "ruler_4k": ("ruler_4096_niah_trunc.jsonl", "ruler_4096_niah_trunc"),
+    "ruler_2k": ("ruler_2048_niah_trunc.jsonl", "ruler_2048_niah_trunc"),
+    "ruler_1k": ("ruler_1024_niah_trunc.jsonl", "ruler_1024_niah_trunc"),
+    "ruler_mixed": (
+        "ruler_mixed_niah_trunc.jsonl", "ruler_mixed_niah_trunc",
+    ),
     "sharegpt": ("sharegpt_5000.jsonl", "sharegpt"),
 }
 
