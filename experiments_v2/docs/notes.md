@@ -1129,3 +1129,80 @@ PYTHONPATH=. python -m experiments_v2.eval.scripts.e_m1_slo_sweep \
 
 ### 选 B 的理由
 2 engine setup 下 A 和 B 实战效果几乎一样（都把 thrashing 周期拉到 ≥cooldown_ms）。B 简单 5 行，无 runtime 代价。**3+ engine 部署时再升级到 A**。
+
+
+
+## Workload + SLO 方法学大改 (2026-05-16) — RULER 砍掉、转 ArXiv-Summ，uniform SLO
+
+### 背景：为啥改
+
+跟用户 review 各 SLO scheduling paper 怎么定 workload + SLO 时，subagent 调研了 11+ 篇 paper（Niyama / QLM / JITServe / Scorpio / Llumnix / TokenFlow / Andes / FlowPrefill / DistServe / Sarathi-Serve / Mooncake / LoongServe 等）：
+
+- **0 篇用 RULER 当 serving workload**。RULER 是模型准确率 benchmark（NIAH 针稻草堆），不是 arrival stream
+- **long-context + scheduling SLO 真正交集只有 2 篇**：Andes (ArXiv-Summ mean 17.8K) + FlowPrefill (生产 QwenTrace P95 16-22K)
+- DistServe / Sarathi / Mooncake / LoongServe 都不是调度 paper，他们用 LongBench / 真实 trace 但解的是 disaggregation / chunked prefill / KV tier，不是请求级优先调度
+
+之前 ruler_mixed (1K-16K 自造混合) 是用户和我推方法学时拍脑袋出来的，**没有 community 先例**。RULER 16K 单一长度又不暴露 FCFS HoL（用户原话："prompt 都一样长肯定显不出我们优势"）。
+
+### 决定
+
+**Workload 换 ArXiv-Summarization** (Cohan et al. NAACL'18, ccdv/arxiv-summarization on HF)：
+- Andes 用过同款，唯一 long-context + scheduling SLO 公开先例
+- 真实长文档（科学论文 → abstract），非合成 NIAH
+- Public + reproducible，没权限问题
+- 跟 paper 的 long-context RAG framing 完美契合
+
+**SLO 换成 uniform JITServe-style** (2× baseline P95)：
+- Andes 的 length-scaled per-request SLO（`max(prompt_tokens/5000, 1)s`）用户嫌复杂，且 Andes 本身 MLSys'25 被拒只有 preprint
+- JITServe (NSDI'26 accepted) 用全局 P95 × 2，单一阈值给所有请求，最简单也最 reviewer-friendly
+- 砍掉 3-tier 随机分类（之前 e_m1 默认 mode）
+- Tightness sensitivity 仍然存在（E_M2 sweep tightness factor，不在 run 内分类）
+
+**最终方法学定位**：
+> Following Andes [arXiv 2404.16283] for workload selection (ArXiv-Summarization)
+> and JITServe [arXiv 2504.20068] for SLO threshold definition (2× baseline P95),
+> we evaluate on a long-context serving setting with a single, calibrated SLO.
+
+两边各取 peer-reviewed 那部分（JITServe 已 accept），workload 取 Andes 唯一 long-context 公开数据集先例。
+
+### 拆解：5 个实验各自的调整
+
+| 实验 | 原方案 | 新方案 | 改动 |
+|---|---|---|---|
+| **E_M1 SLO sweep** (主图) | ruler_16k + ruler_mixed + sharegpt，3-tier random，1.5/3/6× P95 | **arxivsumm + sharegpt**，uniform SLO，2× P95 | 数据集换；SLO mode 换 uniform；运行参数同（4 baseline × 6 QPS × 3 seed） |
+| **E_M2 SLO tightness** (sensitivity sub-figure) | 固定 QPS，3-tier 各档乘 tightness factor {0.7, 1, 1.5} | 固定 QPS，单 SLO 阈值扫 {0.5×, 1×, 2×, 4×} P95 | tier 砍掉；扫 tightness 改成"扫 SLO 阈值倍数" |
+| **E_M3 overhead** (无负载基线) | sharegpt 40 req @ 5s 间隔，3 baseline，无 SLO | 同样 sharegpt，**保持不动**（测无负载开销不依赖 SLO 定义） | 不改 |
+| **E_M4 picker ablation** | ours vs ours_no_picker × QPS sweep（独立跑） | **数据复用 E_M1 的 ours / ours_no_picker 两 baseline 列**，不单独跑 | 砍独立 run，分析时 pivot |
+| **E_D1 disruption failover** | RULER 16K，kill engine 测 failover CDF | **保留 RULER 16K**（作为 "controlled long-context microbench"，跟 E_M1 主 workload 解耦） | 不改。v4 数据已 OK，Fig 5 已嵌 |
+
+### 关键文件改动 (commits in 1502d8032)
+
+- `experiments_v2/datasets/make_arxivsumm.py` (新增): 下载 ccdv/arxiv-summarization test split，过滤 1K ≤ tokens ≤ 30K，cache 成 jsonl
+- `experiments_v2/datasets/cached/arxivsumm.jsonl` (198MB, **gitignored**，每台机器自己跑 make script 重生成，seed=42 确定性)
+- `experiments_v2/eval/workloads/workload_builder.py`: 加 `arxivsumm` 进 `_DATASET_INFO`
+- `experiments_v2/eval/scripts/slo_calibration.py`: `--dataset` choices 加 arxivsumm
+- `experiments_v2/eval/scripts/e_m1_slo_sweep.py`: `--dataset` choices 加 arxivsumm；`max_model_len` 默认 32768
+- `experiments_v2/eval/scripts/run_paper_sweep_arxivsumm.sh` (新增): E_M1 wrapper，`--slo-mode uniform`，默认 QPS {0.1 0.3 0.5 1.0 1.5 2.0}
+
+### A6000 ArXiv-Summ calibration 结果（2026-05-16）
+
+```
+prompt_tokens: P50=7178, mean=8458, P95=18712, max=29974 (6316 records after filter)
+TTFT P95 = 1951 ms  (suggests prefill ~ 9-10K tok/s on A6000 Qwen2.5-7B fp16)
+TPOT P95 = 25.8 ms
+E2E P95  = 6662 ms
+
+→ SLO (2× P95):
+  TTFT_SLO = 3902 ms
+  TPOT_SLO = 52 ms
+```
+
+L40S 需自跑 calibration 拿自家 P95（GPU 间 prefill 速度不同）。
+
+### 待办
+
+- L40S arxivsumm calibration（用户去跑）
+- A6000 E_M1 sweep on arxivsumm（smoke 过了之后启）
+- E_M2 / E_M3 在两台都跑
+- E_D1 已经 OK，不重跑
+
