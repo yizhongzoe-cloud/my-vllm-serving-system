@@ -209,7 +209,7 @@ def main() -> int:
     parser.add_argument("--dataset", default="ruler_64k",
                         choices=["ruler_64k", "ruler_16k", "ruler_8k",
                                  "ruler_4k", "ruler_2k", "ruler_1k",
-                                 "ruler_mixed", "sharegpt"])
+                                 "ruler_mixed", "sharegpt", "arxivsumm"])
     parser.add_argument("--force-max-output-tokens", type=int, default=None,
                         help="Override per-request max_tokens (paired with "
                              "--ignore-eos) for long-output calibration.")

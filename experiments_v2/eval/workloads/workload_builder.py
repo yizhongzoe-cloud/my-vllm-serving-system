@@ -41,6 +41,7 @@ _DATASET_INFO: dict[str, tuple[str, str]] = {
         "ruler_mixed_niah_trunc.jsonl", "ruler_mixed_niah_trunc",
     ),
     "sharegpt": ("sharegpt_5000.jsonl", "sharegpt"),
+    "arxivsumm": ("arxivsumm.jsonl", "arxivsumm"),
 }
 
 

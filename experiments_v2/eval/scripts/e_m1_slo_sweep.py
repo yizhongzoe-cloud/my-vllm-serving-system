@@ -374,7 +374,7 @@ def main() -> int:
     parser.add_argument("--dataset",
                         choices=["ruler_64k", "ruler_16k", "ruler_8k",
                                  "ruler_4k", "ruler_2k", "ruler_1k",
-                                 "ruler_mixed", "sharegpt"],
+                                 "ruler_mixed", "sharegpt", "arxivsumm"],
                         required=True)
     parser.add_argument("--num-requests", type=int, required=True)
     parser.add_argument("--arrival-rate-qps", type=float, required=True)
@@ -484,6 +484,9 @@ def main() -> int:
             max_model_len = 2048 + output_margin
         elif args.dataset == "ruler_1k":
             max_model_len = 1024 + output_margin
+        elif args.dataset == "arxivsumm":
+            # arxivsumm prompts capped at 30K; need 32K headroom for output.
+            max_model_len = 32768
         else:  # sharegpt
             max_model_len = 4096 + output_margin
     else:
