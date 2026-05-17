@@ -1,0 +1,40 @@
+===== vllm_fcfs Sun May 17 02:53:46 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 48.23665198303679, 'empirical_qps': 1.2231362993590085, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: short=42 long=18
+[dual] SLO short: TTFT≤2000ms TPOT≤100.0ms
+[dual] SLO long: TTFT≤30000ms TPOT≤500.0ms
+[dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_engine0.log
+[dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_engine1.log
+[dual] both engines ready
+[dual] vllm_fcfs: bypassing router, client round-robin
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 51.7% (31/60)
+[dual]   short: 31.0% (13/42)
+[dual]   long: 100.0% (18/18)
+[dual] TTFT_ms P50=2551.0 P95=8948.4
+[dual] TPOT_ms P50=94.8 P95=168.0
+[dual] E2E_ms  P50=25138.5 P95=37974.1
+[dual] metrics → experiments_v2/eval/results/a6000/dual_vllm_fcfs_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_metrics.json
+===== ours (RR router + HEAD_TOO_LATE off) Sun May 17 02:55:14 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 48.23665198303679, 'empirical_qps': 1.2231362993590085, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: short=42 long=18
+[dual] SLO short: TTFT≤2000ms TPOT≤100.0ms
+[dual] SLO long: TTFT≤30000ms TPOT≤500.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 51.7% (31/60)
+[dual]   short: 31.0% (13/42)
+[dual]   long: 100.0% (18/18)
+[dual] TTFT_ms P50=2050.6 P95=7377.0
+[dual] TPOT_ms P50=114.0 P95=220.4
+[dual] E2E_ms  P50=25227.1 P95=50808.5
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v4_rr_metrics.json
+===== done Sun May 17 02:56:57 AM PDT 2026 =====

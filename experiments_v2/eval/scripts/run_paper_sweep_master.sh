@@ -93,11 +93,19 @@ check_gpu_free() {
 
 check_gpu_free
 
-# Compute 2x default SLOs.
-SHORT_TTFT_SLO_MS=$((SHORT_P95_TTFT_MS * 2))
-SHORT_TPOT_SLO_MS=$((SHORT_P95_TPOT_MS * 2))
-LONG_TTFT_SLO_MS=$((LONG_P95_TTFT_MS * 2))
-LONG_TPOT_SLO_MS=$((LONG_P95_TPOT_MS * 2))
+# Per-class SLO multipliers (× P95 baseline).
+# Short tighter than long: chat / autocomplete SLOs are naturally
+# tighter than doc analysis SLOs in production (Niyama: interactive
+# 6s vs batch 1800s ≈ 300×; ours uses milder 1.5× / 2× = 1.33×
+# differential ratio, still application-motivated).
+SHORT_SLO_MULT="${SHORT_SLO_MULT:-1.5}"
+LONG_SLO_MULT="${LONG_SLO_MULT:-2}"
+SHORT_TTFT_SLO_MS=$(echo "scale=0; ${SHORT_P95_TTFT_MS} * ${SHORT_SLO_MULT} / 1" | bc)
+SHORT_TPOT_SLO_MS=$(echo "scale=0; ${SHORT_P95_TPOT_MS} * ${SHORT_SLO_MULT} / 1" | bc)
+LONG_TTFT_SLO_MS=$(echo "scale=0; ${LONG_P95_TTFT_MS} * ${LONG_SLO_MULT} / 1" | bc)
+LONG_TPOT_SLO_MS=$(echo "scale=0; ${LONG_P95_TPOT_MS} * ${LONG_SLO_MULT} / 1" | bc)
+echo "[master] short SLO: TTFT=${SHORT_TTFT_SLO_MS}ms (${SHORT_SLO_MULT}× P95)"
+echo "[master] long  SLO: TTFT=${LONG_TTFT_SLO_MS}ms (${LONG_SLO_MULT}× P95)"
 
 echo ""
 echo "================================================================"
@@ -137,9 +145,15 @@ for seed in ${E_M2_SEEDS}; do
     short_tpot=$(echo "scale=0; ${SHORT_P95_TPOT_MS} * ${factor} / 1" | bc)
     long_ttft=$(echo "scale=0; ${LONG_P95_TTFT_MS} * ${factor} / 1" | bc)
     long_tpot=$(echo "scale=0; ${LONG_P95_TPOT_MS} * ${factor} / 1" | bc)
+    # `t<factor>x` suffix prevents output files from colliding across
+    # tightness factors that share (baseline, qps, seed). Workload
+    # is determined by seed alone, so all factors at the same seed
+    # use the IDENTICAL workload — making the comparison clean.
+    out_tag="t${factor}x"
+    out_tag="${out_tag//./_}"   # bash: 1.5 → 1_5 (avoid '.' in filenames)
     for baseline in ${BASELINES_M1}; do
       tag_seed=$((seed + 100))
-      echo "[master] E_M2 mixed baseline=${baseline} factor=${factor}x seed=${seed}->${tag_seed}"
+      echo "[master] E_M2 mixed baseline=${baseline} factor=${factor}x seed=${seed}->${tag_seed} tag=${out_tag}"
       cleanup_shm
       python -m experiments_v2.eval.scripts.e_m1_slo_sweep \
         --baseline "${baseline}" \
@@ -153,6 +167,7 @@ for seed in ${E_M2_SEEDS}; do
         --short-tpot-slo-ms ${short_tpot} \
         --long-ttft-slo-ms ${long_ttft} \
         --long-tpot-slo-ms ${long_tpot} \
+        --out-tag "${out_tag}" \
         2>&1 || echo "[master] WARN: E_M2 mixed baseline=${baseline} factor=${factor} seed=${seed} FAILED"
     done
   done

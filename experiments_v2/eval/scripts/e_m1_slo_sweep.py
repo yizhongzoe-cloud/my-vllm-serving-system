@@ -120,10 +120,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
-    build_schedule, build_mixed_schedule, summarize_schedule,
+    build_schedule, build_mixed_schedule, build_trace_schedule,
+    summarize_schedule,
 )
 
-MODEL = os.path.expanduser("~/model/Qwen2.5-7B-Instruct")
+MODEL = os.path.expanduser("~/model/Qwen2.5-14B-Instruct")
 ENGINE_0_PORT = 8401
 ENGINE_1_PORT = 8402
 ROUTER_PORT = 8400
@@ -195,7 +196,8 @@ def start_engine(engine_id: int, port: int, gpu: str,
         "--model", MODEL,
         "--port", str(port),
         "--max-model-len", str(max_model_len),
-        "--gpu-memory-utilization", "0.9",  # long-context needs headroom
+        "--gpu-memory-utilization",
+        os.environ.get("FT_GPU_MEMORY_UTILIZATION", "0.9"),
         "--dtype", "float16",
         "--enforce-eager",
         "--no-enable-prefix-caching",
@@ -375,7 +377,7 @@ def main() -> int:
                         choices=["ruler_64k", "ruler_16k", "ruler_8k",
                                  "ruler_4k", "ruler_2k", "ruler_1k",
                                  "ruler_mixed", "sharegpt", "arxivsumm",
-                                 "mixed_short_long"],
+                                 "mixed_short_long", "burstgpt_mixed"],
                         required=True)
     parser.add_argument("--mixed-short-ratio", type=float, default=0.7,
                         help="(dataset=mixed_short_long) fraction of "
@@ -429,6 +431,12 @@ def main() -> int:
                              "workload built with --force-max-output-tokens.")
     parser.add_argument("--max-model-len", type=int, default=None,
                         help="Engine --max-model-len. Auto-set by dataset.")
+    parser.add_argument("--out-tag", type=str, default="",
+                        help="Optional suffix appended to output filenames "
+                             "(before _metrics.json / _engine0.log etc). "
+                             "Used by E_M2 sweep to distinguish multiple "
+                             "SLO tightness runs that share (baseline, "
+                             "qps, seed). Empty string = no suffix.")
     args = parser.parse_args()
 
     # Validate SLO arguments based on mode.
@@ -457,8 +465,9 @@ def main() -> int:
             "loose": args.tpot_slo_loose_ms,
         }
     else:  # mixed
-        if args.dataset != "mixed_short_long":
-            parser.error("--slo-mode mixed requires --dataset mixed_short_long")
+        if args.dataset not in ("mixed_short_long", "burstgpt_mixed"):
+            parser.error("--slo-mode mixed requires --dataset "
+                         "mixed_short_long or burstgpt_mixed")
         for k in ("short_ttft_slo_ms", "short_tpot_slo_ms",
                   "long_ttft_slo_ms", "long_tpot_slo_ms"):
             if getattr(args, k) is None:
@@ -531,6 +540,10 @@ def main() -> int:
             # Mixed contains arxivsumm prompts up to 30K + sharegpt up
             # to ~4K. Set to 32K so engine fits both.
             max_model_len = 32768
+        elif args.dataset == "burstgpt_mixed":
+            # burstgpt_mixed embeds arrival pattern + can include any
+            # length from short sharegpt to long arxivsumm. Use 32K cap.
+            max_model_len = 32768
         else:  # sharegpt
             max_model_len = 4096 + output_margin
     else:
@@ -545,6 +558,8 @@ def main() -> int:
         dataset_tag = f"{args.dataset}_out{int(args.force_max_output_tokens)}"
     tag = (f"e_m1_{args.baseline}_{dataset_tag}_"
            f"qps{args.arrival_rate_qps}_n{args.num_requests}_seed{args.seed}")
+    if args.out_tag:
+        tag = f"{tag}_{args.out_tag}"
     engine_0_log = RESULTS_DIR / f"{tag}_engine0.log"
     engine_1_log = RESULTS_DIR / f"{tag}_engine1.log"
     router_log = RESULTS_DIR / f"{tag}_router.log"
@@ -565,6 +580,16 @@ def main() -> int:
             (s[0], s[1], s[2]) for s in schedule_full
         ]
         _per_request_class[:] = [s[3] for s in schedule_full]
+    elif args.dataset == "burstgpt_mixed":
+        # Trace-driven: arrival pattern comes from BurstGPT jsonl, not
+        # Poisson. --arrival-rate-qps is ignored (the trace fixes it).
+        schedule_full = build_trace_schedule(
+            dataset_name="burstgpt_mixed",
+            num_requests=args.num_requests,
+            seed=args.seed,
+        )
+        schedule = [(s[0], s[1], s[2]) for s in schedule_full]
+        _per_request_class[:] = [s[3] for s in schedule_full]
     else:
         schedule = build_schedule(
             dataset_name=args.dataset,
@@ -582,7 +607,7 @@ def main() -> int:
     for c in _CLASS_LIST:
         print(f"[E_M1]   {c}: TTFT≤{tier_ttft[c]:.0f}ms, "
               f"TPOT≤{tier_tpot[c]:.1f}ms")
-    if args.dataset == "mixed_short_long":
+    if args.dataset in ("mixed_short_long", "burstgpt_mixed"):
         n_short = sum(1 for c in _per_request_class if c == "short")
         n_long = sum(1 for c in _per_request_class if c == "long")
         print(f"[E_M1]   composition: short={n_short} long={n_long}")

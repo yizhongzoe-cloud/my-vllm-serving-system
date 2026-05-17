@@ -1228,20 +1228,6 @@ class EngineCore:
             # next iteration.
             request = state["request"]
             tokens_started = state["tokens_started"]
-            # Invariant: scheduler asserts num_new_tokens = num_tokens
-            # - num_computed_tokens > 0. For mid-decode resume the
-            # request has output_token_ids set so num_tokens already
-            # equals tokens_started (block-aligned KV coverage); setting
-            # num_computed_tokens to tokens_started would leave 0 new
-            # tokens for the next forward step. Clamp to num_tokens-1
-            # so the last output token gets refed into the model. Its
-            # K/V at that position is recomputed (overwriting the
-            # restored, identical value — one position of redundant
-            # compute, no correctness loss). Prompt-only resume is
-            # unaffected because num_tokens > tokens_started there.
-            request.num_computed_tokens = min(
-                tokens_started, max(0, request.num_tokens - 1)
-            )
             request.num_checkpointed_tokens = tokens_started
 
             # Cross-engine reroute: the request is brand-new to this
@@ -1285,6 +1271,16 @@ class EngineCore:
                           request.sampling_params, tokens_started,
                           resumed_output_ids),
                 )
+
+            # Set num_computed_tokens AFTER the trim block so it reflects
+            # the post-trim num_tokens. Single-engine V3 reload can drop
+            # output tokens that were generated after the checkpoint;
+            # clamp to num_tokens-1 so scheduler sees ≥1 new token to
+            # compute (the last output token gets refed into the model,
+            # recomputing one position of KV with no correctness loss).
+            request.num_computed_tokens = min(
+                tokens_started, max(0, request.num_tokens - 1)
+            )
 
             request.status = RequestStatus.PREEMPTED
             logger.info(

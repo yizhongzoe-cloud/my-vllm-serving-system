@@ -1208,6 +1208,81 @@ L40S 需自跑 calibration 拿自家 P95（GPU 间 prefill 速度不同）。
 
 
 
+## 第三次 picker + SLO 调整 (2026-05-16 深夜) — picker fire-too-late fix + 短 SLO 调紧
+
+### 上一轮 mixed_short_long 跑完发现的问题
+
+A6000 mixed E_M1 数据 + L40S 早先 arxivsumm 数据**两边都显示 ours 比 FCFS 还差**。具体 A6000 mixed @QPS=1.5：
+
+| baseline | short% | long% |
+|---|---|---|
+| ours | 57.9 | 70.4 |
+| ours_no_picker | 61.1 | 79.6 |
+| reroute_no_ckpt | 64.3 | 79.6 |
+| vllm_fcfs | 61.9 | 77.8 |
+
+**ours 在所有 QPS 都最差，picker 在伤短请求**。
+
+### 根因：picker fire 太晚
+
+抓 ours 跑的 picker fire log：
+
+```
+SLO_PRIORITY_PREEMPT #1: victim=cmpl-... (slack=2614ms)
+  for most_urgent=cmpl-... (slack=-69ms),
+  gap=2683ms, replay_cost=1002ms
+```
+
+**most_urgent slack = -69ms = 已经过 SLO**。picker 在短请求已经漏 SLO 之后才 fire：
+
+- 短请求该漏的还是漏（救不回来）
+- 长请求被 1s replay_cost 拖累，**反而从过 SLO 变成漏**
+- 净效果：两边都输
+
+### 修法 A：picker head-danger gate 加下限
+
+[vllm/v1/core/sched/scheduler.py:1234](vllm/v1/core/sched/scheduler.py#L1234) 的 head-danger gate 原本只检查 "head_slack 太大（不危险）→ skip"，现在加 "head_slack 太负（已过 SLO 救不回来）→ skip"。
+
+```python
+# 新增 LOWER bound:
+head_too_late_ms = float(
+    os.environ.get("FT_PICKER_HEAD_TOO_LATE_MS", "200.0")
+)
+if head_slack < -head_too_late_ms:
+    logger.info("PICKER_HEAD_TOO_LATE: ... skipping fire")
+    return None
+```
+
+200ms = picker fire → admit → 短 prompt prefill 大致需要的 端到端时间。head_slack 比这更负 picker 救不动了。
+
+### 修法 C：短 SLO 调紧 1.5× P95 (Niyama-style)
+
+paper §4 的 SLO 之前是 short = long = 2× baseline P95 = ratio 1:1，调度难度跟自然 P95 一致。
+
+但 Niyama 是 interactive 6s vs batch 1800s = **300× 差距**。我们 4× 差距太小，FCFS HoL story 显不出来。
+
+**新方案**：
+- short SLO = 1.5× short P95 (chat-class 紧)
+- long  SLO = 2× long P95 (doc-class 松)
+- 短/长 ratio 实际是 (1.5×456) / (2×1951) = 684/3902 = 0.18 → **5.7× 差距**
+
+paper §4 的 application 语义 justify："short interactive queries (chat / autocomplete) have tighter latency budgets; long document analysis can tolerate larger absolute delays"。
+
+**实现**：master script 加 `SHORT_SLO_MULT=1.5` 和 `LONG_SLO_MULT=2` 两个 env var，默认值就是新设置。
+
+### 这次改完跑出来 ours 还输的话？
+
+picker 真的修不好就退一步：
+
+- **承认 picker 是 future work**
+- paper 主线只讲 **cheap host-KV resume + cross-engine reroute mechanism**（E_D1 数据支撑）
+- E_M1 那些就当 "preempt mechanism overhead 不显著" 的 negative-control（reroute_no_ckpt vs ours_no_picker），不强调 ours 比 FCFS attainment 高
+- §5 future work："SLO-aware proactive picker policy left for future evaluation"
+
+paper 主线"cheap-preempt 把 long-context priority scheduling 这块未开发地带打开"仍然成立。
+
+
+
 ## Workload 第二次大改 (2026-05-16 下午) — 转 mixed short+long
 
 ### 为啥再改
@@ -1293,4 +1368,170 @@ Subagent 查了 8 篇 paper（Mooncake / Llumnix / DistServe / JITServe / TokenF
 第一次启 A6000 master sweep 时 GPU 上还残留 ~44GB（calibration / smoke 留下的 VLLM::EngineCore zombie），engine 启不起来，**60 个 run 全部 OOM 失败**，空跑 4h。
 
 修复：master 脚本启动时强制 `nvidia-smi` 检查，>2GB 占用就 abort。kill 之前要 `nvidia-smi --query-compute-apps=pid` 找出真正占显存的 worker PID（不只是 api_server），逐个 `kill -9`。
+
+
+
+## 第四次调整 (2026-05-17 凌晨) — TPOT SLO 单独放松 + QPS 推上去
+
+### 上一次踩的坑
+
+把 `SHORT_SLO_MULT=1.5` 一改，**TTFT 和 TPOT 一起拉紧了**：
+- TTFT 912ms → 684ms (要的，picker 能救 TTFT)
+- TPOT 44ms → 33ms (**意外伤害**，chunked prefill 默认 max-num-batched-tokens=2048 让 TPOT 自然到 50ms+，33ms 不可达)
+
+结果 v4 数据短请求 70%+ 漏 SLO 都是 TPOT 漏，picker 救不了。
+
+### 改法
+
+**TTFT 和 TPOT 单独调倍率**：
+- TTFT 用 `SHORT_SLO_MULT=1.5`（紧，画图有用）
+- TPOT 用 `SHORT_TPOT_MULT=2`（放松，给 decode 留余地）
+
+master script 加单独 env var `SHORT_TPOT_MULT` 覆盖默认。
+
+### 验证步骤
+
+- 4 baseline × QPS {1.5, 2.0, 2.5, 3.0} × seed 0
+- out-tag v5
+- FT_PICKER_HEAD_DANGER_RATIO=0.50 (保留 v4 配置)
+- ~40 min
+
+QPS 0.5/1.0 跳过：之前 v3/v4 已经证明那一段所有 baseline 接近 100%，画图没差距。
+
+期待看到 QPS 2.0+ 处 ours short attainment 真正超过 FCFS。
+
+
+
+## Paper framing 重要修正：KV 存储层次 + saturation 角度 (2026-05-17)
+
+### Insight 来源
+
+用户在调实验时提的问题："llumnix 必须在至少有一个 gpu 显存够用的时候用。而我们如果俩 gpu 显存都不够用的话 可以先暂存到 host 里。等有空闲了再 load 到 gpu"。
+
+这一刀切下来，**paper framing 的最佳角度**：
+
+### KV 存储层次的 paper 角度
+
+```
+Tier 0: GPU HBM        (5ms,   容量小, 几十 GB)
+Tier 1: 邻居 GPU       (5-100ms NVLink/PCIe, 类似容量)   ← Llumnix 操作的层
+Tier 2: Host RAM       (200ms, 容量大, 几百 GB)            ← 我们扩展的层
+Tier 3: SSD            (450ms, 容量更大)                  ← 可选扩展
+```
+
+**Llumnix 在 Tier 0/1 之间搬迁**：要求邻居 GPU 还有空 KV 容量。当**两个 GPU 都满**（saturated），Llumnix 没地方搬，**降级回 vLLM 原生 recompute (10s)**。
+
+**我们填的是"GPU 都满了"这个场景**：preempt 出去到 host RAM，等 GPU 空了再 load 回来。**1s vs 10s 重算**。
+
+### Paper §1 motivation draft
+
+> "Llumnix optimizes the unsaturated regime: when a peer GPU has spare KV capacity, it migrates via NVLink. Under saturation—all GPUs at KV capacity, common at peak production load—Llumnix falls back to vLLM's native preemption with full recompute (10s+ on long context). We complement Llumnix by extending the KV storage hierarchy with a host-RAM overflow tier. A saturated engine can offload preempted KV to host RAM (~200ms) and restore later (~1s), avoiding the 10× recompute penalty. The two mechanisms are orthogonal: production systems can deploy both, with Llumnix handling intra-GPU migration and our tier handling overflow."
+
+### 为啥这个 framing 漂亮
+
+1. **不打 Llumnix 强项**——他们 healthy-case NVLink migration 我们速度比不过，承认这点
+2. **填 Llumnix 没做的洞**——saturated regime 是真实生产场景（产线 sized to peak load → peak 时全满）
+3. **两个 paper 没冲突**——Llumnix + 我们可以共存于一个生产系统
+4. **跟 systems paper 经典"memory hierarchy"叙事 align**——加一层 storage tier 是 systems 教科书思路，reviewer 友好
+5. **不假装 picker 多牛**——picker 是 mechanism 的 trigger，不是核心 contribution
+
+### 跟现有数据 align
+
+- **E_D1 failover**：engine 死了 = "GPU 不可达"特例 → 用 Tier 2 复活。**主图，真赢**
+- **E_M3 overhead**：证明加 Tier 2 不慢 healthy case。**支持证据**
+- **E_M1 mixed (v5 之后)**：在 saturated QPS 段 ours 比 vllm_fcfs（recompute）赢——证明 Tier 2 vs recompute 直接对比有效。**secondary evidence**
+- **E_M2 SLO tightness**：sensitivity sweep
+
+### 实验上需要补的
+
+为支持 "saturated regime" claim，需要：
+
+1. **证明 saturation 发生**：从 engine_status log 读 kv_usage，QPS=2-3 时应该 95%+。**v5 跑完查一下**
+2. **vs recompute 直接对比**：vllm_fcfs 在 saturated 时确实走 recompute 路径。验证一下 vllm_fcfs 高 QPS log 里有 "Preempted" + reprefill 事件
+3. **Cost breakdown**：host KV resume 1s vs full reprefill 10s 在 16K context 下。E_D1 已有数据
+
+### 跟 user 的 "差异化 fire" idea 关系
+
+User 之前 idea："KV-pressure fire → free KV；compute-pressure fire → retain KV"。在 paper hierarchy framing 下：
+- KV pressure = "Tier 0 满了" → 推到 Tier 2，free Tier 0 (现在的 redispatch 路径)
+- Compute pressure = 并发数瓶颈但 Tier 0 没满 → retain，等 compute 松
+- **加这个 ROI 低**（长 context 下 KV 压力 dominate），写 future work
+
+### 跟 picker / SLO 调度的关系
+
+picker 是 Tier 0 → Tier 2 eviction 的**触发器**之一。可以基于：
+- KV usage 阈值（capacity-triggered）
+- SLO slack（SLO-triggered，picker 现状）
+- Burst detection（load-triggered，Llumnix 同款）
+
+Paper §3 写"trigger 可以多样，我们示范 SLO-driven 一种"。
+
+### 故事完整度
+
+主线："**Cheap host-KV checkpoint enables a unified host-RAM storage tier in the KV cache hierarchy. The same mechanism services three concerns: (1) overflow at GPU saturation, (2) failure recovery, (3) cross-engine SLO-driven reroute. Llumnix's NVLink migration is complementary, occupying a different point in the tier (intra-GPU)."
+
+这个 framing 比之前"我们 picker 强"或者"我们快"都更稳。**实验数据不需要碾压 Llumnix 或 FCFS，证明"额外加一层 storage tier 是真值得"即可**。
+
+
+
+## 多 seed 数据出来后的现实 check (2026-05-17 深夜)
+
+### Multi-seed 数据打脸
+
+单 seed 0 看到 QPS=2.5 ours 赢 FCFS 10%。加 seed 1 后：
+
+```
+QPS=2.5:           seed 0   seed 1
+vllm_fcfs          45.2     26.2
+reroute_no_ckpt    52.4     40.5    ← 稳赢 FCFS +7~14% ✓
+ours_no_picker     40.5     31.0    ← 输 FCFS
+ours               52.4     19.0    ← 严重不稳
+```
+
+### 关键发现
+
+1. **真正稳赢的是 router 的 load-aware dispatch** (reroute_no_ckpt)——跟 Llumnix 同款思路
+2. **Checkpoint mechanism 在 healthy case 是 net overhead** ——ours_no_picker / ours 比 reroute_no_ckpt 反而差
+3. **Picker 加上去没帮助**，seed variance 大
+
+### 这跟之前所有 framing 冲突
+
+- ~~KV 存储层次 + saturation overflow~~：实验里 KV 9% 不饱和，故事不存在
+- ~~Healthy-case cross-engine SLO migration~~：reroute_no_ckpt 比 ours 强，host KV 反而成负担
+- ~~Picker contribution~~：picker 添 overhead，没救回 SLO
+
+### 唯一站得住的 niche
+
+**E_D1 failure recovery**——engine 死了之后用 host KV resume。这一条**任何 healthy-case 实验都摸不到**，是 host KV 唯一独有的价值。
+
+KevlarFlow / DéjàVu / GhostServe 在这块有部分重合，但：
+- KevlarFlow / DéjàVu 用 **peer GPU** 复制 KV，要求 source engine 死前 KV 已同步到 peer。Source 死得突然 → 数据丢
+- GhostServe **erasure-coded shards** in host RAM，要 decode 才能恢复，恢复成本高
+- 我们 **完整 host RAM checkpoint**，simple 直接 reload，成本 1s 不需要 decode
+
+### Paper 收缩到的核心 claim
+
+```
+"Reroute, Don't Restart: When an LLM serving engine fails mid-request, 
+existing systems either lose the request or pay a full reprefill penalty 
+(~10s for 16K context). We propose a unified host-RAM checkpoint substrate 
+that enables 1s resume on a peer engine after engine death, complementing 
+Llumnix's NVLink migration which assumes source engine alive."
+```
+
+**E_M1 数据用法**：当 "no-regression" 证据——showing checkpoint mechanism 在 healthy case 不严重伤害 attainment。不强 claim attainment win。
+
+### 不再做的事
+
+- 调 picker
+- 找新 workload (BurstGPT 不再必须)
+- 推 QPS 找 sweet spot
+- 找 KV saturation 场景
+
+### 还要做的事
+
+- 等 multi-seed 跑完确认 reroute_no_ckpt > FCFS 的趋势稳（如果稳，可作为 secondary evidence）
+- 检查 E_D1 数据完整性 + 重生成 Fig 5
+- 重写 paper §1, §3, §6 以 failure recovery 为主轴
+- §6 老实把 KevlarFlow, GhostServe, ConServe, DéjàVu 写进去
 

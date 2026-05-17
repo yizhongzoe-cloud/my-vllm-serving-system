@@ -1,0 +1,40 @@
+===== vllm_fcfs Sun May 17 02:40:28 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 48.23665198303679, 'empirical_qps': 1.2231362993590085, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: short=42 long=18
+[dual] SLO short: TTFT≤2000ms TPOT≤100.0ms
+[dual] SLO long: TTFT≤30000ms TPOT≤500.0ms
+[dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_engine0.log
+[dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_engine1.log
+[dual] both engines ready
+[dual] vllm_fcfs: bypassing router, client round-robin
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 51.7% (31/60)
+[dual]   short: 31.0% (13/42)
+[dual]   long: 100.0% (18/18)
+[dual] TTFT_ms P50=2547.2 P95=8920.3
+[dual] TPOT_ms P50=94.8 P95=167.6
+[dual] E2E_ms  P50=25086.2 P95=37943.5
+[dual] metrics → experiments_v2/eval/results/a6000/dual_vllm_fcfs_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_metrics.json
+===== ours (HEAD_TOO_LATE off) Sun May 17 02:41:56 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 48.23665198303679, 'empirical_qps': 1.2231362993590085, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: short=42 long=18
+[dual] SLO short: TTFT≤2000ms TPOT≤100.0ms
+[dual] SLO long: TTFT≤30000ms TPOT≤500.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 27.8% (10/36)
+[dual]   short: 0.0% (0/26)
+[dual]   long: 100.0% (10/10)
+[dual] TTFT_ms P50=4797.6 P95=17215.5
+[dual] TPOT_ms P50=182.9 P95=243.6
+[dual] E2E_ms  P50=32288.9 P95=53400.2
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_mixed_short_long_qps1.5_n60_seed0_mixed_v3_no_too_late_metrics.json
+===== done Sun May 17 02:43:40 AM PDT 2026 =====

@@ -1232,11 +1232,17 @@ class Scheduler(SchedulerInterface):
             return None
 
         # Head-danger gate (Niyama-style absolute-deadline check).
-        # Even when the slack gap is comfortable, only fire if the
-        # head is genuinely close to its TTFT deadline — i.e. inside
-        # the last `FT_PICKER_HEAD_DANGER_RATIO` fraction of its TTFT
-        # SLO. Above that, the natural admit loop has enough time to
-        # let the head through and a preempt would be wasted work.
+        # Two-sided window — fire only when head is genuinely close to
+        # but not past its TTFT deadline:
+        #   (1) UPPER bound: slack < FT_PICKER_HEAD_DANGER_RATIO × SLO
+        #       Above this, the natural admit loop has enough time to
+        #       let the head through; preempt would be wasted work.
+        #   (2) LOWER bound: slack > -FT_PICKER_HEAD_TOO_LATE_MS
+        #       Below this, the head has already exhausted its SLO so
+        #       preempting won't save it — firing only drags the
+        #       victim (replay cost ~1s) without rescuing anyone.
+        #       Default 200 ms accounts for admit + short-prompt
+        #       prefill latency on A6000.
         # Disable with FT_PICKER_HEAD_DANGER_GATE=0 for ablation.
         if self._ft_picker_head_danger_gate:
             head_ttft_slo = getattr(most_urgent, "ttft_slo_ms", None)
@@ -1253,6 +1259,21 @@ class Scheduler(SchedulerInterface):
                         head_danger_threshold,
                         self._ft_picker_head_danger_ratio,
                         head_ttft_slo,
+                    )
+                    return None
+                head_too_late_ms = float(
+                    os.environ.get(
+                        "FT_PICKER_HEAD_TOO_LATE_MS", "200.0"
+                    )
+                )
+                if head_slack < -head_too_late_ms:
+                    logger.info(
+                        "PICKER_HEAD_TOO_LATE: head=%s "
+                        "head_slack=%.0fms < -%.0fms; head SLO "
+                        "already exhausted, preempt cannot save; "
+                        "skipping fire",
+                        most_urgent.request_id, head_slack,
+                        head_too_late_ms,
                     )
                     return None
 

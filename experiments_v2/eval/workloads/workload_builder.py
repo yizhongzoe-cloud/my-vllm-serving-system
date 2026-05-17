@@ -42,6 +42,7 @@ _DATASET_INFO: dict[str, tuple[str, str]] = {
     ),
     "sharegpt": ("sharegpt_5000.jsonl", "sharegpt"),
     "arxivsumm": ("arxivsumm.jsonl", "arxivsumm"),
+    "burstgpt_mixed": ("burstgpt_mixed.jsonl", "burstgpt_mixed"),
 }
 
 
@@ -254,4 +255,54 @@ def build_mixed_schedule(
         out_tokens = int(rec.get("expected_output_tokens", max_tokens_cap))
         max_tokens = max(1, min(max_tokens_cap, out_tokens))
         schedule.append((float(offsets[i]), rec["prompt"], max_tokens, cls))
+    return schedule
+
+
+def build_trace_schedule(
+    dataset_name: str,
+    num_requests: int,
+    seed: int = 0,
+    max_tokens_cap: int = DEFAULT_MAX_OUTPUT_CAP,
+) -> list[tuple[float, str, int, str]]:
+    """Load a workload whose arrival pattern is embedded in the dataset.
+
+    Used by trace-driven workloads like burstgpt_mixed, where each record
+    has an `arrival_offset_s` field pre-computed from a real production
+    trace (e.g. BurstGPT's per-request timestamps).
+
+    Args:
+        dataset_name: registered name (e.g. 'burstgpt_mixed').
+        num_requests: how many records to use (truncates the schedule).
+        seed: reserved; trace-driven schedules are deterministic given
+              the source jsonl, so seed only affects which subset is
+              sampled when num_requests < len(file).
+        max_tokens_cap: per-request max_tokens cap.
+
+    Returns:
+        List of (arrival_offset_s, prompt, max_tokens, class), sorted
+        by arrival_offset. The records' embedded class tag carries
+        through; arrival pattern is whatever the trace dictates.
+    """
+    path, loader_tag = resolve_dataset_info(dataset_name)
+    records = load_dataset(
+        dataset_name=loader_tag, dataset_path=path,
+        max_samples=num_requests, seed=seed,
+    )
+    if len(records) < num_requests:
+        raise RuntimeError(
+            f"trace dataset {dataset_name} only has {len(records)} "
+            f"records, need {num_requests}"
+        )
+    # Re-sort by arrival_offset_s in case load_dataset's sampling
+    # scrambles it (sample is by random index, not time).
+    records.sort(key=lambda r: r.get("arrival_offset_s", 0.0))
+    # Re-base so the earliest offset is 0.
+    base = records[0].get("arrival_offset_s", 0.0)
+    schedule: list[tuple[float, str, int, str]] = []
+    for rec in records:
+        off = float(rec.get("arrival_offset_s", 0.0)) - base
+        out_tokens = int(rec.get("expected_output_tokens", max_tokens_cap))
+        max_tokens = max(1, min(max_tokens_cap, out_tokens))
+        cls = rec.get("class", "short")
+        schedule.append((off, rec["prompt"], max_tokens, cls))
     return schedule

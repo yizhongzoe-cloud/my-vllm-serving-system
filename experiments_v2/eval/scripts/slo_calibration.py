@@ -37,7 +37,7 @@ from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
     build_schedule, summarize_schedule,
 )
 
-MODEL = os.path.expanduser("~/model/Qwen2.5-7B-Instruct")
+MODEL = os.path.expanduser("~/model/Qwen2.5-14B-Instruct")
 ENGINE_0_PORT = 8401
 ENGINE_1_PORT = 8402
 

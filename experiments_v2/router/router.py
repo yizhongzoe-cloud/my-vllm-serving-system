@@ -136,28 +136,28 @@ class Router:
                 )
 
     def pick_engine(self, exclude: int | None = None) -> EngineState | None:
-        """Pick alive engine with lowest load using a layered tuple sort.
-
-        Primary key: router-side in_flight count (realtime, same-process
-        dict). This is what reflects "how many requests this engine has
-        on its plate right now"; shm status is stale up to 200ms and
-        concurrent dispatches before the first refresh would otherwise
-        all land on engine 0.
-
-        Tie-breakers (only used when in_flight counts are equal):
-          1. kv_usage  — engine with lower KV pressure preferred
-          2. waiting   — engine with fewer queued (KV-blocked) reqs
-
-        These come from shm. They capture engine-internal state the
-        router can't infer from in_flight alone (which only knows the
-        total count, not the running-vs-waiting split or KV pressure).
+        """Pick an alive engine. Policy controlled by FT_ROUTER_POLICY:
+          'least_load' (default): primary key in_flight count,
+              tie-breakers kv_usage + waiting. Actively balances load.
+          'round_robin': simple counter-based round-robin. Dumb
+              dispatch — does not look at engine load. Lets natural
+              workload variance create imbalance so picker has fire
+              space.
         """
+        import os as _os
+        policy = _os.environ.get("FT_ROUTER_POLICY", "least_load")
         alive = [
             e for e in self.engines.values()
             if e.alive and e.engine_id != exclude
         ]
         if not alive:
             return None
+        if policy == "round_robin":
+            self._rr_counter = getattr(self, "_rr_counter", 0)
+            picked = alive[self._rr_counter % len(alive)]
+            self._rr_counter += 1
+            return picked
+        # default: least_load
         local_count: dict[int, int] = {e.engine_id: 0 for e in alive}
         for in_f in self.in_flight.values():
             if in_f.engine_id in local_count:

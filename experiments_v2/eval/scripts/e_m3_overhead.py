@@ -50,7 +50,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-MODEL = os.path.expanduser("~/model/Qwen2.5-7B-Instruct")
+MODEL = os.path.expanduser("~/model/Qwen2.5-14B-Instruct")
 ENGINE_0_PORT = 8401
 ENGINE_1_PORT = 8402
 ROUTER_PORT = 8400
@@ -127,7 +127,7 @@ def start_engine(
         "--model", MODEL,
         "--port", str(port),
         "--max-model-len", str(MAX_MODEL_LEN + DEFAULT_MAX_OUTPUT + 256),
-        "--gpu-memory-utilization", "0.5",
+        "--gpu-memory-utilization", "0.9",
         "--dtype", "float16",
         "--enforce-eager",
         "--no-enable-prefix-caching",

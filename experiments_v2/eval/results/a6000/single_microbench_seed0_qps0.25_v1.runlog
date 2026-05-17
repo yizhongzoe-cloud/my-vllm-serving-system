@@ -1,0 +1,25 @@
+===== vllm_fcfs Sun May 17 12:49:14 AM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 255.58383310996206, 'empirical_qps': 0.23084402202629115, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.25_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 28.3% (17/60)
+[single] TTFT_ms P50=15821.0 P95=167307.4
+[single] TPOT_ms P50=231.5 P95=449.9
+[single] E2E_ms  P50=105272.9 P95=203245.5
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.25_n60_seed0_v1_metrics.json
+===== ours Sun May 17 12:57:13 AM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 255.58383310996206, 'empirical_qps': 0.23084402202629115, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.25_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 76.7% (46/60)
+[single] TTFT_ms P50=3956.2 P95=36006.1
+[single] TPOT_ms P50=142.4 P95=207.1
+[single] E2E_ms  P50=34145.7 P95=60057.3
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.25_n60_seed0_v1_metrics.json
+===== done Sun May 17 01:02:49 AM PDT 2026 =====

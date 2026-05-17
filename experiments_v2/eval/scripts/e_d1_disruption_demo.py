@@ -36,7 +36,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-MODEL = os.path.expanduser("~/model/Qwen2.5-7B-Instruct")
+MODEL = os.path.expanduser("~/model/Qwen2.5-14B-Instruct")
 ENGINE_0_PORT = 8401
 ENGINE_1_PORT = 8402
 ROUTER_PORT = 8400
