@@ -343,12 +343,29 @@ class Scheduler(SchedulerInterface):
         self._ft_picker_head_danger_gate = (
             os.environ.get("FT_PICKER_HEAD_DANGER_GATE", "1") == "1"
         )
-        try:
-            self._ft_picker_head_danger_ratio = float(
-                os.environ.get("FT_PICKER_HEAD_DANGER_RATIO", "0.10")
-            )
-        except ValueError:
-            self._ft_picker_head_danger_ratio = 0.10
+        # In-danger trigger: head fires picker when its slack drops below
+        # this absolute threshold (in ms). Decoupled from SLO so changing
+        # the measurement SLO does not change picker behavior.
+        #
+        # Legacy path: if FT_PICKER_IN_DANGER_MS is unset and the legacy
+        # FT_PICKER_HEAD_DANGER_RATIO is set, fall back to ratio × TTFT_SLO
+        # (the previous SLO-coupled behavior). New code should use the
+        # absolute threshold.
+        _abs_str = os.environ.get("FT_PICKER_IN_DANGER_MS")
+        if _abs_str is not None:
+            try:
+                self._ft_picker_in_danger_ms = float(_abs_str)
+            except ValueError:
+                self._ft_picker_in_danger_ms = 300.0
+            self._ft_picker_head_danger_ratio = None  # absolute mode
+        else:
+            self._ft_picker_in_danger_ms = None  # ratio mode
+            try:
+                self._ft_picker_head_danger_ratio = float(
+                    os.environ.get("FT_PICKER_HEAD_DANGER_RATIO", "0.10")
+                )
+            except ValueError:
+                self._ft_picker_head_danger_ratio = 0.10
 
     def _mamba_block_aligned_split(
         self,
@@ -1231,34 +1248,49 @@ class Scheduler(SchedulerInterface):
                 < (self._ft_slo_min_gap_ms + replay_cost_ms)):
             return None
 
-        # Head-danger gate (Niyama-style absolute-deadline check).
-        # Two-sided window — fire only when head is genuinely close to
-        # but not past its TTFT deadline:
-        #   (1) UPPER bound: slack < FT_PICKER_HEAD_DANGER_RATIO × SLO
-        #       Above this, the natural admit loop has enough time to
-        #       let the head through; preempt would be wasted work.
-        #   (2) LOWER bound: slack > -FT_PICKER_HEAD_TOO_LATE_MS
-        #       Below this, the head has already exhausted its SLO so
-        #       preempting won't save it — firing only drags the
-        #       victim (replay cost ~1s) without rescuing anyone.
-        #       Default 200 ms accounts for admit + short-prompt
-        #       prefill latency on A6000.
-        # Disable with FT_PICKER_HEAD_DANGER_GATE=0 for ablation.
+        # Head-danger gate. Fires picker only when head is "in danger":
+        #   head_slack < FT_PICKER_IN_DANGER_MS (absolute, default 300ms)
+        # Below the threshold = head needs help. Above = natural admit
+        # has time, picker would be wasted work. Decoupled from SLO so
+        # tuning measurement SLO does not change picker behavior.
+        #
+        # Legacy ratio mode (FT_PICKER_HEAD_DANGER_RATIO set, _IN_DANGER_MS
+        # not set): falls back to ratio × ttft_slo_ms (SLO-coupled, the
+        # behavior in pre-2026-05-17 experiments).
+        #
+        # Optional lower bound FT_PICKER_HEAD_TOO_LATE_MS (default 200ms):
+        # if head_slack < -this_ms, head is past SLO by more than this
+        # margin → skip fire. Set to a very large value to disable; for
+        # paper experiments the gate is off because preempt firing on
+        # a doomed head still helps downstream heads via queue drain.
+        #
+        # Disable both bounds with FT_PICKER_HEAD_DANGER_GATE=0.
         if self._ft_picker_head_danger_gate:
-            head_ttft_slo = getattr(most_urgent, "ttft_slo_ms", None)
-            if head_ttft_slo is not None and head_ttft_slo > 0:
-                head_danger_threshold = (
-                    head_ttft_slo * self._ft_picker_head_danger_ratio
+            if self._ft_picker_in_danger_ms is not None:
+                head_danger_threshold = self._ft_picker_in_danger_ms
+                _gate_label = (
+                    f"abs={head_danger_threshold:.0f}ms"
                 )
+            else:
+                head_ttft_slo = getattr(most_urgent, "ttft_slo_ms", None)
+                if head_ttft_slo is None or head_ttft_slo <= 0:
+                    head_danger_threshold = None
+                else:
+                    head_danger_threshold = (
+                        head_ttft_slo * self._ft_picker_head_danger_ratio
+                    )
+                    _gate_label = (
+                        f"ratio={self._ft_picker_head_danger_ratio:.2f}"
+                        f" × TTFT_SLO={head_ttft_slo:.0f}ms"
+                        f" = {head_danger_threshold:.0f}ms"
+                    )
+            if head_danger_threshold is not None:
                 if head_slack > head_danger_threshold:
                     logger.info(
                         "PICKER_HEAD_NOT_IN_DANGER: head=%s "
-                        "head_slack=%.0fms > %.0fms "
-                        "(ratio=%.2f × TTFT_SLO=%.0fms); skipping fire",
-                        most_urgent.request_id, head_slack,
-                        head_danger_threshold,
-                        self._ft_picker_head_danger_ratio,
-                        head_ttft_slo,
+                        "head_slack=%.0fms > threshold (%s); "
+                        "skipping fire",
+                        most_urgent.request_id, head_slack, _gate_label,
                     )
                     return None
                 head_too_late_ms = float(

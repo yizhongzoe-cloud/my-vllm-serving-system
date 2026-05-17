@@ -54,15 +54,15 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ENGINE_READY_TIMEOUT_S = 240
 ROUTER_READY_TIMEOUT_S = 30
-PROMPT_TOKENS = 16384               # RULER 16K — matches main SLO sweep
+MAX_MODEL_LEN = 32768               # arxivsumm prompts up to ~30K + output
 MAX_OUTPUT_TOKENS = 200
-NUM_REQUESTS = 12
-DATASET_NAME = "ruler_16k"
-DISPATCH_WAIT_TIMEOUT_S = 60        # all N req_map files appear (slower at 16K)
+NUM_REQUESTS = 20                   # bigger sample for failover_gap stats
+DATASET_NAME = "arxivsumm"          # matches main paper experiments
+DISPATCH_WAIT_TIMEOUT_S = 60        # all N req_map files appear
 CHUNK_WAIT_TIMEOUT_S = 120          # at least one ckpt chunk lands (ours only)
-PRE_KILL_DECODE_WAIT_S = 20         # extra settle time so decode is well underway (16K needs more)
+PRE_KILL_DECODE_WAIT_S = 20         # extra settle time so decode is well underway
 REROUTE_DETECT_TIMEOUT_S = 30
-REQUEST_TIMEOUT_S = 300             # generous; reroute_no_ckpt reprefills 16K tokens
+REQUEST_TIMEOUT_S = 300             # generous; reroute_no_ckpt reprefills up to 30K tokens
 
 FIRST_TOKEN_LOG_RE = re.compile(
     r"FT first_post_reroute_token req=(\S+) ts=(\d+\.\d+)"
@@ -95,7 +95,7 @@ def start_engine(
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", MODEL,
         "--port", str(port),
-        "--max-model-len", str(PROMPT_TOKENS + MAX_OUTPUT_TOKENS + 768),
+        "--max-model-len", str(MAX_MODEL_LEN),
         "--gpu-memory-utilization", "0.9",
         "--dtype", "float16",
         "--enforce-eager",
@@ -162,8 +162,8 @@ def wait_both_engines_alive_in_router(timeout_s: int = 10) -> bool:
 
 
 def build_prompts(num_requests: int, seed: int) -> list[str]:
-    """Load num_requests distinct RULER 16K prompts via workload_builder, so
-    E_D1 uses the same dataset as the main SLO sweep (E_M1).
+    """Load num_requests distinct prompts via workload_builder, so
+    E_D1 uses the same dataset as the main microbench (arxivsumm).
     arrival_rate_qps is set high so offsets are tight; we ignore offsets
     because E_D1 fires all requests roughly simultaneously."""
     from experiments_v2.eval.workloads.workload_builder import build_schedule
@@ -300,6 +300,13 @@ def parse_first_token_log(log_path: Path) -> list[tuple[str, float]]:
 
 
 def main() -> int:
+    # Canonical router policy for paper experiments. round_robin lets
+    # parallel-firing 12+ clients distribute roughly 50/50 across
+    # engine 0 and engine 1, so SIGKILL on engine 0 has actual in-flight
+    # requests to rescue (least_load also balances but biases later
+    # arrivals toward whichever engine is momentarily less loaded).
+    os.environ.setdefault("FT_ROUTER_POLICY", "round_robin")
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--baseline", choices=["ours", "reroute_no_ckpt"], default="ours",

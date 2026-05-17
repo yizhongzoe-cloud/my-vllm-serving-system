@@ -1,0 +1,69 @@
+############# SEED=1 Sun May 17 03:53:25 AM PDT 2026 #############
+===== vllm_fcfs seed=1 Sun May 17 03:53:25 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 133.87849262306295, 'empirical_qps': 0.4406981199445937, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[dual] vllm_fcfs: bypassing router, client round-robin
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 53.3% (32/60)
+[dual]   uniform: 53.3% (32/60)
+[dual] TTFT_ms P50=3642.6 P95=32552.2
+[dual] TPOT_ms P50=118.3 P95=384.4
+[dual] E2E_ms  P50=27786.4 P95=80601.7
+[dual] metrics → experiments_v2/eval/results/a6000/dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_metrics.json
+===== ours seed=1 Sun May 17 03:57:23 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 133.87849262306295, 'empirical_qps': 0.4406981199445937, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 90.2% (46/51)
+[dual]   uniform: 90.2% (46/51)
+[dual] TTFT_ms P50=3212.0 P95=8387.4
+[dual] TPOT_ms P50=104.4 P95=185.9
+[dual] E2E_ms  P50=25985.9 P95=42730.3
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_arxivsumm_qps0.5_n60_seed1_arxivsumm_v2_canonical_metrics.json
+############# SEED=2 Sun May 17 04:00:22 AM PDT 2026 #############
+===== vllm_fcfs seed=2 Sun May 17 04:00:22 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 107.95752735225624, 'empirical_qps': 0.5465112201716886, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[dual] vllm_fcfs: bypassing router, client round-robin
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 0.0% (0/60)
+[dual]   uniform: 0.0% (0/60)
+[dual] TTFT_ms P50=116540.9 P95=230728.5
+[dual] TPOT_ms P50=287.5 P95=606.1
+[dual] E2E_ms  P50=173656.1 P95=258034.1
+[dual] metrics → experiments_v2/eval/results/a6000/dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_metrics.json
+===== ours seed=2 Sun May 17 04:06:38 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 107.95752735225624, 'empirical_qps': 0.5465112201716886, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 10.0% (6/60)
+[dual]   uniform: 10.0% (6/60)
+[dual] TTFT_ms P50=56932.3 P95=89720.6
+[dual] TPOT_ms P50=153.7 P95=527.9
+[dual] E2E_ms  P50=76705.4 P95=119397.4
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_arxivsumm_qps0.5_n60_seed2_arxivsumm_v2_canonical_metrics.json
+===== done Sun May 17 04:11:06 AM PDT 2026 =====

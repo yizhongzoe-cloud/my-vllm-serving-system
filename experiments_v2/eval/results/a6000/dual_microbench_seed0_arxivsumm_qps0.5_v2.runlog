@@ -1,0 +1,34 @@
+===== vllm_fcfs Sun May 17 03:40:45 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[dual] vllm_fcfs: bypassing router, client round-robin
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 56.7% (34/60)
+[dual]   uniform: 56.7% (34/60)
+[dual] TTFT_ms P50=3260.9 P95=73755.6
+[dual] TPOT_ms P50=117.5 P95=458.5
+[dual] E2E_ms  P50=34330.5 P95=96366.2
+[dual] metrics → experiments_v2/eval/results/a6000/dual_vllm_fcfs_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_metrics.json
+===== ours (canonical picker) Sun May 17 03:44:46 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 80.0% (48/60)
+[dual]   uniform: 80.0% (48/60)
+[dual] TTFT_ms P50=3646.3 P95=17804.2
+[dual] TPOT_ms P50=117.4 P95=229.2
+[dual] E2E_ms  P50=28325.2 P95=51732.2
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_metrics.json
+===== done Sun May 17 03:48:14 AM PDT 2026 =====

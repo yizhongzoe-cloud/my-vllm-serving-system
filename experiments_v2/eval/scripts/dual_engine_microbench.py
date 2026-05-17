@@ -50,12 +50,33 @@ def start_engine(engine_id: int, gpu_id: int, baseline: str,
     env["VLLM_FT_ENGINE_ID"] = str(engine_id)
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     if baseline == "ours":
+        # full method: substrate + V3 reload + picker
         env["FT_ROUTER_SHM_BUS"] = "1"
         env["FT_CAPACITY_PREEMPT_RELOAD"] = "1"
         env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "1"
         env["FT_DELTA_CHECKPOINT"] = "1"
-        env["SLO_PRIORITY_PREEMPT"] = "1"  # picker on for multi-engine
+        env["SLO_PRIORITY_PREEMPT"] = "1"
+        env.setdefault("FT_PICKER_IN_DANGER_MS", "300")
+        env.setdefault("FT_PICKER_HEAD_TOO_LATE_MS", "9999999")
+    elif baseline == "ours_no_picker":
+        # substrate + V3 reload, picker OFF.
+        # Isolates picker contribution vs substrate-only.
+        env["FT_ROUTER_SHM_BUS"] = "1"
+        env["FT_CAPACITY_PREEMPT_RELOAD"] = "1"
+        env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "1"
+        env["FT_DELTA_CHECKPOINT"] = "1"
+        env["SLO_PRIORITY_PREEMPT"] = "0"
+    elif baseline == "reroute_no_ckpt":
+        # router + reroute path, but no checkpoint substrate.
+        # Llumnix-class baseline. Picker forced off since it requires
+        # the manifest gate to be satisfied (no manifest without ckpt).
+        env["FT_ROUTER_SHM_BUS"] = "1"
+        env["FT_CAPACITY_PREEMPT_RELOAD"] = "0"
+        env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "0"
+        env["FT_DELTA_CHECKPOINT"] = "0"
+        env["SLO_PRIORITY_PREEMPT"] = "0"
     elif baseline == "vllm_fcfs":
+        # vanilla vLLM, no router, no FT.
         env["FT_ROUTER_SHM_BUS"] = "0"
         env["FT_CAPACITY_PREEMPT_RELOAD"] = "0"
         env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "0"
@@ -104,9 +125,22 @@ def _fmt(v: float | None, spec: str) -> str:
 
 
 def main() -> int:
+    # Canonical router policy default: round_robin lets workload variance
+    # create natural imbalance so picker has fire space. least_load (the
+    # router default) actively synchronizes both engines to saturation,
+    # which blocks picker via peer-load gate (v4 vs v1-v3 finding).
+    # Set in parent env so the router subprocess inherits it.
+    os.environ.setdefault("FT_ROUTER_POLICY", "round_robin")
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline", choices=["vllm_fcfs", "ours"],
+    parser.add_argument("--baseline",
+                        choices=["vllm_fcfs", "reroute_no_ckpt",
+                                 "ours_no_picker", "ours"],
                         required=True)
+    parser.add_argument("--burst", action="store_true",
+                        help="Fire all requests at t=0 (no Poisson "
+                        "inter-arrival delay). Models a flash crowd / "
+                        "burst-arrival workload.")
     parser.add_argument("--dataset", default="arxivsumm",
                         choices=["arxivsumm", "sharegpt",
                                  "mixed_short_long"])
@@ -233,17 +267,23 @@ def main() -> int:
                 print("[dual] FAIL: router didn't see both engines alive")
                 return 1
             target_urls = [f"http://127.0.0.1:{ROUTER_PORT}"]
-            print("[dual] ours: using router")
+            print(f"[dual] {args.baseline}: using router")
 
+        # Only the picker (in 'ours') reads SLO from request xargs.
+        # Other baselines don't use SLO at scheduling time.
         pass_slo = (args.baseline == "ours")
 
+        if args.burst:
+            print(f"[dual] BURST mode: firing all {len(schedule)} "
+                  "requests at t=0 (Poisson offsets ignored)")
         clients: list[Client] = []
         t0 = time.time()
         for i, (offset_s, prompt, max_tokens) in enumerate(schedule):
-            target_t = t0 + offset_s
-            now = time.time()
-            if target_t > now:
-                time.sleep(target_t - now)
+            if not args.burst:
+                target_t = t0 + offset_s
+                now = time.time()
+                if target_t > now:
+                    time.sleep(target_t - now)
             engine_url = target_urls[i % len(target_urls)]
             cls = classes[i]
             class_ttft, class_tpot = slo_by_class[cls]
