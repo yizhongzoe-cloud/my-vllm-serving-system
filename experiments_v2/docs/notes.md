@@ -100,9 +100,9 @@ Single GPU 2.72× 是最强的 main result（机制最 shine 的"纯长 prompt �
 | B | single GPU QPS=0.25 seeds 1,3,4 | 6 |
 | C | dual arxivsumm QPS sweep（0.3-0.8）× seeds 0,1,3,4 | ~48 |
 | D | 4-baseline ablation @ QPS=0.5（vllm_fcfs / reroute_no_ckpt / ours_no_picker / ours）× seeds 0,1,3,4 | 16 |
-| E | router policy ablation（ours + least_load）× seeds 0,1,3,4 | 4 |
-| F | burst workload（同时发 60 请求）× seeds 0,1,3,4 | 8 |
-| G | e_d1 failover（SIGKILL engine 0）× ours/reroute_no_ckpt × seeds 0,1,3,4 | 8 |
+| E | router policy ablation（ours + round_robin，证明 canonical 的 least_load 才对）× seeds 0,1,3,4 | 4 |
+| F | BurstGPT trace（真实 bursty 到达）× fcfs/ours × seeds 0,1,3,4 | 8 |
+| G | e_d1 failover（Poisson + 中途 SIGKILL engine 0）× ours/reroute_no_ckpt × seeds 0,1,3,4 | 8 |
 
 **seed 选择**：用 0/1/3/4。**seed 2 跳过**——它抽到的 arxivsumm 样本里有个 28K token 怪兽请求 + 整体 emp_qps=0.547，把双 14B engine 都打到地板。fcfs 0% SLO，ours 10% SLO。是 workload outlier 不是机制 outlier。
 
@@ -113,8 +113,8 @@ Single GPU 2.72× 是最强的 main result（机制最 shine 的"纯长 prompt �
 | 脚本 | 用途 | 状态 |
 |---|---|---|
 | `single_engine_microbench.py` | 单 engine cheap-resume 隔离实验，无 router 无 picker | canonical |
-| `dual_engine_microbench.py` | 双 engine 完整对比（4 baseline + burst flag），baked canonical config | canonical |
-| `e_d1_disruption_demo.py` | failover demo（SIGKILL + 测 failover_gap），arxivsumm + 20 reqs | canonical |
+| `dual_engine_microbench.py` | 双 engine 完整对比（4 baseline + --workload-trace burstgpt_mixed），baked canonical picker | canonical |
+| `e_d1_disruption_demo.py` | failover demo（Poisson 稳态 + 中途 SIGKILL），arxivsumm + 40 reqs + QPS=0.25 | canonical |
 | `run_overnight_paper_sweep.sh` | overnight 一键跑全部 | canonical |
 | `e_m1_slo_sweep.py` | 老版 4-baseline，tier SLO，**不用于 paper main**——但代码仍可用，需要手动 export canonical env | legacy |
 | `e_m2/e_m3/e_m4` | 已基本不用 | legacy |
@@ -138,7 +138,11 @@ Single GPU 2.72× 是最强的 main result（机制最 shine 的"纯长 prompt �
 | Mooncake (arXiv'24) | host KV pool 主要用于 prefix cache 共享 | 用途不同，我们用于 preempt + recovery |
 | ConServe | host KV checkpoint 让长 batch 给 latency-critical 让位 | 类似动机，不同 scheduling policy |
 
-我们的差异化：**continuous delta checkpoint + V3 cheap reload + SLO-aware cross-engine preempt 三件套合一**。primitive 不全新（FastServe 有 swap），但 continuous + decoupled SLO-aware picker + 双 GPU multi-engine 这个组合没人正面打。
+我们的差异化（**仅指 substrate + 调度 policy 那两块，router 不在列**）：
+- **Continuous delta checkpoint 衬底**（host pool + /dev/shm tmpfs 镜像）：FastServe 的 swap 是 preempt-时才发起，我们是边跑边存，preempt 瞬间没 IO 等待
+- **SLO-aware cross-engine picker，跟 SLO 数值解耦**（FT_PICKER_IN_DANGER_MS 绝对阈值）：QLM/Scorpio 都不踢 running，我们让它敢踢
+
+Router 这块：用标准 KV-aware least-loaded routing（算法是公知的，我们的实现包括 /dev/shm 心跳 telemetry + (in_flight, kv_usage, waiting) 的加权 tie-break），**不算 paper main contribution**，写 paper 时只交代"router 用标准 least-load"即可，不要捆绑当三件套之一卖。
 
 ## Open issues / future work
 
@@ -153,5 +157,5 @@ Single GPU 2.72× 是最强的 main result（机制最 shine 的"纯长 prompt �
 - 2026-05-16: 换 14B + ArXiv-summ + mixed_short_long + 多次 SLO 调整（tight 1.5×→2× baseline P95）。dual 实验 ours 一直输给 fcfs。
 - 2026-05-16 晚: 加 picker 的 HEAD_TOO_LATE gate（lower bound）想避免 picker 在 doomed head 上白 fire。后来发现这是设计错误（TTFT 不可救）。
 - 2026-05-17 上午: 写 `single_engine_microbench.py`，纯单 GPU + 长 prompt，QPS=0.25 跑出 **76.7% vs 28.3% SLO（goodput 2.72×）**。机制确实有效。
-- 2026-05-17 下午: 排查为啥 dual 输——发现是 (1) least_load router 主动均衡 + (2) picker SLO-coupling。改 round_robin + 关 too-late gate 之后 dual arxivsumm QPS=0.5 跑出 **80% vs 56.7% SLO（goodput 1.41×）**。
-- 2026-05-17 晚: picker 解耦做完（`FT_PICKER_IN_DANGER_MS`），写 overnight runner 准备多 seed + QPS sweep + ablation + failover 全量跑。
+- 2026-05-17 下午: 排查为啥 dual 输——以为是 (1) router 主动均衡 + (2) picker SLO-coupling。改 round_robin + 关 too-late gate 之后 dual arxivsumm QPS=0.5 跑出 **80% vs 56.7% SLO（goodput 1.41×）**。
+- 2026-05-17 晚: picker 解耦做完（`FT_PICKER_IN_DANGER_MS`），写 overnight runner。**深夜 verify 发现归因错误**：今天的"成功结果"实际跑在一个 May 16 遗留的 stale router 上（自带 least_load），并不是 round_robin 起作用。clean router 复测：least_load=80%，round_robin=56.7%。**真正让 dual 翻盘的是关 HEAD_TOO_LATE gate，router 应该用 least_load**。Canonical config 已修正，注释里写清楚。

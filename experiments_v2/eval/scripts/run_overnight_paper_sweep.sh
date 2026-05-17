@@ -23,27 +23,41 @@ ABLATION_QPS=0.5
 LOG_DIR="$EVAL_RESULTS_DIR/overnight_runlogs"
 mkdir -p "$LOG_DIR"
 
-# Defensive port cleanup: kill any stale router / engine processes on
-# our ports before launching. A stale process holding the router port
-# causes new routers to silently fail (the wait_url_ready check passes
-# because something is listening, but it's the stale one with the
-# wrong state). We hit this 2026-05-17 — a router from yesterday
-# corrupted all of today's experiments.
-cleanup_stale_ports() {
+# Defensive cleanup: kill stale processes that survived previous runs.
+# Three failure modes we've hit:
+#  (1) Stale router holding port 8400 → new router fails to bind but
+#      wait_url_ready still passes (it gets the stale one).
+#  (2) Engine subprocesses spawned with start_new_session=True survive
+#      after parent dual_engine_microbench is killed → still on GPUs.
+#  (3) EngineCore mp subprocesses (children of api_server) similarly
+#      orphan; need to kill by process name.
+cleanup_stale_state() {
+  # By compute-process PID (covers EngineCore on GPUs even if not on
+  # our ports).
+  local gpu_pids
+  gpu_pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
+             | tr -d ' ' | grep -v '^$' || true)
+  if [ -n "$gpu_pids" ]; then
+    echo "[cleanup] killing GPU-holding pids: $gpu_pids"
+    kill -KILL $gpu_pids 2>/dev/null || true
+  fi
+  # By port (router + api_servers).
   for port in 8400 8401 8402; do
     local pids
     pids=$(lsof -ti:"$port" 2>/dev/null || true)
     if [ -n "$pids" ]; then
       echo "[cleanup] killing stale process(es) on port $port: $pids"
-      kill -TERM $pids 2>/dev/null || true
-      sleep 1
       kill -KILL $pids 2>/dev/null || true
     fi
   done
-  sleep 2  # let kernel release the ports
+  # By process name (catches orphaned mp children).
+  pkill -KILL -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
+  pkill -KILL -f "experiments_v2.router.router" 2>/dev/null || true
+  pkill -KILL -f "EngineCore" 2>/dev/null || true
+  sleep 3  # let kernel release GPU + ports
 }
-cleanup_stale_ports
-echo "[cleanup] ports 8400/8401/8402 free"
+cleanup_stale_state
+echo "[cleanup] state clean"
 
 # ─────────── helpers ───────────
 run_dual() {

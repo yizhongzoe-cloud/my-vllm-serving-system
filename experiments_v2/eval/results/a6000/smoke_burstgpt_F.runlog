@@ -5,3 +5,4 @@
 [dual] SLO short: TTFT≤8348ms TPOT≤200.0ms
 [dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_burstgpt_mixed_qps0.5_n60_seed0_burstgpt_smoke_engine0.log
 [dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_burstgpt_mixed_qps0.5_n60_seed0_burstgpt_smoke_engine1.log
+[dual] FAIL: engine never became healthy
