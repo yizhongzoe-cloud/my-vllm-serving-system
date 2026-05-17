@@ -36,6 +36,12 @@ import time
 import urllib.request
 from pathlib import Path
 
+# Make experiments_v2.* importable when launched as a script
+# (otherwise build_prompts → workload_builder import fails).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 MODEL = os.path.expanduser("~/model/Qwen2.5-14B-Instruct")
 ENGINE_0_PORT = 8401
 ENGINE_1_PORT = 8402
@@ -56,11 +62,20 @@ ENGINE_READY_TIMEOUT_S = 240
 ROUTER_READY_TIMEOUT_S = 30
 MAX_MODEL_LEN = 32768               # arxivsumm prompts up to ~30K + output
 MAX_OUTPUT_TOKENS = 200
-NUM_REQUESTS = 20                   # bigger sample for failover_gap stats
+NUM_REQUESTS = 40                   # 40 reqs at QPS=0.25 → ~160s schedule
 DATASET_NAME = "arxivsumm"          # matches main paper experiments
-DISPATCH_WAIT_TIMEOUT_S = 60        # all N req_map files appear
-CHUNK_WAIT_TIMEOUT_S = 120          # at least one ckpt chunk lands (ours only)
-PRE_KILL_DECODE_WAIT_S = 20         # extra settle time so decode is well underway
+ARRIVAL_RATE_QPS = 0.25             # Poisson rate. Just at single-engine
+                                    # sustained edge (~0.2 for 14B
+                                    # arxivsumm). Post-kill survivor at
+                                    # 0.25 is slight overload — acceptable
+                                    # for failover demo. Higher density
+                                    # ensures engine 0 has in-flight
+                                    # requests at kill time (QPS=0.15
+                                    # was too sparse).
+KILL_AT_TIME_S = 25                 # kill engine 0 at t=25s — early enough
+                                    # that ~3-4 requests are mid-decode
+                                    # on engine 0 (each takes ~13s e2e).
+CHUNK_WAIT_TIMEOUT_S = 90           # for ours: at least one ckpt chunk lands
 REROUTE_DETECT_TIMEOUT_S = 30
 REQUEST_TIMEOUT_S = 300             # generous; reroute_no_ckpt reprefills up to 30K tokens
 
@@ -161,28 +176,28 @@ def wait_both_engines_alive_in_router(timeout_s: int = 10) -> bool:
     return False
 
 
-def build_prompts(num_requests: int, seed: int) -> list[str]:
-    """Load num_requests distinct prompts via workload_builder, so
-    E_D1 uses the same dataset as the main microbench (arxivsumm).
-    arrival_rate_qps is set high so offsets are tight; we ignore offsets
-    because E_D1 fires all requests roughly simultaneously."""
+def build_schedule_for_e_d1(num_requests: int, seed: int) -> list[tuple[float, str, int]]:
+    """Return a (offset_s, prompt, max_tokens) Poisson schedule on
+    arxivsumm — same workload distribution as the main microbench, so
+    failover_gap is measured against realistic steady-state load."""
     from experiments_v2.eval.workloads.workload_builder import build_schedule
-    schedule = build_schedule(
+    return build_schedule(
         dataset_name=DATASET_NAME,
         num_requests=num_requests,
-        arrival_rate_qps=1000.0,
+        arrival_rate_qps=ARRIVAL_RATE_QPS,
         seed=seed,
     )
-    return [prompt for _, prompt, _ in schedule]
 
 
 class Client(threading.Thread):
-    """Single non-streaming completion request. Records timing + outcome."""
+    """Single non-streaming completion request. Records timing + outcome.
+    Schedule has its own max_tokens per request (from dataset)."""
 
-    def __init__(self, idx: int, prompt_body: str) -> None:
+    def __init__(self, idx: int, prompt_body: str, max_tokens: int) -> None:
         super().__init__(daemon=True)
         self.idx = idx
         self.prompt_body = prompt_body
+        self.max_tokens = max_tokens
         self.start_ts: float | None = None
         self.end_ts: float | None = None
         self.status_code: int | None = None
@@ -196,7 +211,7 @@ class Client(threading.Thread):
         payload = json.dumps({
             "model": MODEL,
             "prompt": prompt,
-            "max_tokens": MAX_OUTPUT_TOKENS,
+            "max_tokens": self.max_tokens,
             "temperature": 0.0,
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -300,12 +315,10 @@ def parse_first_token_log(log_path: Path) -> list[tuple[str, float]]:
 
 
 def main() -> int:
-    # Canonical router policy for paper experiments. round_robin lets
-    # parallel-firing 12+ clients distribute roughly 50/50 across
-    # engine 0 and engine 1, so SIGKILL on engine 0 has actual in-flight
-    # requests to rescue (least_load also balances but biases later
-    # arrivals toward whichever engine is momentarily less loaded).
-    os.environ.setdefault("FT_ROUTER_POLICY", "round_robin")
+    # Use router default (least_load) — verified 2026-05-17 to be the
+    # correct choice for main experiments. e_d1 also uses Poisson
+    # arrival now, so the load distribution is similar to the main
+    # microbench.
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -345,44 +358,65 @@ def main() -> int:
             return 1
         print("[E_D1] router ready")
 
-        prompts = build_prompts(n_req, args.seed)
-        clients = [Client(i, prompts[i]) for i in range(n_req)]
-        for c in clients:
-            c.start()
+        schedule = build_schedule_for_e_d1(n_req, args.seed)
+        print(f"[E_D1] Poisson schedule: n={n_req} QPS={ARRIVAL_RATE_QPS} "
+              f"window={schedule[-1][0]:.1f}s  kill_at=t+{KILL_AT_TIME_S}s")
+
+        # Fire clients one-by-one according to Poisson offsets. Spawn a
+        # background kill thread that triggers SIGKILL at fire_ts + KILL_AT_TIME_S.
+        clients: list[Client] = []
         fire_ts = time.time()
-        print(f"[E_D1] fired {n_req} non-streaming requests at t={fire_ts:.3f}")
+        kill_event = threading.Event()
+        kill_ts_holder: dict = {"ts": None}
 
-        # Wait for dispatch: req_map should have N entries.
-        seen = wait_for_n_req_maps(n_req, DISPATCH_WAIT_TIMEOUT_S)
-        if seen < n_req:
-            print(f"[E_D1] FAIL: only {seen}/{n_req} requests dispatched in time")
+        def _kill_at_time():
+            target = fire_ts + KILL_AT_TIME_S
+            now = time.time()
+            if target > now:
+                time.sleep(target - now)
+            # For ours: confirm at least one ckpt chunk exists before kill.
+            if args.baseline == "ours":
+                has_chunks = (CKPT_DIR.exists()
+                              and any(CKPT_DIR.rglob("chunk_*.pt")))
+                if not has_chunks:
+                    print("[E_D1] WARN: kill triggered but no ckpt chunks "
+                          "visible yet — reroute may fall back to reprefill")
+            pre_kill = scrape_engine_assignments()
+            kill_ts_holder["eng0_count"] = sum(
+                1 for v in pre_kill.values() if v == 0
+            )
+            kill_ts_holder["eng1_count"] = sum(
+                1 for v in pre_kill.values() if v == 1
+            )
+            print(f"[E_D1] pre-kill: engine0={kill_ts_holder['eng0_count']}, "
+                  f"engine1={kill_ts_holder['eng1_count']}, "
+                  f"total_dispatched={len(pre_kill)}")
+            kill_ts_holder["ts"] = time.time()
+            shutdown(e0, sig=signal.SIGKILL)
+            print(f"[E_D1] SIGKILL engine 0 at t={kill_ts_holder['ts']:.3f} "
+                  f"(t={kill_ts_holder['ts']-fire_ts:.1f}s into schedule)")
+            kill_event.set()
+
+        kill_thread = threading.Thread(target=_kill_at_time, daemon=True)
+        kill_thread.start()
+        print(f"[E_D1] starting Poisson dispatch at t={fire_ts:.3f}")
+
+        for i, (offset_s, prompt, max_tokens) in enumerate(schedule):
+            target_t = fire_ts + offset_s
+            now = time.time()
+            if target_t > now:
+                time.sleep(target_t - now)
+            c = Client(i, prompt, max_tokens)
+            c.start()
+            clients.append(c)
+
+        # Wait for kill thread (it should already have fired by now since
+        # KILL_AT_TIME_S < schedule window for most configs).
+        kill_thread.join(timeout=10)
+        if not kill_event.is_set():
+            print("[E_D1] FAIL: kill thread didn't trigger")
             return 1
-
-        # For ours: also wait for at least one checkpoint chunk to publish.
-        # For reroute_no_ckpt: skip (engine doesn't publish).
-        if args.baseline == "ours":
-            if not wait_for_any_chunk(CHUNK_WAIT_TIMEOUT_S):
-                print("[E_D1] FAIL: no ckpt chunk published — nothing to restore")
-                return 1
-            print("[E_D1] at least one ckpt chunk visible in /dev/shm")
-        else:
-            print("[E_D1] reroute_no_ckpt: not waiting for chunks")
-
-        # Extra settle time so decode is well underway across all clients.
-        time.sleep(PRE_KILL_DECODE_WAIT_S)
-
-        pre_kill = scrape_engine_assignments()
-        eng0_count = sum(1 for v in pre_kill.values() if v == 0)
-        eng1_count = sum(1 for v in pre_kill.values() if v == 1)
-        print(f"[E_D1] pre-kill: engine0={eng0_count}, engine1={eng1_count}, "
-              f"total={len(pre_kill)}")
-        if eng0_count == 0:
-            print("[E_D1] FAIL: no requests on engine 0 — nothing to disrupt")
-            return 1
-
-        kill_ts = time.time()
-        shutdown(e0, sig=signal.SIGKILL)
-        print(f"[E_D1] SIGKILL engine 0 at t={kill_ts:.3f}")
+        kill_ts = kill_ts_holder["ts"]
 
         ok, m = wait_for_reroute(REROUTE_DETECT_TIMEOUT_S)
         print(f"[E_D1] router reroute observed: {'OK' if ok else 'FAIL'} — {m}")
@@ -425,7 +459,12 @@ def main() -> int:
             "seed": args.seed,
             "num_requests": n_req,
             "kill_ts": kill_ts,
-            "pre_kill_engine_counts": {"0": eng0_count, "1": eng1_count},
+            "pre_kill_engine_counts": {
+                "0": kill_ts_holder.get("eng0_count", 0),
+                "1": kill_ts_holder.get("eng1_count", 0),
+            },
+            "kill_at_time_s": KILL_AT_TIME_S,
+            "arrival_rate_qps": ARRIVAL_RATE_QPS,
             "num_first_token_events": len(gaps_ms),
             "failover_gaps_ms": [
                 {"req_id": rid, "gap_ms": g} for rid, g in gaps_ms

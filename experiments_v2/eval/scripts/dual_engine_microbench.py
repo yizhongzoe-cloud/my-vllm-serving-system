@@ -32,7 +32,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
-    build_schedule, build_mixed_schedule, summarize_schedule,
+    build_schedule, build_mixed_schedule, build_trace_schedule,
+    summarize_schedule,
 )
 from experiments_v2.eval.scripts.e_m1_slo_sweep import (  # noqa: E402
     Client, parse_request_done_log, cleanup_shm, percentile,
@@ -125,22 +126,23 @@ def _fmt(v: float | None, spec: str) -> str:
 
 
 def main() -> int:
-    # Canonical router policy default: round_robin lets workload variance
-    # create natural imbalance so picker has fire space. least_load (the
-    # router default) actively synchronizes both engines to saturation,
-    # which blocks picker via peer-load gate (v4 vs v1-v3 finding).
-    # Set in parent env so the router subprocess inherits it.
-    os.environ.setdefault("FT_ROUTER_POLICY", "round_robin")
+    # Router policy: use router.py default (least_load). Verified
+    # 2026-05-17 to give 80% SLO@QPS=0.5 vs round_robin's 56.7%.
+    # round_robin causes synchronized saturation; least_load keeps
+    # engines at moderate imbalance which the picker can exploit.
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline",
                         choices=["vllm_fcfs", "reroute_no_ckpt",
                                  "ours_no_picker", "ours"],
                         required=True)
-    parser.add_argument("--burst", action="store_true",
-                        help="Fire all requests at t=0 (no Poisson "
-                        "inter-arrival delay). Models a flash crowd / "
-                        "burst-arrival workload.")
+    parser.add_argument("--workload-trace", type=str, default=None,
+                        choices=[None, "burstgpt_mixed"],
+                        help="Use a real-trace workload (with embedded "
+                        "arrival timestamps) instead of Poisson. Reads "
+                        "from datasets/cached/<trace>.jsonl. Overrides "
+                        "--dataset and --arrival-rate-qps for scheduling "
+                        "(QPS argument still required as a tag).")
     parser.add_argument("--dataset", default="arxivsumm",
                         choices=["arxivsumm", "sharegpt",
                                  "mixed_short_long"])
@@ -171,7 +173,39 @@ def main() -> int:
     args = parser.parse_args()
 
     # Validate SLO args + assemble per-class SLO map.
-    if args.dataset == "mixed_short_long":
+    if args.workload_trace is not None:
+        # Trace-driven workload (e.g. BurstGPT): arrival pattern comes
+        # from dataset, not Poisson. Records carry their own class tag.
+        schedule_full = build_trace_schedule(
+            dataset_name=args.workload_trace,
+            num_requests=args.num_requests,
+            seed=args.seed,
+        )
+        schedule = [(s[0], s[1], s[2]) for s in schedule_full]
+        classes = [s[3] for s in schedule_full]
+        unique_classes = set(classes)
+        if len(unique_classes) == 1:
+            # All records same class → uniform SLO mode.
+            if args.ttft_slo_ms is None or args.tpot_slo_ms is None:
+                parser.error("--ttft-slo-ms and --tpot-slo-ms required "
+                             f"(trace {args.workload_trace} has all "
+                             f"class={next(iter(unique_classes))})")
+            slo_by_class = {
+                cls: (args.ttft_slo_ms, args.tpot_slo_ms)
+                for cls in unique_classes
+            }
+        else:
+            if args.ttft_slo_short_ms is None or args.tpot_slo_short_ms is None \
+                    or args.ttft_slo_long_ms is None or args.tpot_slo_long_ms is None:
+                parser.error("--ttft-slo-{short,long}-ms and "
+                             "--tpot-slo-{short,long}-ms required for "
+                             f"--workload-trace {args.workload_trace} "
+                             "(mixed-class trace)")
+            slo_by_class = {
+                "short": (args.ttft_slo_short_ms, args.tpot_slo_short_ms),
+                "long": (args.ttft_slo_long_ms, args.tpot_slo_long_ms),
+            }
+    elif args.dataset == "mixed_short_long":
         for name in ("ttft_slo_short_ms", "tpot_slo_short_ms",
                      "ttft_slo_long_ms", "tpot_slo_long_ms"):
             if getattr(args, name) is None:
@@ -207,21 +241,20 @@ def main() -> int:
     summary = summarize_schedule(schedule)
     print(f"[dual] model: {MODEL}")
     print(f"[dual] schedule: {summary}")
-    if args.dataset == "mixed_short_long":
-        print(f"[dual] class counts: short="
-              f"{classes.count('short')} long={classes.count('long')}")
-        for cls, (ttft, tpot) in slo_by_class.items():
-            print(f"[dual] SLO {cls}: TTFT≤{ttft:.0f}ms TPOT≤{tpot:.1f}ms")
-    else:
-        ttft, tpot = slo_by_class["uniform"]
-        print(f"[dual] SLO uniform: TTFT≤{ttft:.0f}ms TPOT≤{tpot:.1f}ms")
+    from collections import Counter
+    class_counts = Counter(classes)
+    print(f"[dual] class counts: {dict(class_counts)}")
+    for cls, (ttft, tpot) in slo_by_class.items():
+        print(f"[dual] SLO {cls}: TTFT≤{ttft:.0f}ms TPOT≤{tpot:.1f}ms")
 
     results_dir = Path(
         os.environ.get("EVAL_RESULTS_DIR",
                        Path(__file__).resolve().parent.parent / "results")
     )
     results_dir.mkdir(parents=True, exist_ok=True)
-    tag = (f"dual_{args.baseline}_{args.dataset}_"
+    dataset_label = (args.workload_trace if args.workload_trace
+                     else args.dataset)
+    tag = (f"dual_{args.baseline}_{dataset_label}_"
            f"qps{args.arrival_rate_qps}_n{args.num_requests}_"
            f"seed{args.seed}_{args.out_tag}")
     engine0_log = results_dir / f"{tag}_engine0.log"
@@ -273,17 +306,13 @@ def main() -> int:
         # Other baselines don't use SLO at scheduling time.
         pass_slo = (args.baseline == "ours")
 
-        if args.burst:
-            print(f"[dual] BURST mode: firing all {len(schedule)} "
-                  "requests at t=0 (Poisson offsets ignored)")
         clients: list[Client] = []
         t0 = time.time()
         for i, (offset_s, prompt, max_tokens) in enumerate(schedule):
-            if not args.burst:
-                target_t = t0 + offset_s
-                now = time.time()
-                if target_t > now:
-                    time.sleep(target_t - now)
+            target_t = t0 + offset_s
+            now = time.time()
+            if target_t > now:
+                time.sleep(target_t - now)
             engine_url = target_urls[i % len(target_urls)]
             cls = classes[i]
             class_ttft, class_tpot = slo_by_class[cls]
@@ -310,8 +339,11 @@ def main() -> int:
         # clients so events_sorted[k].class == classes[k] if all
         # requests completed.
         events_sorted = sorted(events, key=lambda e: e["arrival_ts"])
+        # Pick a fallback class for events that exceed schedule length
+        # (defensive — shouldn't happen in normal runs).
+        _fallback_cls = next(iter(slo_by_class))
         for k, e in enumerate(events_sorted):
-            cls = classes[k] if k < len(classes) else "uniform"
+            cls = classes[k] if k < len(classes) else _fallback_cls
             class_ttft, class_tpot = slo_by_class[cls]
             e["class"] = cls
             e["slo_ttft_ms"] = class_ttft
@@ -361,8 +393,9 @@ def main() -> int:
                 "arrival_rate_qps": args.arrival_rate_qps,
                 "seed": args.seed,
                 "slo_mode": ("class_tier_dual_engine"
-                             if args.dataset == "mixed_short_long"
+                             if len(slo_by_class) > 1
                              else "uniform_dual_engine"),
+                "workload_trace": args.workload_trace,
                 "slo_by_class": {
                     cls: {"ttft_ms": t, "tpot_ms": p}
                     for cls, (t, p) in slo_by_class.items()

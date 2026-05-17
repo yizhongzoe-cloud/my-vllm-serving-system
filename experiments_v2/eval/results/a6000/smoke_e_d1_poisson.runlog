@@ -1,0 +1,15 @@
+===== e_d1 ours seed=0 Poisson smoke Sun May 17 06:01:46 AM PDT 2026 =====
+[E_D1] launching engine 0 on GPU 0 → e_d1_ours_n40_seed0_engine0.log
+[E_D1] launching engine 1 on GPU 1 → e_d1_ours_n40_seed0_engine1.log
+[E_D1] both engines ready
+[E_D1] launching router → e_d1_ours_n40_seed0_router.log
+[E_D1] router ready
+[E_D1] Poisson schedule: n=40 QPS=0.3 window=150.6s  kill_at=t+30s
+[E_D1] starting Poisson dispatch at t=1779022929.231
+[E_D1] pre-kill: engine0=5, engine1=5, total_dispatched=10
+[E_D1] SIGKILL engine 0 at t=1779022959.262 (t=30.0s into schedule)
+[E_D1] router reroute observed: OK — {'dispatch_count': 10193, 'reroute_count': 133, 'dead_event_count': 138, 'in_flight': 13}
+[E_D1] failover_gap_ms over N=8 rerouted: min=2280, P50=117264, mean=108546, max=147959
+[E_D1] client outcomes: 40/40 200 OK, 0 errored
+[E_D1] metrics → experiments_v2/eval/results/a6000/e_d1_ours_n40_seed0_metrics.json
+===== smoke done Sun May 17 06:05:32 AM PDT 2026 =====

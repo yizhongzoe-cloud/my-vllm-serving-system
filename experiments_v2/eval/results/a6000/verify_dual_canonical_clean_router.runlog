@@ -1,0 +1,18 @@
+===== dual ours seed=0 QPS=0.5 CLEAN router (verify 80% SLO) Sun May 17 06:30:49 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 56.7% (34/60)
+[dual]   uniform: 56.7% (34/60)
+[dual] TTFT_ms P50=3048.8 P95=49175.3
+[dual] TPOT_ms P50=106.7 P95=300.0
+[dual] E2E_ms  P50=25968.8 P95=81844.9
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_arxivsumm_qps0.5_n60_seed0_arxivsumm_v2_canonical_metrics.json
+===== done Sun May 17 06:34:46 AM PDT 2026 =====

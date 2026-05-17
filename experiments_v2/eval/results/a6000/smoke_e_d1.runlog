@@ -1,0 +1,15 @@
+===== e_d1 ours seed=0 (after sys.path fix) Sun May 17 05:25:26 AM PDT 2026 =====
+[E_D1] launching engine 0 on GPU 0 → e_d1_ours_n20_seed0_engine0.log
+[E_D1] launching engine 1 on GPU 1 → e_d1_ours_n20_seed0_engine1.log
+[E_D1] both engines ready
+[E_D1] launching router → e_d1_ours_n20_seed0_router.log
+[E_D1] router ready
+[E_D1] fired 20 non-streaming requests at t=1779020748.931
+[E_D1] at least one ckpt chunk visible in /dev/shm
+[E_D1] pre-kill: engine0=10, engine1=10, total=20
+[E_D1] SIGKILL engine 0 at t=1779020771.555
+[E_D1] router reroute observed: OK — {'dispatch_count': 10154, 'reroute_count': 132, 'dead_event_count': 135, 'in_flight': 20}
+[E_D1] failover_gap_ms over N=12 rerouted: min=5734, P50=64593, mean=57471, max=96938
+[E_D1] client outcomes: 20/20 200 OK, 0 errored
+[E_D1] metrics → experiments_v2/eval/results/a6000/e_d1_ours_n20_seed0_metrics.json
+===== smoke done Sun May 17 05:28:10 AM PDT 2026 =====

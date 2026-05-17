@@ -1,0 +1,83 @@
+===== D1: reroute_no_ckpt Sun May 17 04:54:55 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.5_n60_seed0_smoke_v2_engine0.log
+[dual] launching engine 1 on GPU 1 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.5_n60_seed0_smoke_v2_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_reroute_no_ckpt_arxivsumm_qps0.5_n60_seed0_smoke_v2_router.log
+[dual] reroute_no_ckpt: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 66.7% (40/60)
+[dual]   uniform: 66.7% (40/60)
+[dual] TTFT_ms P50=2947.1 P95=29926.7
+[dual] TPOT_ms P50=108.2 P95=431.8
+[dual] E2E_ms  P50=25394.3 P95=95625.0
+[dual] metrics → experiments_v2/eval/results/a6000/dual_reroute_no_ckpt_arxivsumm_qps0.5_n60_seed0_smoke_v2_metrics.json
+===== D2: ours_no_picker Sun May 17 04:59:06 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours_no_picker) → dual_ours_no_picker_arxivsumm_qps0.5_n60_seed0_smoke_v2_engine0.log
+[dual] launching engine 1 on GPU 1 (ours_no_picker) → dual_ours_no_picker_arxivsumm_qps0.5_n60_seed0_smoke_v2_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_no_picker_arxivsumm_qps0.5_n60_seed0_smoke_v2_router.log
+[dual] ours_no_picker: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 68.3% (41/60)
+[dual]   uniform: 68.3% (41/60)
+[dual] TTFT_ms P50=3614.5 P95=23388.7
+[dual] TPOT_ms P50=142.9 P95=223.9
+[dual] E2E_ms  P50=35187.5 P95=49626.5
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_no_picker_arxivsumm_qps0.5_n60_seed0_smoke_v2_metrics.json
+===== E: ours + least_load Sun May 17 05:02:29 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_least_load_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_least_load_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_least_load_router.log
+[dual] ours: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 73.3% (44/60)
+[dual]   uniform: 73.3% (44/60)
+[dual] TTFT_ms P50=3447.1 P95=15885.3
+[dual] TPOT_ms P50=123.6 P95=260.2
+[dual] E2E_ms  P50=32130.1 P95=54013.7
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_least_load_metrics.json
+===== F: burst ours Sun May 17 05:06:13 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 127.79191655498103, 'empirical_qps': 0.4616880440525823, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_burst_engine0.log
+[dual] launching engine 1 on GPU 1 (ours) → dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_burst_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_burst_router.log
+[dual] ours: using router
+[dual] BURST mode: firing all 60 requests at t=0 (Poisson offsets ignored)
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 48/60 200 OK, 12 errored
+[dual] SLO_met: 0.0% (0/48)
+[dual]   uniform: 0.0% (0/48)
+[dual] TTFT_ms P50=67964.6 P95=154220.5
+[dual] TPOT_ms P50=112.7 P95=184.6
+[dual] E2E_ms  P50=93664.0 P95=171576.5
+[dual] metrics → experiments_v2/eval/results/a6000/dual_ours_arxivsumm_qps0.5_n60_seed0_smoke_burst_metrics.json
+===== G: e_d1 ours Sun May 17 05:17:16 AM PDT 2026 =====
+[E_D1] launching engine 0 on GPU 0 → e_d1_ours_n20_seed0_engine0.log
+[E_D1] launching engine 1 on GPU 1 → e_d1_ours_n20_seed0_engine1.log
+[E_D1] both engines ready
+[E_D1] launching router → e_d1_ours_n20_seed0_router.log
+[E_D1] router ready
+Traceback (most recent call last):
+  File "/home/yzhong76/code/my-vllm-serving-system/experiments_v2/eval/scripts/e_d1_disruption_demo.py", line 467, in <module>
+    sys.exit(main())
+  File "/home/yzhong76/code/my-vllm-serving-system/experiments_v2/eval/scripts/e_d1_disruption_demo.py", line 348, in main
+    prompts = build_prompts(n_req, args.seed)
+  File "/home/yzhong76/code/my-vllm-serving-system/experiments_v2/eval/scripts/e_d1_disruption_demo.py", line 169, in build_prompts
+    from experiments_v2.eval.workloads.workload_builder import build_schedule
+ModuleNotFoundError: No module named 'experiments_v2'

@@ -23,6 +23,28 @@ ABLATION_QPS=0.5
 LOG_DIR="$EVAL_RESULTS_DIR/overnight_runlogs"
 mkdir -p "$LOG_DIR"
 
+# Defensive port cleanup: kill any stale router / engine processes on
+# our ports before launching. A stale process holding the router port
+# causes new routers to silently fail (the wait_url_ready check passes
+# because something is listening, but it's the stale one with the
+# wrong state). We hit this 2026-05-17 — a router from yesterday
+# corrupted all of today's experiments.
+cleanup_stale_ports() {
+  for port in 8400 8401 8402; do
+    local pids
+    pids=$(lsof -ti:"$port" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+      echo "[cleanup] killing stale process(es) on port $port: $pids"
+      kill -TERM $pids 2>/dev/null || true
+      sleep 1
+      kill -KILL $pids 2>/dev/null || true
+    fi
+  done
+  sleep 2  # let kernel release the ports
+}
+cleanup_stale_ports
+echo "[cleanup] ports 8400/8401/8402 free"
+
 # ─────────── helpers ───────────
 run_dual() {
   local baseline="$1" qps="$2" seed="$3" tag="$4" extra_env="${5-}"
@@ -72,30 +94,31 @@ run_single() {
   fi
 }
 
-run_burst() {
-  local baseline="$1" qps="$2" seed="$3" tag="$4"
-  local out_file="$EVAL_RESULTS_DIR/dual_${baseline}_arxivsumm_qps${qps}_n60_seed${seed}_${tag}_metrics.json"
+run_trace() {
+  # Run dual_engine_microbench with --workload-trace burstgpt_mixed
+  # (real BurstGPT arrival pattern, all-short class → uniform SLO).
+  local baseline="$1" seed="$2" tag="$3"
+  local out_file="$EVAL_RESULTS_DIR/dual_${baseline}_burstgpt_mixed_qps0.5_n60_seed${seed}_${tag}_metrics.json"
   if [ -f "$out_file" ]; then
     echo "[skip exists] $out_file"
     return 0
   fi
-  local logf="$LOG_DIR/burst_${baseline}_seed${seed}_${tag}.log"
-  echo "[run $(date '+%H:%M:%S')] burst baseline=$baseline qps=$qps seed=$seed tag=$tag"
+  local logf="$LOG_DIR/trace_${baseline}_seed${seed}_${tag}.log"
+  echo "[run $(date '+%H:%M:%S')] trace baseline=$baseline seed=$seed tag=$tag"
   if [ -n "${DRY_RUN:-}" ]; then
     echo "  (dry-run; would write $out_file)"
     return 0
   fi
   python -u experiments_v2/eval/scripts/dual_engine_microbench.py \
-    --baseline "$baseline" --dataset arxivsumm \
-    --arrival-rate-qps "$qps" --num-requests 60 --seed "$seed" \
+    --baseline "$baseline" --workload-trace burstgpt_mixed \
+    --arrival-rate-qps 0.5 --num-requests 60 --seed "$seed" \
     --ttft-slo-ms 8348 --tpot-slo-ms 200 \
-    --burst \
     --out-tag "$tag" > "$logf" 2>&1
 }
 
 run_e_d1() {
   local baseline="$1" seed="$2"
-  local out_file="$EVAL_RESULTS_DIR/e_d1_${baseline}_n20_seed${seed}_metrics.json"
+  local out_file="$EVAL_RESULTS_DIR/e_d1_${baseline}_n40_seed${seed}_metrics.json"
   if [ -f "$out_file" ]; then
     echo "[skip exists] $out_file"
     return 0
@@ -107,7 +130,7 @@ run_e_d1() {
     return 0
   fi
   python -u experiments_v2/eval/scripts/e_d1_disruption_demo.py \
-    --baseline "$baseline" --seed "$seed" --num-requests 20 \
+    --baseline "$baseline" --seed "$seed" --num-requests 40 \
     > "$logf" 2>&1
 }
 
@@ -153,20 +176,22 @@ for seed in "${SEEDS_ALL[@]}"; do
   done
 done
 
-# ─────────── E. Router-policy ablation: ours with least_load ───────────
+# ─────────── E. Router-policy ablation: ours with round_robin ───────────
+# Canonical config is least_load (the router.py default). This section
+# shows round_robin gives worse SLO (synchronized saturation kills picker).
 echo
-echo "=========== E. router policy ablation (ours + least_load) ==========="
+echo "=========== E. router policy ablation (ours + round_robin) ==========="
 for seed in "${SEEDS_ALL[@]}"; do
-  run_dual ours "$ABLATION_QPS" "$seed" arxivsumm_v2_least_load \
-    "FT_ROUTER_POLICY=least_load"
+  run_dual ours "$ABLATION_QPS" "$seed" arxivsumm_v2_round_robin \
+    "FT_ROUTER_POLICY=round_robin"
 done
 
-# ─────────── F. Burst workload (all-at-once arrival) ───────────
+# ─────────── F. BurstGPT trace (real-workload supplementary) ───────────
 echo
-echo "=========== F. burst workload @ effective QPS=0.5 × seeds 0,1,3,4 ==========="
+echo "=========== F. BurstGPT trace × seeds 0,1,3,4 (supplementary) ==========="
 for seed in "${SEEDS_ALL[@]}"; do
   for baseline in vllm_fcfs ours; do
-    run_burst "$baseline" 0.5 "$seed" arxivsumm_burst
+    run_trace "$baseline" "$seed" burstgpt
   done
 done
 
