@@ -1,0 +1,7 @@
+===== F smoke 1/2: vllm_fcfs burstgpt_mixed Sun May 17 07:01:33 AM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 30.916676998700854, 'empirical_qps': 1.908355157395448, 'max_tokens_p50': 79, 'max_tokens_p95': 200}
+[dual] class counts: {'short': 60}
+[dual] SLO short: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (vllm_fcfs) → dual_vllm_fcfs_burstgpt_mixed_qps0.5_n60_seed0_burstgpt_smoke_engine0.log
+[dual] launching engine 1 on GPU 1 (vllm_fcfs) → dual_vllm_fcfs_burstgpt_mixed_qps0.5_n60_seed0_burstgpt_smoke_engine1.log
