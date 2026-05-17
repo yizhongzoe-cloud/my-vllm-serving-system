@@ -1,0 +1,334 @@
+{
+  "baseline": "reroute_no_ckpt",
+  "seed": 3,
+  "num_requests": 40,
+  "kill_ts": 1779051542.7969058,
+  "pre_kill_engine_counts": {
+    "0": 5,
+    "1": 4
+  },
+  "kill_at_time_s": 25,
+  "arrival_rate_qps": 0.25,
+  "num_first_token_events": 5,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-b020cffe788c333b-0-b7e28c62",
+      "gap_ms": 3627.7801990509033
+    },
+    {
+      "req_id": "cmpl-8ff29b16f7175491-0-8af02442",
+      "gap_ms": 9582.691192626953
+    },
+    {
+      "req_id": "cmpl-a9696623b961ad04-0-95157add",
+      "gap_ms": 10188.906192779541
+    },
+    {
+      "req_id": "cmpl-bb494eb8ded9179e-0-81046fe2",
+      "gap_ms": 12049.029350280762
+    },
+    {
+      "req_id": "cmpl-9fbc1d719bb2f5df-0-896a8b4d",
+      "gap_ms": 16302.046298980713
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 5,
+    "min": 3627.7801990509033,
+    "p50": 10188.906192779541,
+    "mean": 10350.090646743774,
+    "max": 16302.046298980713
+  },
+  "client_outcomes": {
+    "200_ok": 28,
+    "errored": 12,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1238,
+        "total_s": 11.648265600204468
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1030,
+        "total_s": 13.510754823684692
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1147,
+        "total_s": 10.067790031433105
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1173,
+        "total_s": 23.040467977523804
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1151,
+        "total_s": 114.69706201553345
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 922,
+        "total_s": 111.36253666877747
+      },
+      {
+        "idx": 6,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1147,
+        "total_s": 98.3182487487793
+      },
+      {
+        "idx": 7,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1049,
+        "total_s": 108.00252294540405
+      },
+      {
+        "idx": 8,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1151,
+        "total_s": 98.91765999794006
+      },
+      {
+        "idx": 9,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1118,
+        "total_s": 98.11456489562988
+      },
+      {
+        "idx": 10,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1164,
+        "total_s": 109.10071396827698
+      },
+      {
+        "idx": 11,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1024,
+        "total_s": 108.75606775283813
+      },
+      {
+        "idx": 12,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1096,
+        "total_s": 186.5460135936737
+      },
+      {
+        "idx": 13,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1087,
+        "total_s": 186.73640704154968
+      },
+      {
+        "idx": 14,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1098,
+        "total_s": 186.50659203529358
+      },
+      {
+        "idx": 15,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1189,
+        "total_s": 188.56071734428406
+      },
+      {
+        "idx": 16,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1126,
+        "total_s": 182.4426908493042
+      },
+      {
+        "idx": 17,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1133,
+        "total_s": 183.45888876914978
+      },
+      {
+        "idx": 18,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1104,
+        "total_s": 181.46526408195496
+      },
+      {
+        "idx": 19,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 923,
+        "total_s": 258.7543239593506
+      },
+      {
+        "idx": 20,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 758,
+        "total_s": 248.76826906204224
+      },
+      {
+        "idx": 21,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1298,
+        "total_s": 264.26092290878296
+      },
+      {
+        "idx": 22,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1084,
+        "total_s": 262.29552841186523
+      },
+      {
+        "idx": 23,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1052,
+        "total_s": 260.6859664916992
+      },
+      {
+        "idx": 24,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1241,
+        "total_s": 259.1128635406494
+      },
+      {
+        "idx": 25,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1030,
+        "total_s": 257.44346499443054
+      },
+      {
+        "idx": 26,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 873,
+        "total_s": 257.14803194999695
+      },
+      {
+        "idx": 27,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1099,
+        "total_s": 257.126088142395
+      },
+      {
+        "idx": 28,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.06232380867004
+      },
+      {
+        "idx": 29,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.10053992271423
+      },
+      {
+        "idx": 30,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0445148944855
+      },
+      {
+        "idx": 31,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.09958004951477
+      },
+      {
+        "idx": 32,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.05955362319946
+      },
+      {
+        "idx": 33,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0358774662018
+      },
+      {
+        "idx": 34,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1010341644287
+      },
+      {
+        "idx": 35,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1006898880005
+      },
+      {
+        "idx": 36,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1006746292114
+      },
+      {
+        "idx": 37,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.10077118873596
+      },
+      {
+        "idx": 38,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.10069966316223
+      },
+      {
+        "idx": 39,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.101265668869
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 40,
+    "reroute_count": 5,
+    "dead_event_count": 1,
+    "in_flight": 11
+  }
+}

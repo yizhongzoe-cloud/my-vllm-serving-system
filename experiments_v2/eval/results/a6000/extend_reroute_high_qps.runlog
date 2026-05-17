@@ -1,0 +1,73 @@
+===== reroute_no_ckpt qps=0.7 seed=0 Sun May 17 03:09:19 PM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 91.27994039641501, 'empirical_qps': 0.6463632616736152, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: {'uniform': 60}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed0_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed0_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed0_arxivsumm_v2_canonical_router.log
+[dual] reroute_no_ckpt: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 18.3% (11/60)
+[dual]   uniform: 18.3% (11/60)
+[dual] TTFT_ms P50=5007.4 P95=154085.3
+[dual] TPOT_ms P50=373.8 P95=557.4
+[dual] E2E_ms  P50=103232.4 P95=173181.0
+[dual] metrics → experiments_v2/eval/results/a6000/dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed0_arxivsumm_v2_canonical_metrics.json
+===== reroute_no_ckpt qps=0.7 seed=1 Sun May 17 03:14:05 PM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 95.62749473075928, 'empirical_qps': 0.616977367922431, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: {'uniform': 60}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed1_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed1_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed1_arxivsumm_v2_canonical_router.log
+[dual] reroute_no_ckpt: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 1.7% (1/60)
+[dual]   uniform: 1.7% (1/60)
+[dual] TTFT_ms P50=49707.6 P95=109042.1
+[dual] TPOT_ms P50=355.7 P95=500.2
+[dual] E2E_ms  P50=118327.4 P95=140877.5
+[dual] metrics → experiments_v2/eval/results/a6000/dual_reroute_no_ckpt_arxivsumm_qps0.7_n60_seed1_arxivsumm_v2_canonical_metrics.json
+===== reroute_no_ckpt qps=0.8 seed=0 Sun May 17 03:18:05 PM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 79.86994784686321, 'empirical_qps': 0.738700870484131, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: {'uniform': 60}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed0_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed0_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed0_arxivsumm_v2_canonical_router.log
+[dual] reroute_no_ckpt: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 16.7% (10/60)
+[dual]   uniform: 16.7% (10/60)
+[dual] TTFT_ms P50=50748.6 P95=185122.2
+[dual] TPOT_ms P50=472.9 P95=608.5
+[dual] E2E_ms  P50=164501.3 P95=261735.4
+[dual] metrics → experiments_v2/eval/results/a6000/dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed0_arxivsumm_v2_canonical_metrics.json
+===== reroute_no_ckpt qps=0.8 seed=1 Sun May 17 03:24:09 PM PDT 2026 =====
+[dual] model: /home/yzhong76/model/Qwen2.5-14B-Instruct
+[dual] schedule: {'n': 60, 'window_s': 83.67405788941439, 'empirical_qps': 0.7051169919113496, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[dual] class counts: {'uniform': 60}
+[dual] SLO uniform: TTFT≤8348ms TPOT≤200.0ms
+[dual] launching engine 0 on GPU 0 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed1_arxivsumm_v2_canonical_engine0.log
+[dual] launching engine 1 on GPU 1 (reroute_no_ckpt) → dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed1_arxivsumm_v2_canonical_engine1.log
+[dual] both engines ready
+[E_M1] launching router → dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed1_arxivsumm_v2_canonical_router.log
+[dual] reroute_no_ckpt: using router
+[dual] fired 60 requests; waiting completion
+[dual] outcomes: 60/60 200 OK, 0 errored
+[dual] SLO_met: 26.7% (16/60)
+[dual]   uniform: 26.7% (16/60)
+[dual] TTFT_ms P50=7210.9 P95=124049.1
+[dual] TPOT_ms P50=254.9 P95=462.7
+[dual] E2E_ms  P50=79128.2 P95=166495.6
+[dual] metrics → experiments_v2/eval/results/a6000/dual_reroute_no_ckpt_arxivsumm_qps0.8_n60_seed1_arxivsumm_v2_canonical_metrics.json
+===== done Sun May 17 03:28:40 PM PDT 2026 =====

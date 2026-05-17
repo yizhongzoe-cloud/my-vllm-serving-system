@@ -1,0 +1,338 @@
+{
+  "baseline": "ours",
+  "seed": 3,
+  "num_requests": 40,
+  "kill_ts": 1779052025.4508197,
+  "pre_kill_engine_counts": {
+    "0": 5,
+    "1": 4
+  },
+  "kill_at_time_s": 25,
+  "arrival_rate_qps": 0.25,
+  "num_first_token_events": 6,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-be583b8a277fb624-0-9c51a1f5",
+      "gap_ms": 6079.493284225464
+    },
+    {
+      "req_id": "cmpl-87d75ef22a8175f2-0-a7968a2f",
+      "gap_ms": 11497.282266616821
+    },
+    {
+      "req_id": "cmpl-9b8046c45cc2d7d7-0-b3df8831",
+      "gap_ms": 11497.427225112915
+    },
+    {
+      "req_id": "cmpl-8389f5f10f34e396-0-91e60ea5",
+      "gap_ms": 11497.470378875732
+    },
+    {
+      "req_id": "cmpl-80f77b2d8446d846-0-88f67fa0",
+      "gap_ms": 21414.340257644653
+    },
+    {
+      "req_id": "cmpl-9d61a655dbbb3edb-0-9010feef",
+      "gap_ms": 23328.166246414185
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 6,
+    "min": 6079.493284225464,
+    "p50": 11497.448801994324,
+    "mean": 14219.029943148294,
+    "max": 23328.166246414185
+  },
+  "client_outcomes": {
+    "200_ok": 23,
+    "errored": 17,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1238,
+        "total_s": 12.478784561157227
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1030,
+        "total_s": 14.425220966339111
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1147,
+        "total_s": 10.856681823730469
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1173,
+        "total_s": 38.051254749298096
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 992,
+        "total_s": 58.682459115982056
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 806,
+        "total_s": 52.78947067260742
+      },
+      {
+        "idx": 6,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 56.5907301902771
+      },
+      {
+        "idx": 7,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 54.85187292098999
+      },
+      {
+        "idx": 8,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 54.444820404052734
+      },
+      {
+        "idx": 9,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 50.43574237823486
+      },
+      {
+        "idx": 10,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 50.17623734474182
+      },
+      {
+        "idx": 11,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 48.366899251937866
+      },
+      {
+        "idx": 12,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 34.96533989906311
+      },
+      {
+        "idx": 13,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 33.913684368133545
+      },
+      {
+        "idx": 14,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 28.76783585548401
+      },
+      {
+        "idx": 15,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 26.70691967010498
+      },
+      {
+        "idx": 16,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 18.56404685974121
+      },
+      {
+        "idx": 17,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 14.937601089477539
+      },
+      {
+        "idx": 18,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 8.995866775512695
+      },
+      {
+        "idx": 19,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 7.84453558921814
+      },
+      {
+        "idx": 20,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 7.1327104568481445
+      },
+      {
+        "idx": 21,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 7.125970363616943
+      },
+      {
+        "idx": 22,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 0,
+        "total_s": 2.462603807449341
+      },
+      {
+        "idx": 23,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.004835605621337891
+      },
+      {
+        "idx": 24,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0015058517456054688
+      },
+      {
+        "idx": 25,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0022687911987304688
+      },
+      {
+        "idx": 26,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0015788078308105469
+      },
+      {
+        "idx": 27,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0015208721160888672
+      },
+      {
+        "idx": 28,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0013341903686523438
+      },
+      {
+        "idx": 29,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0017688274383544922
+      },
+      {
+        "idx": 30,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0018916130065917969
+      },
+      {
+        "idx": 31,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.00133514404296875
+      },
+      {
+        "idx": 32,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.001531362533569336
+      },
+      {
+        "idx": 33,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0015149116516113281
+      },
+      {
+        "idx": 34,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0015668869018554688
+      },
+      {
+        "idx": 35,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.002275228500366211
+      },
+      {
+        "idx": 36,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.001768350601196289
+      },
+      {
+        "idx": 37,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0013184547424316406
+      },
+      {
+        "idx": 38,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.001491546630859375
+      },
+      {
+        "idx": 39,
+        "status_code": null,
+        "error": "HTTPError: HTTP Error 503: Service Unavailable",
+        "completion_len": 0,
+        "total_s": 0.0017244815826416016
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 24,
+    "reroute_count": 5,
+    "dead_event_count": 2,
+    "in_flight": 0
+  }
+}

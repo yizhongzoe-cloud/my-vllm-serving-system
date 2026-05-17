@@ -1,0 +1,318 @@
+{
+  "baseline": "reroute_no_ckpt",
+  "seed": 4,
+  "num_requests": 40,
+  "kill_ts": 1779052194.739537,
+  "pre_kill_engine_counts": {
+    "0": 2,
+    "1": 1
+  },
+  "kill_at_time_s": 25,
+  "arrival_rate_qps": 0.25,
+  "num_first_token_events": 1,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-8fa67b00569e1786-0-8f247e1d",
+      "gap_ms": 2280.7021141052246
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 1,
+    "min": 2280.7021141052246,
+    "p50": 2280.7021141052246,
+    "mean": 2280.7021141052246,
+    "max": 2280.7021141052246
+  },
+  "client_outcomes": {
+    "200_ok": 15,
+    "errored": 25,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1026,
+        "total_s": 16.49220371246338
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1130,
+        "total_s": 14.229468822479248
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1086,
+        "total_s": 93.87372541427612
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1161,
+        "total_s": 123.66590642929077
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1166,
+        "total_s": 128.12782263755798
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 949,
+        "total_s": 129.64711833000183
+      },
+      {
+        "idx": 6,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1116,
+        "total_s": 128.51589798927307
+      },
+      {
+        "idx": 7,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1166,
+        "total_s": 130.667986869812
+      },
+      {
+        "idx": 8,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1110,
+        "total_s": 219.72289323806763
+      },
+      {
+        "idx": 9,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1044,
+        "total_s": 221.5815761089325
+      },
+      {
+        "idx": 10,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1187,
+        "total_s": 217.68814778327942
+      },
+      {
+        "idx": 11,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 985,
+        "total_s": 216.53339290618896
+      },
+      {
+        "idx": 12,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1222,
+        "total_s": 217.0879464149475
+      },
+      {
+        "idx": 13,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1062,
+        "total_s": 219.03049540519714
+      },
+      {
+        "idx": 14,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0573921203613
+      },
+      {
+        "idx": 15,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1005787849426
+      },
+      {
+        "idx": 16,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.06314754486084
+      },
+      {
+        "idx": 17,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0008873939514
+      },
+      {
+        "idx": 18,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1004886627197
+      },
+      {
+        "idx": 19,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0106177330017
+      },
+      {
+        "idx": 20,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1007,
+        "total_s": 296.48056173324585
+      },
+      {
+        "idx": 21,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1005289554596
+      },
+      {
+        "idx": 22,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.10053610801697
+      },
+      {
+        "idx": 23,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1005973815918
+      },
+      {
+        "idx": 24,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.01001262664795
+      },
+      {
+        "idx": 25,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1006772518158
+      },
+      {
+        "idx": 26,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1005642414093
+      },
+      {
+        "idx": 27,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.100599527359
+      },
+      {
+        "idx": 28,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.10066270828247
+      },
+      {
+        "idx": 29,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.10059452056885
+      },
+      {
+        "idx": 30,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.00426506996155
+      },
+      {
+        "idx": 31,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1008915901184
+      },
+      {
+        "idx": 32,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1009738445282
+      },
+      {
+        "idx": 33,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0472412109375
+      },
+      {
+        "idx": 34,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1006917953491
+      },
+      {
+        "idx": 35,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.0383439064026
+      },
+      {
+        "idx": 36,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1006498336792
+      },
+      {
+        "idx": 37,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1006717681885
+      },
+      {
+        "idx": 38,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.014803647995
+      },
+      {
+        "idx": 39,
+        "status_code": null,
+        "error": "TimeoutError: timed out",
+        "completion_len": 0,
+        "total_s": 300.1009478569031
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 40,
+    "reroute_count": 1,
+    "dead_event_count": 1,
+    "in_flight": 15
+  }
+}

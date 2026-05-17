@@ -1,0 +1,362 @@
+{
+  "baseline": "ours",
+  "seed": 4,
+  "num_requests": 40,
+  "kill_ts": 1779052746.5682843,
+  "pre_kill_engine_counts": {
+    "0": 2,
+    "1": 1
+  },
+  "kill_at_time_s": 25,
+  "arrival_rate_qps": 0.25,
+  "num_first_token_events": 12,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-a57aaef708e9646d-0-86d5bb9e",
+      "gap_ms": 1896.6917991638184
+    },
+    {
+      "req_id": "cmpl-b195e2d0404619e7-0-b3dbb4a8",
+      "gap_ms": 49635.21671295166
+    },
+    {
+      "req_id": "cmpl-adbe9651e369a44a-0-965cc9d9",
+      "gap_ms": 57527.16064453125
+    },
+    {
+      "req_id": "cmpl-941cfc807df76a81-0-a6145bc3",
+      "gap_ms": 77218.31679344177
+    },
+    {
+      "req_id": "cmpl-a88225af7c5cfcb1-0-8a53464e",
+      "gap_ms": 78638.40174674988
+    },
+    {
+      "req_id": "cmpl-8301eb81adb3a04f-0-b5e4d376",
+      "gap_ms": 93821.21276855469
+    },
+    {
+      "req_id": "cmpl-81472e22522a4a91-0-b128de72",
+      "gap_ms": 147248.46363067627
+    },
+    {
+      "req_id": "cmpl-96c88e7ade02a4ce-0-92a79181",
+      "gap_ms": 154892.21668243408
+    },
+    {
+      "req_id": "cmpl-888dec83fb4968d9-0-95531210",
+      "gap_ms": 186039.19768333435
+    },
+    {
+      "req_id": "cmpl-864e78780cf6c3b0-0-822ba075",
+      "gap_ms": 197077.43883132935
+    },
+    {
+      "req_id": "cmpl-8fb2635bb553efae-0-864a5f48",
+      "gap_ms": 211587.7788066864
+    },
+    {
+      "req_id": "cmpl-abc15844b418e2e1-0-8b4685ac",
+      "gap_ms": 227637.9997730255
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 12,
+    "min": 1896.6917991638184,
+    "p50": 120534.83819961548,
+    "mean": 123601.67465607326,
+    "max": 227637.9997730255
+  },
+  "client_outcomes": {
+    "200_ok": 40,
+    "errored": 0,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1026,
+        "total_s": 16.520647048950195
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1130,
+        "total_s": 15.34857702255249
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 462,
+        "total_s": 18.111122131347656
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1161,
+        "total_s": 43.81602358818054
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1166,
+        "total_s": 46.959643840789795
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 961,
+        "total_s": 48.358272075653076
+      },
+      {
+        "idx": 6,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1116,
+        "total_s": 47.094858169555664
+      },
+      {
+        "idx": 7,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1166,
+        "total_s": 49.37583875656128
+      },
+      {
+        "idx": 8,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1043,
+        "total_s": 69.85713362693787
+      },
+      {
+        "idx": 9,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1044,
+        "total_s": 72.3929672241211
+      },
+      {
+        "idx": 10,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1187,
+        "total_s": 67.73899579048157
+      },
+      {
+        "idx": 11,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 985,
+        "total_s": 67.09814238548279
+      },
+      {
+        "idx": 12,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1222,
+        "total_s": 67.52618741989136
+      },
+      {
+        "idx": 13,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1148,
+        "total_s": 92.77920794487
+      },
+      {
+        "idx": 14,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1143,
+        "total_s": 70.51353096961975
+      },
+      {
+        "idx": 15,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1153,
+        "total_s": 79.210608959198
+      },
+      {
+        "idx": 16,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1082,
+        "total_s": 78.75196647644043
+      },
+      {
+        "idx": 17,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1184,
+        "total_s": 81.66848087310791
+      },
+      {
+        "idx": 18,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1124,
+        "total_s": 83.84837675094604
+      },
+      {
+        "idx": 19,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1268,
+        "total_s": 86.15683174133301
+      },
+      {
+        "idx": 20,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 998,
+        "total_s": 76.51370787620544
+      },
+      {
+        "idx": 21,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1134,
+        "total_s": 84.72782015800476
+      },
+      {
+        "idx": 22,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1123,
+        "total_s": 90.1870985031128
+      },
+      {
+        "idx": 23,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1041,
+        "total_s": 90.39447617530823
+      },
+      {
+        "idx": 24,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1144,
+        "total_s": 86.38131022453308
+      },
+      {
+        "idx": 25,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1049,
+        "total_s": 78.82018637657166
+      },
+      {
+        "idx": 26,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 963,
+        "total_s": 81.1493330001831
+      },
+      {
+        "idx": 27,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 234,
+        "total_s": 97.54182386398315
+      },
+      {
+        "idx": 28,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1326,
+        "total_s": 98.69923686981201
+      },
+      {
+        "idx": 29,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1160,
+        "total_s": 100.194584608078
+      },
+      {
+        "idx": 30,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 949,
+        "total_s": 101.2100920677185
+      },
+      {
+        "idx": 31,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1282,
+        "total_s": 104.48276138305664
+      },
+      {
+        "idx": 32,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 900,
+        "total_s": 78.61320686340332
+      },
+      {
+        "idx": 33,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 846,
+        "total_s": 78.50138926506042
+      },
+      {
+        "idx": 34,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1093,
+        "total_s": 74.00603151321411
+      },
+      {
+        "idx": 35,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1208,
+        "total_s": 73.77385091781616
+      },
+      {
+        "idx": 36,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1062,
+        "total_s": 73.30430841445923
+      },
+      {
+        "idx": 37,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1011,
+        "total_s": 71.3648612499237
+      },
+      {
+        "idx": 38,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1121,
+        "total_s": 63.90628743171692
+      },
+      {
+        "idx": 39,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1011,
+        "total_s": 55.19485282897949
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 40,
+    "reroute_count": 1,
+    "dead_event_count": 1,
+    "in_flight": 0
+  }
+}
