@@ -1,0 +1,217 @@
+===== vllm_fcfs qps=0.15 seed=0 Sun May 17 05:40:02 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 425.9730551832702, 'empirical_qps': 0.13850641321577464, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.15_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 70.0% (42/60)
+[single] TTFT_ms P50=3502.7 P95=57540.4
+[single] TPOT_ms P50=75.9 P95=392.1
+[single] E2E_ms  P50=18001.6 P95=104112.3
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.15_n60_seed0_v1_metrics.json
+===== ours qps=0.15 seed=0 Sun May 17 05:48:51 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 425.9730551832702, 'empirical_qps': 0.13850641321577464, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.15_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 85.0% (51/60)
+[single] TTFT_ms P50=2939.1 P95=8703.5
+[single] TPOT_ms P50=78.5 P95=212.2
+[single] E2E_ms  P50=19447.9 P95=51251.3
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.15_n60_seed0_v1_metrics.json
+===== vllm_fcfs qps=0.15 seed=1 Sun May 17 05:56:39 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 446.2616420768765, 'empirical_qps': 0.13220943598337812, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.15_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 96.7% (58/60)
+[single] TTFT_ms P50=2280.8 P95=7400.5
+[single] TPOT_ms P50=62.0 P95=119.7
+[single] E2E_ms  P50=14446.0 P95=25919.5
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.15_n60_seed1_v1_metrics.json
+===== ours qps=0.15 seed=1 Sun May 17 06:04:49 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 446.2616420768765, 'empirical_qps': 0.13220943598337812, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.15_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 96.7% (58/60)
+[single] TTFT_ms P50=2286.9 P95=7458.5
+[single] TPOT_ms P50=63.7 P95=122.9
+[single] E2E_ms  P50=14863.5 P95=27960.3
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.15_n60_seed1_v1_metrics.json
+===== vllm_fcfs qps=0.20 seed=0 Sun May 17 06:12:52 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 319.47979138745285, 'empirical_qps': 0.18467521762103276, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.2_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 68.3% (41/60)
+[single] TTFT_ms P50=3729.3 P95=101117.5
+[single] TPOT_ms P50=87.0 P95=549.6
+[single] E2E_ms  P50=20538.6 P95=155085.9
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.2_n60_seed0_v1_metrics.json
+===== ours qps=0.20 seed=0 Sun May 17 06:21:08 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 319.47979138745285, 'empirical_qps': 0.18467521762103276, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.2_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 68.3% (41/60)
+[single] TTFT_ms P50=3754.3 P95=27667.8
+[single] TPOT_ms P50=91.8 P95=260.8
+[single] E2E_ms  P50=21086.3 P95=63982.2
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.2_n60_seed0_v1_metrics.json
+===== vllm_fcfs qps=0.20 seed=1 Sun May 17 06:27:33 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 334.69623155765754, 'empirical_qps': 0.1762792479778374, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.2_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 56.7% (34/60)
+[single] TTFT_ms P50=3924.8 P95=45415.8
+[single] TPOT_ms P50=110.8 P95=413.6
+[single] E2E_ms  P50=29467.6 P95=106687.1
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.2_n60_seed1_v1_metrics.json
+===== ours qps=0.20 seed=1 Sun May 17 06:33:53 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 334.69623155765754, 'empirical_qps': 0.1762792479778374, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.2_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 66.7% (40/60)
+[single] TTFT_ms P50=2827.6 P95=23363.5
+[single] TPOT_ms P50=97.2 P95=232.4
+[single] E2E_ms  P50=25055.6 P95=61087.8
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.2_n60_seed1_v1_metrics.json
+===== vllm_fcfs qps=0.30 seed=0 Sun May 17 06:40:09 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 212.9865275916351, 'empirical_qps': 0.2770128264315493, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.3_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 28.3% (17/60)
+[single] TTFT_ms P50=43279.1 P95=263852.4
+[single] TPOT_ms P50=390.5 P95=584.9
+[single] E2E_ms  P50=124486.3 P95=303855.4
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.3_n60_seed0_v1_metrics.json
+===== ours qps=0.30 seed=0 Sun May 17 06:49:11 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 212.9865275916351, 'empirical_qps': 0.2770128264315493, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.3_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 38.3% (23/60)
+[single] TTFT_ms P50=10558.2 P95=86742.1
+[single] TPOT_ms P50=176.7 P95=286.3
+[single] E2E_ms  P50=58043.7 P95=114498.9
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.3_n60_seed0_v1_metrics.json
+===== vllm_fcfs qps=0.30 seed=1 Sun May 17 06:54:57 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 223.13082103843826, 'empirical_qps': 0.26441887196675623, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.3_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 10.0% (6/60)
+[single] TTFT_ms P50=138053.2 P95=279717.8
+[single] TPOT_ms P50=370.6 P95=627.5
+[single] E2E_ms  P50=211214.7 P95=300431.4
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.3_n60_seed1_v1_metrics.json
+===== ours qps=0.30 seed=1 Sun May 17 07:04:02 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 223.13082103843826, 'empirical_qps': 0.26441887196675623, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.3_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 5.0% (3/60)
+[single] TTFT_ms P50=29540.9 P95=82992.4
+[single] TPOT_ms P50=228.1 P95=343.1
+[single] E2E_ms  P50=87414.0 P95=106519.7
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.3_n60_seed1_v1_metrics.json
+===== vllm_fcfs qps=0.35 seed=0 Sun May 17 07:09:48 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 182.55988079283003, 'empirical_qps': 0.3231816308368076, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.35_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 28.3% (17/60)
+[single] TTFT_ms P50=34742.2 P95=252045.4
+[single] TPOT_ms P50=347.9 P95=623.0
+[single] E2E_ms  P50=109139.6 P95=306898.5
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.35_n60_seed0_v1_metrics.json
+===== ours qps=0.35 seed=0 Sun May 17 07:18:24 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 182.55988079283003, 'empirical_qps': 0.3231816308368076, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.35_n60_seed0_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 36.7% (22/60)
+[single] TTFT_ms P50=15695.7 P95=90987.3
+[single] TPOT_ms P50=185.9 P95=268.8
+[single] E2E_ms  P50=58545.4 P95=123565.5
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.35_n60_seed0_v1_metrics.json
+===== vllm_fcfs qps=0.35 seed=1 Sun May 17 07:23:54 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 191.25498946151856, 'empirical_qps': 0.3084886839612155, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.35_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 10.0% (6/60)
+[single] TTFT_ms P50=138804.7 P95=305758.4
+[single] TPOT_ms P50=374.5 P95=618.2
+[single] E2E_ms  P50=211881.4 P95=323257.7
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.35_n60_seed1_v1_metrics.json
+===== ours qps=0.35 seed=1 Sun May 17 07:32:51 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 191.25498946151856, 'empirical_qps': 0.3084886839612155, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.35_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 5.0% (3/60)
+[single] TTFT_ms P50=67280.7 P95=129416.3
+[single] TPOT_ms P50=234.4 P95=370.0
+[single] E2E_ms  P50=117882.8 P95=153602.0
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.35_n60_seed1_v1_metrics.json
+===== vllm_fcfs qps=0.4 seed=1 Sun May 17 07:38:55 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 167.34811577882877, 'empirical_qps': 0.3525584959556748, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (vllm_fcfs) on GPU 0 → single_vllm_fcfs_arxivsumm_qps0.4_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 10.0% (6/60)
+[single] TTFT_ms P50=130274.4 P95=301415.6
+[single] TPOT_ms P50=370.9 P95=602.8
+[single] E2E_ms  P50=204797.8 P95=321387.9
+[single] metrics → experiments_v2/eval/results/a6000/single_vllm_fcfs_arxivsumm_qps0.4_n60_seed1_v1_metrics.json
+===== ours qps=0.4 seed=1 Sun May 17 07:47:27 PM PDT 2026 =====
+[single] schedule: {'n': 60, 'window_s': 167.34811577882877, 'empirical_qps': 0.3525584959556748, 'max_tokens_p50': 200, 'max_tokens_p95': 200}
+[single] SLO uniform: TTFT≤8348ms, TPOT≤200.0ms
+[single] launching engine (ours) on GPU 0 → single_ours_arxivsumm_qps0.4_n60_seed1_v1_engine0.log
+[single] engine ready
+[single] fired 60 requests; waiting completion
+[single] outcomes: 60/60 200 OK, 0 errored
+[single] SLO_met: 5.0% (3/60)
+[single] TTFT_ms P50=46656.5 P95=111066.9
+[single] TPOT_ms P50=222.0 P95=299.8
+[single] E2E_ms  P50=91650.4 P95=134404.6
+[single] metrics → experiments_v2/eval/results/a6000/single_ours_arxivsumm_qps0.4_n60_seed1_v1_metrics.json
+===== done Sun May 17 07:52:51 PM PDT 2026 =====
