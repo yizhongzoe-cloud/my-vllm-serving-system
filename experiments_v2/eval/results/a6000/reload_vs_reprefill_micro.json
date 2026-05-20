@@ -1,0 +1,44 @@
+{
+  "model": "/home/yzhong76/model/Qwen2.5-14B-Instruct",
+  "context_lengths": [
+    8192,
+    16384,
+    24576
+  ],
+  "trials_per_length": 3,
+  "summary": {
+    "8192": {
+      "reprefill_ms_trials": [
+        2357.8037349507213,
+        2337.5489683821797,
+        2343.388156965375
+      ],
+      "reload_ms_trials": [],
+      "reprefill_ms_median": 2343.388156965375,
+      "reload_ms_median": null,
+      "ratio": null
+    },
+    "16384": {
+      "reprefill_ms_trials": [
+        5448.616388253868,
+        5482.6592756435275,
+        5504.540654830635
+      ],
+      "reload_ms_trials": [],
+      "reprefill_ms_median": 5482.6592756435275,
+      "reload_ms_median": null,
+      "ratio": null
+    },
+    "24576": {
+      "reprefill_ms_trials": [
+        9414.79293256998,
+        9447.058563120663,
+        9474.876252934337
+      ],
+      "reload_ms_trials": [],
+      "reprefill_ms_median": 9447.058563120663,
+      "reload_ms_median": null,
+      "ratio": null
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "baseline": "ours",
+  "qps": 0.3,
+  "num_requests": 40,
+  "n_icept": 20,
+  "n_ok": 40,
+  "wall_s": 143.45376324653625,
+  "throughput_req_s": 0.2788354874403465,
+  "icept_at": 30,
+  "total_output": 80,
+  "pause_range": [
+    2.0,
+    7.0
+  ],
+  "reload_validity": {
+    "reloaded": 20,
+    "fell_back_reprefill": 0
+  },
+  "seg2_latency_s": {
+    "p50": 3.266042947769165,
+    "p95": 15.515895938873292,
+    "mean": 5.209934675693512,
+    "n": 20
+  },
+  "work_latency_s": {
+    "p50": 10.048181176185608,
+    "p95": 27.78528124094009
+  },
+  "errors": []
+}

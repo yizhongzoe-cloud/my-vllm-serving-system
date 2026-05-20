@@ -1,0 +1,108 @@
+{
+  "baseline": "ours",
+  "seed": 1,
+  "num_requests": 8,
+  "kill_ts": 1779247551.026006,
+  "pre_kill_engine_counts": {
+    "0": 4,
+    "1": 4
+  },
+  "kill_at_time_s": 20.0,
+  "arrival_rate_qps": null,
+  "closed_loop": true,
+  "concurrency": 8,
+  "num_first_token_events": 4,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-8e81aad315194d36-0-97102882",
+      "gap_ms": 6244.4610595703125
+    },
+    {
+      "req_id": "cmpl-ad70716fe4d48276-0-8afe6216",
+      "gap_ms": 6244.549989700317
+    },
+    {
+      "req_id": "cmpl-ae4cb3a4bed6801e-0-a855031b",
+      "gap_ms": 6244.590997695923
+    },
+    {
+      "req_id": "cmpl-ae63d9006a3dc7b6-0-adb80561",
+      "gap_ms": 6244.625091552734
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 4,
+    "min": 6244.4610595703125,
+    "p50": 6244.57049369812,
+    "mean": 6244.556784629822,
+    "max": 6244.625091552734
+  },
+  "client_outcomes": {
+    "200_ok": 8,
+    "errored": 0,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1887,
+        "total_s": 52.414156675338745
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2731,
+        "total_s": 51.51599359512329
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1905,
+        "total_s": 52.505648612976074
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2715,
+        "total_s": 51.86490178108215
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2946,
+        "total_s": 52.03726053237915
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2005,
+        "total_s": 52.753952980041504
+      },
+      {
+        "idx": 6,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2236,
+        "total_s": 52.86398649215698
+      },
+      {
+        "idx": 7,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 3014,
+        "total_s": 52.21364402770996
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 8,
+    "reroute_count": 4,
+    "dead_event_count": 1,
+    "in_flight": 0
+  }
+}

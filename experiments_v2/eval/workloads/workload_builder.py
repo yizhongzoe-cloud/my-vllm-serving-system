@@ -165,6 +165,119 @@ def summarize_schedule(
     }
 
 
+def build_tiered_schedule(
+    dataset_name: str,
+    num_requests: int,
+    arrival_rate_qps: float,
+    tight_ratio: float,
+    seed: int = 0,
+    burst_size: int = 1,
+    burst_spread_s: float = 0.0,
+    max_tokens_cap: int = DEFAULT_MAX_OUTPUT_CAP,
+) -> list[tuple[float, str, int, int, str]]:
+    """Build a Poisson schedule of ONE long-context dataset, but split
+    into two SLO tiers ("tight" / "loose").
+
+    Unlike build_mixed_schedule (which mixes two *datasets* — short
+    interactive vs long document), this keeps every request on the SAME
+    long-context dataset and differs only in the SLO tier assigned. This
+    is the heterogeneous-SLO setting: identical workload, some requests
+    are latency-critical (tight) and some are best-effort (loose). The
+    tier label lets the caller give loose requests a looser deadline
+    (e.g. 2x the tight deadline) so the picker has a genuine winner when
+    it delays a slack-rich loose request to save a tight one.
+
+    Args:
+        dataset_name: long-context dataset (e.g. 'arxivsumm').
+        num_requests: total request count.
+        arrival_rate_qps: Poisson rate λ.
+        tight_ratio: fraction assigned the "tight" tier. Rest are "loose".
+        seed: reproducibility — controls dataset sample, arrivals, and
+              the (shuffled) tier assignment.
+        max_tokens_cap: per-request max_tokens cap.
+
+    Returns:
+        List of (arrival_offset_s, prompt, max_tokens, prompt_tokens,
+        tier), sorted by arrival_offset. `prompt_tokens` is the dataset's
+        recorded prompt length (so the caller can derive a prompt-aware
+        startup budget without re-tokenizing); `tier` is "tight"/"loose".
+    """
+    if not 0.0 <= tight_ratio <= 1.0:
+        raise ValueError(f"tight_ratio must be in [0,1], got {tight_ratio}")
+    if arrival_rate_qps <= 0:
+        raise ValueError(
+            f"arrival_rate_qps must be > 0, got {arrival_rate_qps}")
+    if num_requests <= 0:
+        raise ValueError(f"num_requests must be > 0, got {num_requests}")
+
+    path, loader_tag = resolve_dataset_info(dataset_name)
+    records = load_dataset(
+        dataset_name=loader_tag, dataset_path=path,
+        max_samples=num_requests, seed=seed,
+    )
+    if len(records) < num_requests:
+        raise RuntimeError(
+            f"dataset {dataset_name} only has {len(records)} records but "
+            f"{num_requests} requested"
+        )
+
+    # Poisson inter-arrival sequence (identical convention to
+    # build_schedule so tiered vs uniform runs share arrival statistics).
+    rng = np.random.default_rng(seed)
+    if num_requests == 1:
+        offsets = np.array([0.0])
+    elif burst_size > 1:
+        # Compound-Poisson (batched) arrivals. Burst ONSETS are Poisson at
+        # rate lambda/burst_size, so the MEAN request rate stays
+        # arrival_rate_qps, but each onset injects `burst_size` requests
+        # spread over burst_spread_s. This gives transient overload + drain
+        # (CV >> 1) — the sub-saturation-with-spikes regime where slack-aware
+        # preempt-resume can help. burst_size=1 reduces to plain Poisson.
+        n_bursts = (num_requests + burst_size - 1) // burst_size
+        onset_rate = arrival_rate_qps / burst_size
+        if n_bursts == 1:
+            onsets = np.array([0.0])
+        else:
+            onset_inter = rng.exponential(
+                scale=1.0 / onset_rate, size=n_bursts - 1,
+            )
+            onsets = np.concatenate([[0.0], np.cumsum(onset_inter)])
+        times: list[float] = []
+        for o in onsets:
+            for _ in range(burst_size):
+                jitter = (rng.uniform(0.0, burst_spread_s)
+                          if burst_spread_s > 0 else 0.0)
+                times.append(float(o) + jitter)
+        arr = np.sort(np.array(times))[:num_requests]
+        offsets = arr - arr[0]
+    else:
+        inter = rng.exponential(
+            scale=1.0 / arrival_rate_qps, size=num_requests - 1,
+        )
+        offsets = np.concatenate([[0.0], np.cumsum(inter)])
+
+    # Tier assignment: deterministically mark n_tight request *positions*
+    # as tight via a seeded permutation, so tight/loose are interleaved
+    # in arrival order rather than blocked. n_tight uses floor; with
+    # tight_ratio=0.3 and 60 reqs that is 18 tight / 42 loose.
+    n_tight = int(num_requests * tight_ratio)
+    tier_rng = np.random.default_rng(seed + 12345)
+    perm = tier_rng.permutation(num_requests)
+    tight_positions = set(int(p) for p in perm[:n_tight])
+
+    schedule: list[tuple[float, str, int, int, str]] = []
+    for i, rec in enumerate(records):
+        out_tokens = int(rec.get("expected_output_tokens", max_tokens_cap))
+        max_tokens = max(1, min(max_tokens_cap, out_tokens))
+        prompt_tokens = int(rec.get("prompt_tokens", 0))
+        tier = "tight" if i in tight_positions else "loose"
+        schedule.append(
+            (float(offsets[i]), rec["prompt"], max_tokens,
+             prompt_tokens, tier)
+        )
+    return schedule
+
+
 def build_mixed_schedule(
     short_dataset: str,
     long_dataset: str,

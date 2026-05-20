@@ -70,7 +70,7 @@ bars = ax.bar(np.arange(2), g_s, color=colors_s,
               edgecolor="black", linewidth=0.5)
 ax.set_xticks(np.arange(2)); ax.set_xticklabels(labels_s, fontsize=11)
 ax.set_ylabel("Goodput (SLO-meeting req/s)")
-ax.set_title("Single GPU, arxivsumm @ QPS=0.25\n(mean of seed 0,1)")
+ax.set_title("Single-engine, arxivsumm @ QPS=0.25\n(mean of seed 0,1)")
 for i, (g, s) in enumerate(zip(g_s, slo_s)):
     ax.annotate(f"{g:.3f}\n({s:.0f}% SLO)",
                 xy=(i, g), xytext=(0, 4),
@@ -84,21 +84,22 @@ ax.annotate(f"{mul:.2f}× goodput\n(+{slo_s[1]-slo_s[0]:.1f}pp SLO)",
             arrowprops=dict(arrowstyle="->", color="#1f77b4"))
 ax.set_ylim(0, max(g_s) * 1.6)
 
-# Right panel — dual GPU with 3 baselines
+# Right panel — dual GPU with 4 baselines
 ax = axes[1]
-labels_d = ["vllm_fcfs\n(vanilla)",
-            "reroute_no_ckpt\n(Llumnix-style)",
-            "ours\n(checkpoint + V3 reload\n+ SLO-aware picker)"]
+labels_d = ["vllm_fcfs",
+            "reroute_no_ckpt",
+            "ours_no_picker",
+            "ours"]
 g_d = [stats(b, DUAL_QPS, SEEDS)[1] for b in
-       ("vllm_fcfs", "reroute_no_ckpt", "ours")]
+       ("vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours")]
 slo_d = [stats(b, DUAL_QPS, SEEDS)[0] for b in
-         ("vllm_fcfs", "reroute_no_ckpt", "ours")]
-colors_d = ["#888888", "#aaaaaa", "#1f77b4"]
-bars = ax.bar(np.arange(3), g_d, color=colors_d,
+         ("vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours")]
+colors_d = ["#888888", "#cc8800", "#7fb04f", "#1f77b4"]
+bars = ax.bar(np.arange(4), g_d, color=colors_d,
               edgecolor="black", linewidth=0.5)
-ax.set_xticks(np.arange(3)); ax.set_xticklabels(labels_d, fontsize=9)
+ax.set_xticks(np.arange(4)); ax.set_xticklabels(labels_d, fontsize=9)
 ax.set_ylabel("Goodput (SLO-meeting req/s)")
-ax.set_title(f"Dual GPU, arxivsumm @ QPS={DUAL_QPS}\n(mean of seed 0,1)")
+ax.set_title(f"Two-engine, arxivsumm @ QPS={DUAL_QPS}\n(mean of seed 0,1)")
 for i, (g, s) in enumerate(zip(g_d, slo_d)):
     ax.annotate(f"{g:.3f}\n({s:.1f}% SLO)",
                 xy=(i, g), xytext=(0, 4),
@@ -106,7 +107,7 @@ for i, (g, s) in enumerate(zip(g_d, slo_d)):
                 fontsize=10, fontweight="bold")
 ax.set_ylim(0, max(g_d) * 1.35)
 
-fig.suptitle("Headline — host-RAM checkpoint + V3 reload + SLO-aware picker "
+fig.suptitle("Headline — host-RAM checkpoint + checkpoint reload + SLO-aware picker "
              "(Qwen2.5-14B, A6000)",
              fontsize=12, y=1.00)
 plt.tight_layout()
@@ -119,12 +120,12 @@ print("→ fig_main_three_results.png/pdf")
 # FIGURE 2: Goodput-vs-QPS curve (3 baselines, mean seed 0+1)
 # ============================================================
 QPS_LEVELS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-gps = {b: [] for b in ("vllm_fcfs", "reroute_no_ckpt", "ours")}
+gps = {b: [] for b in ("vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours")}
 gps_per_seed = {b: {s: [] for s in SEEDS}
-                for b in ("vllm_fcfs", "reroute_no_ckpt", "ours")}
+                for b in ("vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours")}
 
 for q in QPS_LEVELS:
-    for b in ("vllm_fcfs", "reroute_no_ckpt", "ours"):
+    for b in ("vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours"):
         per_seed = []
         for s in SEEDS:
             d = load_metric(b, q, s)
@@ -141,8 +142,11 @@ ax = axes[0]
 ax.plot(QPS_LEVELS, gps["vllm_fcfs"], "o-", label="vllm_fcfs",
         color="#888888", linewidth=2, markersize=8)
 ax.plot(QPS_LEVELS, gps["reroute_no_ckpt"], "^-",
-        label="reroute_no_ckpt (Llumnix-style)",
+        label="reroute_no_ckpt",
         color="#cc8800", linewidth=2, markersize=8)
+ax.plot(QPS_LEVELS, gps["ours_no_picker"], "D-",
+        label="ours_no_picker",
+        color="#7fb04f", linewidth=2, markersize=8)
 ax.plot(QPS_LEVELS, gps["ours"], "s-", label="ours",
         color="#1f77b4", linewidth=2, markersize=8)
 ax.set_xlabel("Arrival rate (QPS, Poisson)")
@@ -158,24 +162,27 @@ ax.text(0.51, max(gps["ours"]) * 0.95,
 # SLO
 ax = axes[1]
 slos = {b: [stats(b, q, SEEDS)[0] for q in QPS_LEVELS]
-        for b in ("vllm_fcfs", "reroute_no_ckpt", "ours")}
+        for b in ("vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours")}
 ax.plot(QPS_LEVELS, slos["vllm_fcfs"], "o-", label="vllm_fcfs",
         color="#888888", linewidth=2, markersize=8)
 ax.plot(QPS_LEVELS, slos["reroute_no_ckpt"], "^-",
         label="reroute_no_ckpt", color="#cc8800",
         linewidth=2, markersize=8)
+ax.plot(QPS_LEVELS, slos["ours_no_picker"], "D-",
+        label="ours_no_picker", color="#7fb04f",
+        linewidth=2, markersize=8)
 ax.plot(QPS_LEVELS, slos["ours"], "s-", label="ours",
         color="#1f77b4", linewidth=2, markersize=8)
 ax.set_xlabel("Arrival rate (QPS, Poisson)")
 ax.set_ylabel("SLO-meeting requests (%)")
-ax.set_title("SLO satisfaction vs load (mean of seed 0,1)")
+ax.set_title("SLO attainment vs load (mean of seed 0,1)")
 ax.set_ylim(0, 105)
 ax.legend(loc="best")
 ax.grid(alpha=0.3)
 ax.axvline(0.5, color="red", linestyle="--", alpha=0.4)
 
-fig.suptitle("Dual GPU arxivsumm — 3-baseline QPS sweep "
-             "(reroute_no_ckpt for QPS=0.5,0.7,0.8 only)",
+fig.suptitle("Two-engine arxivsumm — 4-baseline QPS sweep "
+             "(mean of seed 0,1)",
              fontsize=11, y=1.00)
 plt.tight_layout()
 plt.savefig(OUT / "fig_qps_sweep.png", dpi=150, bbox_inches="tight")
@@ -188,8 +195,8 @@ print("→ fig_qps_sweep.png/pdf")
 # ============================================================
 AB = ["vllm_fcfs", "reroute_no_ckpt", "ours_no_picker", "ours"]
 AB_LABELS = ["vllm_fcfs\n(vanilla)",
-             "+ router\nreroute\n(Llumnix-style)",
-             "+ checkpoint\n+ V3 reload",
+             "+ router\nreroute",
+             "+ checkpoint\nreload",
              "+ SLO-aware\npicker (ours)"]
 ab_gp = [stats(b, DUAL_QPS, SEEDS)[1] for b in AB]
 ab_slo = [stats(b, DUAL_QPS, SEEDS)[0] for b in AB]
@@ -201,7 +208,7 @@ bars = ax.bar(np.arange(4), ab_gp, color=colors,
 ax.set_xticks(np.arange(4))
 ax.set_xticklabels(AB_LABELS, fontsize=9)
 ax.set_ylabel("Goodput (SLO-meeting req/s)")
-ax.set_title(f"4-baseline ablation @ dual arxivsumm QPS={DUAL_QPS} "
+ax.set_title(f"4-baseline ablation @ two-engine arxivsumm QPS={DUAL_QPS} "
              "(mean of seed 0,1)")
 # Show increment per step
 prev = 0

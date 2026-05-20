@@ -44,16 +44,22 @@ def stats_mean(loader, baseline, qps, seeds):
 SEEDS = [0, 1]
 SINGLE_QPS = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
 DUAL_QPS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-BASELINES = [
+SINGLE_BASELINES = [
     ("vllm_fcfs", "vllm_fcfs",     "o-", "#888888"),
     ("ours",      "ours",          "s-", "#1f77b4"),
+]
+DUAL_BASELINES = [
+    ("vllm_fcfs",       "vllm_fcfs",       "o-", "#888888"),
+    ("reroute_no_ckpt", "reroute_no_ckpt", "^-", "#cc8800"),
+    ("ours_no_picker",  "ours_no_picker",  "D-", "#7fb04f"),
+    ("ours",            "ours",            "s-", "#1f77b4"),
 ]
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
 # ─── Single GPU avg JCT ───
 ax = axes[0, 0]
-for b, label, style, color in BASELINES:
+for b, label, style, color in SINGLE_BASELINES:
     avgs = []
     for q in SINGLE_QPS:
         a, _ = stats_mean(load_single, b, str(q), SEEDS)
@@ -81,7 +87,7 @@ if fcfs_avg25 and ours_avg25:
 
 # ─── Single GPU p95 JCT ───
 ax = axes[0, 1]
-for b, label, style, color in BASELINES:
+for b, label, style, color in SINGLE_BASELINES:
     p95s = []
     for q in SINGLE_QPS:
         _, p = stats_mean(load_single, b, str(q), SEEDS)
@@ -106,7 +112,7 @@ if fcfs_p95_25 and ours_p95_25:
 
 # ─── Dual GPU avg JCT ───
 ax = axes[1, 0]
-for b, label, style, color in BASELINES:
+for b, label, style, color in DUAL_BASELINES:
     avgs = []
     for q in DUAL_QPS:
         a, _ = stats_mean(load_dual, b, str(q), SEEDS)
@@ -133,7 +139,7 @@ if fcfs_avg7 and ours_avg7:
 
 # ─── Dual GPU p95 JCT ───
 ax = axes[1, 1]
-for b, label, style, color in BASELINES:
+for b, label, style, color in DUAL_BASELINES:
     p95s = []
     for q in DUAL_QPS:
         _, p = stats_mean(load_dual, b, str(q), SEEDS)

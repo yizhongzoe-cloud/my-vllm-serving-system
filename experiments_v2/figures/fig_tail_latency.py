@@ -34,9 +34,10 @@ def seed_stat(baseline, qps, seeds, field):
 SEEDS = [0, 1]
 QPS_LEVELS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 BASELINES = [
-    ("vllm_fcfs",       "vllm_fcfs",                "o-", "#888888"),
-    ("reroute_no_ckpt", "reroute_no_ckpt (Llumnix-style)", "^-", "#cc8800"),
-    ("ours",            "ours (checkpoint + V3 reload + picker)", "s-", "#1f77b4"),
+    ("vllm_fcfs",       "vllm_fcfs",       "o-", "#888888"),
+    ("reroute_no_ckpt", "reroute_no_ckpt", "^-", "#cc8800"),
+    ("ours_no_picker",  "ours_no_picker",  "D-", "#7fb04f"),
+    ("ours",            "ours",            "s-", "#1f77b4"),
 ]
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
@@ -79,8 +80,7 @@ ax.legend(loc="best", fontsize=9)
 ax.grid(alpha=0.3, which="both")
 ax.axvline(0.5, color="red", linestyle="--", alpha=0.4)
 
-fig.suptitle("Dual GPU arxivsumm — tail latency reveals the mechanism's "
-             "value where SLO_met% can mask it (mean of seed 0,1)",
+fig.suptitle("Two-engine arxivsumm tail latency (mean of seed 0,1)",
              fontsize=11, y=1.00)
 plt.tight_layout()
 plt.savefig(OUT / "fig_tail_latency.png", dpi=160, bbox_inches="tight")

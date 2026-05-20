@@ -1,0 +1,97 @@
+{
+  "baseline": "reroute_no_ckpt",
+  "seed": 1,
+  "num_requests": 6,
+  "kill_ts": 1779299984.8164384,
+  "pre_kill_engine_counts": {
+    "0": 3,
+    "1": 3
+  },
+  "kill_at_time_s": 20.0,
+  "min_prompt_tokens": 8000,
+  "max_prompt_tokens": 12000,
+  "arrival_rate_qps": null,
+  "closed_loop": true,
+  "concurrency": 6,
+  "detection_latency_s": 0.8202977180480957,
+  "num_first_token_events": 3,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-92ba55fe78aeed45-0-90401d74",
+      "gap_ms": 4220.626592636108
+    },
+    {
+      "req_id": "cmpl-9359c46e9098f650-0-9b1a42ea",
+      "gap_ms": 7477.717638015747
+    },
+    {
+      "req_id": "cmpl-80fff0ca85945cbf-0-af27198c",
+      "gap_ms": 10938.873529434204
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 3,
+    "min": 4220.626592636108,
+    "p50": 7477.717638015747,
+    "mean": 7545.73925336202,
+    "max": 10938.873529434204
+  },
+  "failover_gap_net_ms": {
+    "p50": 6657.419919967651,
+    "mean": 6725.441535313924
+  },
+  "client_outcomes": {
+    "200_ok": 6,
+    "errored": 0,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2755,
+        "total_s": 59.184308767318726
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2757,
+        "total_s": 46.60839033126831
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2915,
+        "total_s": 58.97751426696777
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2955,
+        "total_s": 46.88358449935913
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2854,
+        "total_s": 58.7123818397522
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2909,
+        "total_s": 47.09379816055298
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 6,
+    "reroute_count": 3,
+    "dead_event_count": 1,
+    "in_flight": 0
+  }
+}

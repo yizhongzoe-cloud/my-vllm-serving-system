@@ -33,7 +33,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
     build_schedule, build_mixed_schedule, build_trace_schedule,
-    summarize_schedule,
+    build_tiered_schedule, summarize_schedule,
 )
 from experiments_v2.eval.scripts.e_m1_slo_sweep import (  # noqa: E402
     Client, parse_request_done_log, cleanup_shm, percentile,
@@ -41,6 +41,15 @@ from experiments_v2.eval.scripts.e_m1_slo_sweep import (  # noqa: E402
     ENGINE_0_PORT, ENGINE_1_PORT, ROUTER_PORT,
     ENGINE_READY_TIMEOUT_S, ROUTER_READY_TIMEOUT_S,
     wait_url_ready, wait_both_engines_alive_in_router,
+)
+
+# Startup (first-token) budget per prompt token, in ms, for the
+# completion-deadline SLO. deadline = TTFT_MS_PER_PROMPT_TOKEN*prompt_len
+# + num_output*tpot_slo. Default 0.73 = 2x the measured prefill rate on
+# Qwen2.5-14B/A6000 (0.366 ms/prompt-token). Must match the engine-side
+# _TTFT_MS_PER_PROMPT_TOKEN in vllm/v1/core/sched/utils.py.
+TTFT_MS_PER_PROMPT_TOKEN = float(
+    os.environ.get("FT_TTFT_MS_PER_PROMPT_TOKEN", "0.73")
 )
 
 
@@ -57,8 +66,17 @@ def start_engine(engine_id: int, gpu_id: int, baseline: str,
         env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "1"
         env["FT_DELTA_CHECKPOINT"] = "1"
         env["SLO_PRIORITY_PREEMPT"] = "1"
-        env.setdefault("FT_PICKER_IN_DANGER_MS", "300")
-        env.setdefault("FT_PICKER_HEAD_TOO_LATE_MS", "9999999")
+        # Head-danger gate: use the laxity RATIO mode (threshold =
+        # FT_PICKER_HEAD_DANGER_RATIO x a, default 0.40 x ttft_slo_ms), so
+        # the picker fires while the head can STILL be saved (e.g. ~2s of
+        # slack left on a tight head), not the old absolute 300ms gate
+        # which only tripped once the head was essentially dead. And keep
+        # the too-late gate at its 200ms default (skip firing on heads
+        # already >200ms past deadline) — the 2026-05-20 tiered A/B showed
+        # firing on doomed heads is pure churn that hurts OTHER tight
+        # requests (tight 56%->39% on seed0/qps0.5), refuting the old
+        # "queue-drain still helps" rationale. We therefore do NOT set
+        # FT_PICKER_IN_DANGER_MS or FT_PICKER_HEAD_TOO_LATE_MS here.
     elif baseline == "ours_no_picker":
         # substrate + V3 reload, picker OFF.
         # Isolates picker contribution vs substrate-only.
@@ -83,6 +101,15 @@ def start_engine(engine_id: int, gpu_id: int, baseline: str,
         env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "0"
         env["FT_DELTA_CHECKPOINT"] = "0"
         env["SLO_PRIORITY_PREEMPT"] = "0"
+    elif baseline == "vllm_random":
+        # vanilla vLLM, but capacity preemption picks a RANDOM victim
+        # instead of FCFS-newest. Isolates victim selection vs recompute.
+        env["FT_ROUTER_SHM_BUS"] = "0"
+        env["FT_CAPACITY_PREEMPT_RELOAD"] = "0"
+        env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "0"
+        env["FT_DELTA_CHECKPOINT"] = "0"
+        env["SLO_PRIORITY_PREEMPT"] = "0"
+        env["FT_RANDOM_CAPACITY_VICTIM"] = "1"
     else:
         raise ValueError(f"unsupported baseline: {baseline}")
     port = ENGINE_0_PORT if engine_id == 0 else ENGINE_1_PORT
@@ -133,7 +160,8 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline",
-                        choices=["vllm_fcfs", "reroute_no_ckpt",
+                        choices=["vllm_fcfs", "vllm_random",
+                                 "reroute_no_ckpt",
                                  "ours_no_picker", "ours"],
                         required=True)
     parser.add_argument("--workload-trace", type=str, default=None,
@@ -170,10 +198,81 @@ def main() -> int:
     parser.add_argument("--out-tag", type=str, default="dual",
                         help="Suffix on output filenames.")
     parser.add_argument("--max-model-len", type=int, default=32768)
+    # Heterogeneous-SLO (tiered) args. When --tiered is set on a single
+    # long-context dataset (arxivsumm), requests are split into a tight
+    # tier and a loose tier. Both tiers use a prompt-aware startup budget
+    # a = TTFT_MS_PER_PROMPT_TOKEN * prompt_tokens; the loose tier scales
+    # both a and b by --loose-mult so its deadline is loose-mult x the
+    # tight deadline. --ttft-slo-ms is ignored in this mode (a is derived
+    # from prompt length); --tpot-slo-ms gives the TIGHT per-token budget.
+    parser.add_argument("--tiered", action="store_true",
+                        help="Enable heterogeneous tight/loose SLO tiers "
+                        "on a single long-context dataset (arxivsumm).")
+    parser.add_argument("--tight-ratio", type=float, default=0.3,
+                        help="Fraction of requests in the tight tier "
+                        "(tiered mode). Rest are loose. Default 0.3.")
+    parser.add_argument("--loose-mult", type=float, default=2.0,
+                        help="Deadline multiplier for the loose tier "
+                        "(scales both a and b). Default 2.0 -> loose "
+                        "deadline = 2x tight deadline.")
+    parser.add_argument("--burst-size", type=int, default=1,
+                        help="Compound-Poisson burst size (tiered mode): "
+                        "requests arrive in bursts of this many. Mean rate "
+                        "stays --arrival-rate-qps. Default 1 = plain Poisson.")
+    parser.add_argument("--burst-spread", type=float, default=0.0,
+                        help="Seconds over which each burst's requests are "
+                        "spread (tiered mode). Default 0.0.")
+    parser.add_argument("--ignore-eos", action="store_true",
+                        help="Decode the full max_tokens regardless of EOS "
+                        "(forces long outputs -> high KV residency, the "
+                        "KV-bound regime).")
+    parser.add_argument("--force-max-output-tokens", type=int, default=None,
+                        help="Override every request's max_tokens with this "
+                        "value (use with --ignore-eos for KV-bound "
+                        "workloads like sharegpt + long forced output).")
     args = parser.parse_args()
 
+    # Per-request SLO budgets (the literal a and b each request is given).
+    # These are the SINGLE source of truth for both the SLO passed to the
+    # engine (Client) and the deadline the metric checks against, so the
+    # picker schedules on exactly the deadline we score. Filled by the
+    # tiered branch directly; for the other modes they are derived from
+    # slo_by_class after the schedule is built.
+    req_a: list[float] = []
+    req_b: list[float] = []
+
     # Validate SLO args + assemble per-class SLO map.
-    if args.workload_trace is not None:
+    if args.tiered:
+        # Heterogeneous SLO on a single long-context dataset. a is
+        # prompt-aware (TTFT_MS_PER_PROMPT_TOKEN * prompt_tokens); the
+        # loose tier scales both a and b by loose_mult.
+        if args.workload_trace is not None:
+            parser.error("--tiered cannot be combined with --workload-trace")
+        if args.tpot_slo_ms is None:
+            parser.error("--tpot-slo-ms (the TIGHT per-token budget) is "
+                         "required for --tiered")
+        tight_b = args.tpot_slo_ms
+        loose_b = args.loose_mult * args.tpot_slo_ms
+        schedule_full = build_tiered_schedule(
+            dataset_name=args.dataset,
+            num_requests=args.num_requests,
+            arrival_rate_qps=args.arrival_rate_qps,
+            tight_ratio=args.tight_ratio,
+            seed=args.seed,
+            burst_size=args.burst_size,
+            burst_spread_s=args.burst_spread,
+        )
+        schedule = [(s[0], s[1], s[2]) for s in schedule_full]
+        prompt_tokens_list = [s[3] for s in schedule_full]
+        classes = [s[4] for s in schedule_full]
+        for ptoks, tier in zip(prompt_tokens_list, classes):
+            mult = 1.0 if tier == "tight" else args.loose_mult
+            req_a.append(mult * TTFT_MS_PER_PROMPT_TOKEN * ptoks)
+            req_b.append(tight_b if tier == "tight" else loose_b)
+        # slo_by_class records b per tier (a is per-request prompt-aware,
+        # so its slot is None and the printout/metric handle that).
+        slo_by_class = {"tight": (None, tight_b), "loose": (None, loose_b)}
+    elif args.workload_trace is not None:
         # Trace-driven workload (e.g. BurstGPT): arrival pattern comes
         # from dataset, not Poisson. Records carry their own class tag.
         schedule_full = build_trace_schedule(
@@ -238,6 +337,13 @@ def main() -> int:
             seed=args.seed,
         )
         classes = ["uniform"] * len(schedule)
+    # Non-tiered modes: a = ttft_slo_ms (taken literally, matching the
+    # engine), b = tpot_slo_ms, per request via its class.
+    if not req_a:
+        for cls in classes:
+            cls_ttft, cls_tpot = slo_by_class[cls]
+            req_a.append(cls_ttft if cls_ttft is not None else 0.0)
+            req_b.append(cls_tpot if cls_tpot is not None else 0.0)
     summary = summarize_schedule(schedule)
     print(f"[dual] model: {MODEL}")
     print(f"[dual] schedule: {summary}")
@@ -245,7 +351,9 @@ def main() -> int:
     class_counts = Counter(classes)
     print(f"[dual] class counts: {dict(class_counts)}")
     for cls, (ttft, tpot) in slo_by_class.items():
-        print(f"[dual] SLO {cls}: TTFT≤{ttft:.0f}ms TPOT≤{tpot:.1f}ms")
+        a_label = (f"TTFT≤{ttft:.0f}ms" if ttft is not None
+                   else "a=prompt-aware")
+        print(f"[dual] SLO {cls}: {a_label} TPOT≤{tpot:.1f}ms")
 
     results_dir = Path(
         os.environ.get("EVAL_RESULTS_DIR",
@@ -282,12 +390,13 @@ def main() -> int:
             return 1
         print("[dual] both engines ready")
 
-        if args.baseline == "vllm_fcfs":
+        if args.baseline in ("vllm_fcfs", "vllm_random"):
             target_urls = [
                 f"http://127.0.0.1:{ENGINE_0_PORT}",
                 f"http://127.0.0.1:{ENGINE_1_PORT}",
             ]
-            print("[dual] vllm_fcfs: bypassing router, client round-robin")
+            print(f"[dual] {args.baseline}: bypassing router, "
+                  "client round-robin")
         else:
             router = start_router(router_log)
             if not wait_url_ready(
@@ -314,12 +423,17 @@ def main() -> int:
             if target_t > now:
                 time.sleep(target_t - now)
             engine_url = target_urls[i % len(target_urls)]
-            cls = classes[i]
-            class_ttft, class_tpot = slo_by_class[cls]
-            ttft = class_ttft if pass_slo else None
-            tpot = class_tpot if pass_slo else None
-            c = Client(i, engine_url, prompt, max_tokens, ttft, tpot,
-                       ignore_eos=False)
+            # Per-request budgets: a = req_a[i] (prompt/tier-aware in
+            # tiered mode), b = req_b[i]. Only 'ours' passes the SLO to
+            # the engine (its picker schedules on it); all baselines are
+            # still SCORED against these same budgets in the metric.
+            ttft = req_a[i] if pass_slo else None
+            tpot = req_b[i] if pass_slo else None
+            eff_max_tokens = (args.force_max_output_tokens
+                              if args.force_max_output_tokens
+                              else max_tokens)
+            c = Client(i, engine_url, prompt, eff_max_tokens, ttft, tpot,
+                       ignore_eos=args.ignore_eos)
             c.start()
             clients.append(c)
         print(f"[dual] fired {len(clients)} requests; waiting completion")
@@ -344,13 +458,25 @@ def main() -> int:
         _fallback_cls = next(iter(slo_by_class))
         for k, e in enumerate(events_sorted):
             cls = classes[k] if k < len(classes) else _fallback_cls
-            class_ttft, class_tpot = slo_by_class[cls]
+            # Per-request budgets a (req_a) and b (req_b) — the SAME values
+            # the engine schedules on (passed via the client for 'ours').
+            a_k = req_a[k] if k < len(req_a) else req_a[-1] if req_a else 0.0
+            b_k = req_b[k] if k < len(req_b) else req_b[-1] if req_b else 0.0
             e["class"] = cls
-            e["slo_ttft_ms"] = class_ttft
-            e["slo_tpot_ms"] = class_tpot
-            e["slo_met"] = (
-                e["ttft_ms"] <= class_ttft
-                and e["tpot_ms"] <= class_tpot
+            e["slo_ttft_ms"] = a_k
+            e["slo_tpot_ms"] = b_k
+            # Completion-deadline SLO (OrbitFlow/QLM-style for long
+            # context): deadline = a + N*b, where a is the startup
+            # allowance (prompt-aware and tier-scaled in tiered mode) and
+            # b is the per-output-token budget. A request meets its SLO
+            # iff it finishes (end-to-end) within that deadline. This is
+            # exactly the deadline the picker's laxity is measured against.
+            e["slo_deadline_ms"] = a_k + e["num_output"] * b_k
+            e["slo_met"] = e["e2e_ms"] <= e["slo_deadline_ms"]
+            # Keep the legacy per-token check too, for reference.
+            e["slo_met_per_token"] = (
+                e["ttft_ms"] <= a_k
+                and e["tpot_ms"] <= b_k
             )
         flags = [e["slo_met"] for e in events_sorted]
         slo_met_pct = (100.0 * sum(flags) / len(flags)

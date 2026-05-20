@@ -64,6 +64,14 @@ def start_engine(baseline: str, log_path: Path,
         env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "0"
         env["FT_DELTA_CHECKPOINT"] = "0"
         env["SLO_PRIORITY_PREEMPT"] = "0"
+    elif baseline == "ckpt_only":
+        # Pure mechanism-overhead isolation: continuous KV checkpoint
+        # ON, but capacity-preempt reload and picker BOTH off. The only
+        # difference vs vllm_fcfs is the host-RAM checkpoint write path.
+        env["FT_CAPACITY_PREEMPT_RELOAD"] = "0"
+        env["FT_CAPACITY_PREEMPT_RELOAD_OVERLAP"] = "0"
+        env["FT_DELTA_CHECKPOINT"] = "1"
+        env["SLO_PRIORITY_PREEMPT"] = "0"
     else:
         raise ValueError(f"unsupported baseline: {baseline}")
     cmd = [
@@ -113,7 +121,8 @@ def shutdown(proc: subprocess.Popen) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline", choices=["vllm_fcfs", "ours"],
+    parser.add_argument("--baseline",
+                        choices=["vllm_fcfs", "ours", "ckpt_only"],
                         required=True)
     parser.add_argument("--dataset", default="arxivsumm",
                         choices=["arxivsumm", "sharegpt",

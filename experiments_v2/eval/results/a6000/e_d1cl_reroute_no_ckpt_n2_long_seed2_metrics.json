@@ -1,0 +1,61 @@
+{
+  "baseline": "reroute_no_ckpt",
+  "seed": 2,
+  "num_requests": 2,
+  "kill_ts": 1779301823.2535338,
+  "pre_kill_engine_counts": {
+    "0": 1,
+    "1": 1
+  },
+  "kill_at_time_s": 20.0,
+  "min_prompt_tokens": 20000,
+  "max_prompt_tokens": 26000,
+  "arrival_rate_qps": null,
+  "closed_loop": true,
+  "concurrency": 2,
+  "detection_latency_s": 0.7202672958374023,
+  "num_first_token_events": 1,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-ba6e0504c96be75d-0-808937f8",
+      "gap_ms": 10184.471130371094
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 1,
+    "min": 10184.471130371094,
+    "p50": 10184.471130371094,
+    "mean": 10184.471130371094,
+    "max": 10184.471130371094
+  },
+  "failover_gap_net_ms": {
+    "p50": 9464.203834533691,
+    "mean": 9464.203834533691
+  },
+  "client_outcomes": {
+    "200_ok": 2,
+    "errored": 0,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2573,
+        "total_s": 56.11448335647583
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2565,
+        "total_s": 42.91213011741638
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 2,
+    "reroute_count": 1,
+    "dead_event_count": 1,
+    "in_flight": 0
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "baseline": "ours",
+  "seed": 0,
+  "num_requests": 6,
+  "kill_ts": 1779299716.7848282,
+  "pre_kill_engine_counts": {
+    "0": 3,
+    "1": 3
+  },
+  "kill_at_time_s": 20.0,
+  "min_prompt_tokens": 8000,
+  "max_prompt_tokens": 12000,
+  "arrival_rate_qps": null,
+  "closed_loop": true,
+  "concurrency": 6,
+  "detection_latency_s": 0.7210931777954102,
+  "num_first_token_events": 3,
+  "failover_gaps_ms": [
+    {
+      "req_id": "cmpl-8a36b23ae955b61c-0-825dd692",
+      "gap_ms": 6189.215898513794
+    },
+    {
+      "req_id": "cmpl-b8da510b83d20988-0-82c08c26",
+      "gap_ms": 6189.3157958984375
+    },
+    {
+      "req_id": "cmpl-a3cfc1448651dfa3-0-aa9b8afd",
+      "gap_ms": 6189.360857009888
+    }
+  ],
+  "failover_gap_stats_ms": {
+    "n": 3,
+    "min": 6189.215898513794,
+    "p50": 6189.3157958984375,
+    "mean": 6189.297517140706,
+    "max": 6189.360857009888
+  },
+  "failover_gap_net_ms": {
+    "p50": 5468.222618103027,
+    "mean": 5468.204339345296
+  },
+  "client_outcomes": {
+    "200_ok": 6,
+    "errored": 0,
+    "per_client": [
+      {
+        "idx": 0,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1854,
+        "total_s": 49.839762926101685
+      },
+      {
+        "idx": 1,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2780,
+        "total_s": 47.48494052886963
+      },
+      {
+        "idx": 2,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1984,
+        "total_s": 50.14395761489868
+      },
+      {
+        "idx": 3,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2398,
+        "total_s": 47.72672629356384
+      },
+      {
+        "idx": 4,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 1974,
+        "total_s": 50.29844903945923
+      },
+      {
+        "idx": 5,
+        "status_code": 200,
+        "error": null,
+        "completion_len": 2796,
+        "total_s": 48.00024604797363
+      }
+    ]
+  },
+  "router_metrics_at_end": {
+    "dispatch_count": 6,
+    "reroute_count": 3,
+    "dead_event_count": 1,
+    "in_flight": 0
+  }
+}

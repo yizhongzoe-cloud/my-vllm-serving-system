@@ -3,6 +3,7 @@
 import itertools
 import json
 import os
+import random
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -279,6 +280,14 @@ class Scheduler(SchedulerInterface):
         self._ft_slo_priority_preempt = (
             os.environ.get("SLO_PRIORITY_PREEMPT") == "1"
         )
+        # Ablation knob (independent of the picker): when set, the NATIVE
+        # capacity-driven preemption (KV exhausted) picks a RANDOM running
+        # request as the victim instead of FCFS-newest. Used by the
+        # `vllm_random` baseline to test whether victim *selection* matters
+        # under recompute. Default off → unchanged FCFS pop() behavior.
+        self._ft_random_capacity_victim = (
+            os.environ.get("FT_RANDOM_CAPACITY_VICTIM") == "1"
+        )
         try:
             self._ft_slo_min_interval_ms = float(
                 os.environ.get(
@@ -362,10 +371,40 @@ class Scheduler(SchedulerInterface):
             self._ft_picker_in_danger_ms = None  # ratio mode
             try:
                 self._ft_picker_head_danger_ratio = float(
-                    os.environ.get("FT_PICKER_HEAD_DANGER_RATIO", "0.10")
+                    os.environ.get("FT_PICKER_HEAD_DANGER_RATIO", "0.40")
                 )
             except ValueError:
-                self._ft_picker_head_danger_ratio = 0.10
+                self._ft_picker_head_danger_ratio = 0.40
+
+        # Per-request preemption cap. A single request may be picked as a
+        # picker victim at most this many times over its lifetime; past
+        # that it is excluded from the candidate pool even if it has the
+        # most laxity. Guards against a long-prompt "monster" (large `a`
+        # -> large laxity -> perennially the most-pausable victim) getting
+        # preempted over and over, ballooning its own e2e until it misses.
+        # Counted via request.num_preemptions (incremented on every fire).
+        # Default 1 (K=1). Set to 0 or negative to disable the cap.
+        try:
+            self._ft_picker_max_preempts_per_req = int(
+                os.environ.get("FT_PICKER_MAX_PREEMPTS_PER_REQ", "1")
+            )
+        except ValueError:
+            self._ft_picker_max_preempts_per_req = 1
+
+        # Fit gate. When on (default), the picker fires only if (a) the
+        # urgent head does NOT already fit in free KV — otherwise no
+        # preemption is needed, the admit loop / queue reorder will take
+        # it — AND (b) evicting the chosen victim alone frees enough
+        # blocks to admit the head's remaining prefill. This unifies
+        # "only fire when KV is actually the binding resource" with
+        # "freeing the victim must actually make room", and keeps the
+        # picker silent when the head is blocked by something other than
+        # KV (e.g. per-step prefill compute), where it already fits in
+        # free space. Disable (=0) for slack-only victim selection
+        # (the pre-fit-gate behavior) as an ablation.
+        self._ft_picker_fit_gate = (
+            os.environ.get("FT_PICKER_FIT_GATE", "1") == "1"
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -564,11 +603,21 @@ class Scheduler(SchedulerInterface):
 
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
+                    if (self.policy == SchedulingPolicy.PRIORITY
+                            or self._ft_random_capacity_victim):
+                        if self._ft_random_capacity_victim:
+                            # vllm_random baseline: pick a RANDOM running
+                            # request as the capacity-preempt victim instead
+                            # of FCFS-newest, to isolate whether victim
+                            # selection matters. Reuses the arbitrary-element
+                            # removal path below (handles req_index + the
+                            # scheduled_running_reqs bookkeeping correctly).
+                            preempted_req = random.choice(self.running)
+                        else:
+                            preempted_req = max(
+                                self.running,
+                                key=lambda r: (r.priority, r.arrival_time),
+                            )
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
@@ -1184,7 +1233,7 @@ class Scheduler(SchedulerInterface):
             ):
                 continue
             try:
-                r_slack = compute_slo_budgets(r, now)["min_ms"]
+                r_slack = compute_slo_budgets(r, now)["laxity_ms"]
             except Exception:
                 continue
             if r_slack < most_urgent_slack:
@@ -1201,7 +1250,14 @@ class Scheduler(SchedulerInterface):
             history = self._priority_preempt_history
 
         candidates: list[tuple["Request", float]] = []
+        cap = self._ft_picker_max_preempts_per_req
         for r in self.running:
+            # Per-request preemption cap (K). Once a request has been
+            # picked as a victim `cap` times, exclude it from the pool so
+            # a high-laxity long-prompt request is not repeatedly kicked
+            # (which would balloon its e2e past its own deadline).
+            if cap > 0 and getattr(r, "num_preemptions", 0) >= cap:
+                continue
             last_for_r = history.get(r.request_id, 0.0)
             if (now - last_for_r) * 1000.0 < self._ft_slo_cooldown_ms:
                 continue  # in per-req cooldown
@@ -1224,7 +1280,7 @@ class Scheduler(SchedulerInterface):
             if not os.path.exists(_manifest_path):
                 continue
             try:
-                r_slack = compute_slo_budgets(r, now)["min_ms"]
+                r_slack = compute_slo_budgets(r, now)["laxity_ms"]
             except Exception:
                 continue
             candidates.append((r, r_slack))
@@ -1232,8 +1288,57 @@ class Scheduler(SchedulerInterface):
         if not candidates:
             return None
 
-        # Pick loosest-SLO running req (largest slack).
-        victim, victim_slack = max(candidates, key=lambda t: t[1])
+        # Victim selection.
+        #
+        # Fit gate (default on): a preempt only helps if KV is the
+        # binding resource for THIS head AND freeing the victim makes
+        # room. We compute the head's remaining prefill in blocks and
+        # compare against free blocks now and free+victim:
+        #   (a) free >= head_need  -> head already fits; preempting would
+        #       be pure churn (the admit loop / queue reorder will take
+        #       it). Also covers the case where the head is stuck on
+        #       something other than KV (e.g. per-step prefill compute),
+        #       which a preempt cannot fix -> stay quiet.
+        #   (b) restrict to victims whose eviction ALONE (cap=1) frees
+        #       enough: free + victim_blocks >= head_need. With prefix
+        #       caching off each request owns its blocks, so freeing a
+        #       victim returns ~ceil(num_computed_tokens / block_size).
+        # Among fitting victims, pick the most-slack one (best able to
+        # absorb the pause without missing its own deadline).
+        # FT_PICKER_FIT_GATE=0 falls back to slack-only selection.
+        if self._ft_picker_fit_gate:
+            bs = self.block_size
+            free_blocks = (
+                self.kv_cache_manager.block_pool.get_num_free_blocks()
+            )
+            head_remaining = max(
+                0, most_urgent.num_tokens - most_urgent.num_computed_tokens
+            )
+            head_need_blocks = (head_remaining + bs - 1) // bs
+            if free_blocks >= head_need_blocks:
+                logger.info(
+                    "PICKER_HEAD_ALREADY_FITS: head=%s need=%d free=%d "
+                    "blocks; no preempt (KV not the bottleneck here)",
+                    most_urgent.request_id, head_need_blocks, free_blocks,
+                )
+                return None
+            fitting: list[tuple["Request", float]] = []
+            for r, s in candidates:
+                v_blocks = (max(0, r.num_computed_tokens) + bs - 1) // bs
+                if free_blocks + v_blocks >= head_need_blocks:
+                    fitting.append((r, s))
+            if not fitting:
+                logger.info(
+                    "PICKER_NO_FITTING_VICTIM: head=%s need=%d free=%d "
+                    "blocks; no single loose victim frees enough; "
+                    "no preempt",
+                    most_urgent.request_id, head_need_blocks, free_blocks,
+                )
+                return None
+            victim, victim_slack = max(fitting, key=lambda t: t[1])
+        else:
+            # Ablation: slack-only victim selection (pre-fit-gate).
+            victim, victim_slack = max(candidates, key=lambda t: t[1])
 
         # Replay cost: how many ms of decode the victim will have to
         # re-do on resume because its checkpoint lags behind its decode
@@ -1242,8 +1347,21 @@ class Scheduler(SchedulerInterface):
         # penalty.
         replay_cost_ms = compute_replay_cost(victim, now)
 
-        # Slack gap gate: only preempt if victim's slack exceeds
-        # (head_slack + min_gap_ms + replay_cost_ms).
+        # Affordability gate: the victim must have enough deadline laxity
+        # to absorb the pause. A preempt+reload pauses the victim for
+        # ~replay_cost_ms, which reduces its laxity by that much; if the
+        # victim is already within replay_cost of its deadline it cannot
+        # be paused without missing. `victim` is the MAX-laxity candidate,
+        # so if even it cannot afford the pause, none can. This is what
+        # keeps the picker quiet under overload: when every running
+        # request is already behind its deadline (laxity < replay_cost),
+        # we do not churn by preempting victims that will miss anyway.
+        if victim_slack <= replay_cost_ms:
+            return None
+
+        # Net-benefit gate: only preempt if the victim is enough more
+        # relaxed than the waiting head to justify the switch cost, i.e.
+        # victim_laxity > head_laxity + min_gap_ms + replay_cost_ms.
         if ((victim_slack - head_slack)
                 < (self._ft_slo_min_gap_ms + replay_cost_ms)):
             return None
@@ -1272,16 +1390,24 @@ class Scheduler(SchedulerInterface):
                     f"abs={head_danger_threshold:.0f}ms"
                 )
             else:
-                head_ttft_slo = getattr(most_urgent, "ttft_slo_ms", None)
-                if head_ttft_slo is None or head_ttft_slo <= 0:
+                # Threshold must be on the SAME scale as laxity, whose
+                # startup budget is a = ttft_slo_ms (the client-supplied,
+                # possibly prompt/tier-aware startup allowance). Scale the
+                # head-danger threshold by the head's own `a` so short- and
+                # long-prompt heads, and tight vs loose tiers, are judged
+                # against their own startup budget rather than one global
+                # number (which made short-prompt heads look perpetually
+                # in-danger -> over-fire).
+                head_a = getattr(most_urgent, "ttft_slo_ms", None) or 0.0
+                if head_a <= 0:
                     head_danger_threshold = None
                 else:
                     head_danger_threshold = (
-                        head_ttft_slo * self._ft_picker_head_danger_ratio
+                        head_a * self._ft_picker_head_danger_ratio
                     )
                     _gate_label = (
                         f"ratio={self._ft_picker_head_danger_ratio:.2f}"
-                        f" × TTFT_SLO={head_ttft_slo:.0f}ms"
+                        f" × a={head_a:.0f}ms"
                         f" = {head_danger_threshold:.0f}ms"
                     )
             if head_danger_threshold is not None:

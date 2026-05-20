@@ -44,12 +44,22 @@ from fastapi.responses import JSONResponse
 SHM_ENGINE_STATUS_DIR = Path("/dev/shm/vllm_ft_engine_status")
 SHM_REQ_MAP_DIR = Path("/dev/shm/vllm_ft_req_map")
 SHM_PREEMPT_QUEUE_DIR = Path("/dev/shm/vllm_ft_preempt_queue")
-STATUS_POLL_INTERVAL_S = 0.5
+import os as _os_cfg
+# Status poll cadence + stale threshold control how fast the router
+# notices a dead engine (failure-detection latency). Defaults preserve
+# prior behavior; the failover experiment lowers them via env so the
+# measured recovery gap is dominated by the KV-restore mechanism
+# (reload vs reprefill), not by detection latency that every method pays.
+STATUS_POLL_INTERVAL_S = float(
+    _os_cfg.environ.get("FT_ROUTER_STATUS_POLL_INTERVAL_S", "0.5")
+)
 # Preempt queue poll cadence — kept tighter than status poll because the
 # engine's redispatch fallback timer is on the order of seconds; router
 # needs to react well before that fires to avoid double-resume.
 PREEMPT_POLL_INTERVAL_S = 0.2
-STATUS_STALE_THRESHOLD_S = 2.0
+STATUS_STALE_THRESHOLD_S = float(
+    _os_cfg.environ.get("FT_ROUTER_STALE_THRESHOLD_S", "2.0")
+)
 ENGINE_REQUEST_TIMEOUT_S = 600.0
 
 logger = logging.getLogger("router")

@@ -189,15 +189,54 @@ def build_schedule_for_e_d1(num_requests: int, seed: int) -> list[tuple[float, s
     )
 
 
+def build_closedloop_schedule(concurrency: int, seed: int,
+                              min_prompt_tokens: int = 6500,
+                              max_prompt_tokens: int = 8000,
+                              max_tokens: int = 512) -> list[tuple[float, str, int]]:
+    """Return a closed-loop schedule (all offsets=0) of `concurrency`
+    long arxivsumm prompts for the §5.5 recovery micro-benchmark.
+
+    Mirrors the original 7B setup (many concurrent long requests, one
+    engine killed) as closely as 14B memory allows. 14B KV is ~192
+    KB/token/seq, so a single A6000 (~15.7 GB KV budget) can hold the
+    survivor's load after a kill only up to ~concurrency 8 / ~7.5K
+    tokens (~11 GB, headroom to avoid preempt/recompute thrash). The
+    gap separation comes from the number of rerouted requests:
+    reroute-no-ckpt reprefills them serially, Ferry batch-reloads them.
+    max_tokens is high (with ignore_eos) so all are mid-decode at kill."""
+    import json
+    import random
+    ds_path = (Path(__file__).resolve().parents[2]
+               / "datasets" / "cached" / "arxivsumm.jsonl")
+    recs = []
+    with ds_path.open() as f:
+        for line in f:
+            r = json.loads(line)
+            n = int(r.get("prompt_tokens", 0))
+            if min_prompt_tokens <= n <= max_prompt_tokens:
+                recs.append(r)
+    if len(recs) < concurrency:
+        raise RuntimeError(
+            f"only {len(recs)} arxivsumm prompts in "
+            f"[{min_prompt_tokens},{max_prompt_tokens}] tokens; "
+            f"need {concurrency}"
+        )
+    rng = random.Random(seed)
+    picked = rng.sample(recs, concurrency)
+    return [(0.0, r["prompt"], max_tokens) for r in picked]
+
+
 class Client(threading.Thread):
     """Single non-streaming completion request. Records timing + outcome.
     Schedule has its own max_tokens per request (from dataset)."""
 
-    def __init__(self, idx: int, prompt_body: str, max_tokens: int) -> None:
+    def __init__(self, idx: int, prompt_body: str, max_tokens: int,
+                 ignore_eos: bool = False) -> None:
         super().__init__(daemon=True)
         self.idx = idx
         self.prompt_body = prompt_body
         self.max_tokens = max_tokens
+        self.ignore_eos = ignore_eos
         self.start_ts: float | None = None
         self.end_ts: float | None = None
         self.status_code: int | None = None
@@ -213,6 +252,7 @@ class Client(threading.Thread):
             "prompt": prompt,
             "max_tokens": self.max_tokens,
             "temperature": 0.0,
+            "ignore_eos": self.ignore_eos,
         }).encode("utf-8")
         req = urllib.request.Request(
             f"http://127.0.0.1:{ROUTER_PORT}/v1/completions",
@@ -326,10 +366,32 @@ def main() -> int:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-requests", type=int, default=NUM_REQUESTS)
+    parser.add_argument("--closed-loop", action="store_true",
+                        help="Fire all requests at t=0 (microbench mode); "
+                             "uses --concurrency long arxivsumm prompts.")
+    parser.add_argument("--concurrency", type=int, default=8,
+                        help="Closed-loop concurrency (default 8: 4 per "
+                             "engine, so 4 requests are rerouted when one "
+                             "engine is killed).")
+    parser.add_argument("--kill-at", type=float, default=None,
+                        help="Override kill-at-time (seconds). Default: "
+                             "25 (Poisson) / 20 (closed-loop).")
+    parser.add_argument("--min-prompt-tokens", type=int, default=6500,
+                        help="Closed-loop: min prompt length (tokens). "
+                             "Use long prompts (e.g. 8000) so reprefill on "
+                             "the survivor dwarfs the detection latency.")
+    parser.add_argument("--max-prompt-tokens", type=int, default=8000,
+                        help="Closed-loop: max prompt length (tokens).")
     args = parser.parse_args()
 
-    n_req = args.num_requests
-    tag = f"e_d1_{args.baseline}_n{n_req}_seed{args.seed}"
+    if args.closed_loop:
+        n_req = args.concurrency
+        kill_at = args.kill_at if args.kill_at is not None else 20.0
+        tag = f"e_d1cl_{args.baseline}_n{n_req}_seed{args.seed}"
+    else:
+        n_req = args.num_requests
+        kill_at = args.kill_at if args.kill_at is not None else float(KILL_AT_TIME_S)
+        tag = f"e_d1_{args.baseline}_n{n_req}_seed{args.seed}"
     engine_0_log = RESULTS_DIR / f"{tag}_engine0.log"
     engine_1_log = RESULTS_DIR / f"{tag}_engine1.log"
     router_log = RESULTS_DIR / f"{tag}_router.log"
@@ -358,9 +420,18 @@ def main() -> int:
             return 1
         print("[E_D1] router ready")
 
-        schedule = build_schedule_for_e_d1(n_req, args.seed)
-        print(f"[E_D1] Poisson schedule: n={n_req} QPS={ARRIVAL_RATE_QPS} "
-              f"window={schedule[-1][0]:.1f}s  kill_at=t+{KILL_AT_TIME_S}s")
+        if args.closed_loop:
+            schedule = build_closedloop_schedule(
+                args.concurrency, args.seed,
+                min_prompt_tokens=args.min_prompt_tokens,
+                max_prompt_tokens=args.max_prompt_tokens)
+            print(f"[E_D1] closed-loop schedule: n={n_req} arxivsumm "
+                  f"({args.min_prompt_tokens}-{args.max_prompt_tokens} tokens),"
+                  f" all fire at t=0  kill_at=t+{kill_at}s")
+        else:
+            schedule = build_schedule_for_e_d1(n_req, args.seed)
+            print(f"[E_D1] Poisson schedule: n={n_req} QPS={ARRIVAL_RATE_QPS} "
+                  f"window={schedule[-1][0]:.1f}s  kill_at=t+{kill_at}s")
 
         # Fire clients one-by-one according to Poisson offsets. Spawn a
         # background kill thread that triggers SIGKILL at fire_ts + KILL_AT_TIME_S.
@@ -370,7 +441,7 @@ def main() -> int:
         kill_ts_holder: dict = {"ts": None}
 
         def _kill_at_time():
-            target = fire_ts + KILL_AT_TIME_S
+            target = fire_ts + kill_at
             now = time.time()
             if target > now:
                 time.sleep(target - now)
@@ -406,20 +477,28 @@ def main() -> int:
             now = time.time()
             if target_t > now:
                 time.sleep(target_t - now)
-            c = Client(i, prompt, max_tokens)
+            c = Client(i, prompt, max_tokens, ignore_eos=args.closed_loop)
             c.start()
             clients.append(c)
 
-        # Wait for kill thread (it should already have fired by now since
-        # KILL_AT_TIME_S < schedule window for most configs).
-        kill_thread.join(timeout=10)
+        # Wait for the kill to fire. In Poisson mode the dispatch loop
+        # above already paced past kill_at; in closed-loop mode dispatch
+        # returns instantly, so we must wait out the kill_at delay here.
+        kill_thread.join(timeout=kill_at + 60)
         if not kill_event.is_set():
             print("[E_D1] FAIL: kill thread didn't trigger")
             return 1
         kill_ts = kill_ts_holder["ts"]
 
         ok, m = wait_for_reroute(REROUTE_DETECT_TIMEOUT_S)
-        print(f"[E_D1] router reroute observed: {'OK' if ok else 'FAIL'} — {m}")
+        reroute_observed_ts = time.time()
+        # Failure-detection latency: kill -> router observed the dead engine
+        # and issued the reroute. This is COMMON to ours and reroute_no_ckpt
+        # (both must detect), so subtracting it isolates the KV-restore
+        # mechanism (reload vs reprefill). Reported separately for honesty.
+        detection_latency_s = (reroute_observed_ts - kill_ts) if ok else None
+        print(f"[E_D1] router reroute observed: {'OK' if ok else 'FAIL'} — "
+              f"detection_latency={detection_latency_s}s — {m}")
         if not ok:
             return 1
 
@@ -438,17 +517,25 @@ def main() -> int:
                           if c.error is None and c.status_code == 200)
         n_errored = sum(1 for c in clients if c.error is not None)
 
+        # Net gap = end-to-end gap minus the common detection latency
+        # (isolates the reload-vs-reprefill mechanism cost).
+        det_ms = (detection_latency_s * 1000.0) if detection_latency_s else 0.0
+        net_gaps_ms = [(rid, max(0.0, g - det_ms)) for rid, g in gaps_ms]
         if gaps_ms:
             gap_vals = [g for _, g in gaps_ms]
+            net_vals = [g for _, g in net_gaps_ms]
             p50 = statistics.median(gap_vals)
             mean_v = statistics.mean(gap_vals)
             max_v = max(gap_vals)
             min_v = min(gap_vals)
+            net_p50 = statistics.median(net_vals)
+            net_mean = statistics.mean(net_vals)
             print(f"[E_D1] failover_gap_ms over N={len(gap_vals)} rerouted: "
                   f"min={min_v:.0f}, P50={p50:.0f}, mean={mean_v:.0f}, "
-                  f"max={max_v:.0f}")
+                  f"max={max_v:.0f}  | detection={det_ms:.0f}ms  | "
+                  f"net(mechanism) P50={net_p50:.0f} mean={net_mean:.0f}")
         else:
-            p50 = mean_v = max_v = min_v = None
+            p50 = mean_v = max_v = min_v = net_p50 = net_mean = None
             print("[E_D1] no first_post_reroute_token log entries found")
 
         print(f"[E_D1] client outcomes: {n_completed}/{n_req} 200 OK, "
@@ -463,8 +550,13 @@ def main() -> int:
                 "0": kill_ts_holder.get("eng0_count", 0),
                 "1": kill_ts_holder.get("eng1_count", 0),
             },
-            "kill_at_time_s": KILL_AT_TIME_S,
-            "arrival_rate_qps": ARRIVAL_RATE_QPS,
+            "kill_at_time_s": kill_at,
+            "min_prompt_tokens": args.min_prompt_tokens,
+            "max_prompt_tokens": args.max_prompt_tokens,
+            "arrival_rate_qps": (None if args.closed_loop else ARRIVAL_RATE_QPS),
+            "closed_loop": args.closed_loop,
+            "concurrency": (args.concurrency if args.closed_loop else None),
+            "detection_latency_s": detection_latency_s,
             "num_first_token_events": len(gaps_ms),
             "failover_gaps_ms": [
                 {"req_id": rid, "gap_ms": g} for rid, g in gaps_ms
@@ -472,6 +564,9 @@ def main() -> int:
             "failover_gap_stats_ms": {
                 "n": len(gaps_ms),
                 "min": min_v, "p50": p50, "mean": mean_v, "max": max_v,
+            },
+            "failover_gap_net_ms": {  # gap minus common detection latency
+                "p50": net_p50, "mean": net_mean,
             },
             "client_outcomes": {
                 "200_ok": n_completed,

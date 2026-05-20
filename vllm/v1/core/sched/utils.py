@@ -21,40 +21,64 @@ _SWITCH_COST_MS = float(os.environ.get("FT_PICKER_SWITCH_COST_MS", "1000"))
 def compute_slo_budgets(
     request: Request, now_sec: float
 ) -> dict[str, float]:
-    """Compute remaining SLO budgets (ms) for a request at time `now_sec`.
+    """Compute the request's deadline *laxity* (ms) at time `now_sec`.
 
-    Returns dict with keys: ttft_ms, tpot_ms, min_ms, stage.
-    Negative budget means already in violation. Inapplicable budgets are inf.
+    Ferry models the SLO as a single per-request completion deadline,
+    parameterized by two per-request knobs supplied by the client:
 
-    Stage:
-      "waiting"  — not yet started (no GPU work done; ttft budget applies)
-      "prefill"  — has GPU work but no first output token yet
-      "decode"   — already produced first output token (tpot applies)
+        a = ttft_slo_ms   — one-time startup allowance (queue + prefill +
+                            first token). The CLIENT computes this value;
+                            it may be prompt-aware and/or SLO-tier-aware
+                            (e.g. tight tier = 0.73*prompt_tokens, loose
+                            tier = 2x that). The engine treats ttft_slo_ms
+                            as the literal `a` budget in ms — it does NOT
+                            re-derive it from prompt length. This keeps the
+                            engine policy-agnostic: all tier/prompt logic
+                            lives in the workload/client.
+        b = tpot_slo_ms   — per-output-token allowance
 
-    Used by SLO priority preempt picker — preempt running req with
-    largest min_ms (most slack) when waiting head's min_ms is most
-    negative (most-violating).
+    A request that produces N output tokens must complete by
+
+        deadline = arrival + a + N * b.
+
+    Laxity is the running form of that deadline check:
+
+        laxity = a + produced_tokens * b - elapsed_since_arrival
+
+    Interpretation:
+      laxity >= 0  → on or ahead of the deadline pace.
+      laxity  < 0  → behind; will miss unless it speeds up.
+    A preempt-and-reload pauses the request for P ms, which reduces its
+    laxity by exactly P. So a running victim can absorb a preempt iff
+    laxity > pause_cost (see compute_replay_cost). This puts waiting and
+    decoding requests on ONE comparable axis (ms): a waiting request has
+    produced=0, so laxity = a - elapsed (its TTFT slack); a decoding
+    request accrues b of budget per token it has produced. It also avoids
+    the earlier bug of folding TTFT/queue time into a per-token average.
+
+    Returns dict keys:
+      laxity_ms          — the unified slack (smaller = more urgent).
+      deadline_budget_ms — a + produced*b (the budget accrued so far).
+      stage              — "waiting" | "prefill" | "decode".
+      min_ms             — back-compat alias for laxity_ms (picker).
+    No-SLO requests get laxity = +inf (never urgent, freely pausable).
     """
-    # ttft budget: from arrival until first output token expected
-    if request.num_output_tokens == 0:
+    # SLO present iff the client attached either budget. `a` is the
+    # client-supplied startup allowance (ttft_slo_ms, taken literally as
+    # the ms budget), `b` the per-output-token allowance (tpot_slo_ms).
+    has_slo = (request.ttft_slo_ms is not None
+               or request.tpot_slo_ms is not None)
+    if not has_slo:
+        laxity_ms = math.inf
+        budget_ms = math.inf
+    else:
+        a = request.ttft_slo_ms if request.ttft_slo_ms is not None else 0.0
+        b = request.tpot_slo_ms if request.tpot_slo_ms is not None else 0.0
         elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
-        if request.ttft_slo_ms is not None:
-            ttft_ms = request.ttft_slo_ms - elapsed_ms
-        else:
-            ttft_ms = math.inf
-    else:
-        ttft_ms = math.inf  # already passed first token
+        budget_ms = a + request.num_output_tokens * b
+        laxity_ms = budget_ms - elapsed_ms
 
-    # tpot budget: average TPOT across decoded tokens vs SLO budget
-    if request.num_output_tokens > 0 and request.tpot_slo_ms is not None:
-        decode_elapsed_ms = max(0.0, (now_sec - request.arrival_time) * 1000.0)
-        avg_tpot_ms = decode_elapsed_ms / max(1, request.num_output_tokens)
-        # Budget = how much slack before next-token must come
-        tpot_ms = request.tpot_slo_ms - avg_tpot_ms
-    else:
-        tpot_ms = math.inf
-
-    # Determine stage
+    # Determine stage (diagnostic only).
     if request.num_output_tokens > 0:
         stage = "decode"
     elif request.num_computed_tokens > 0:
@@ -62,13 +86,11 @@ def compute_slo_budgets(
     else:
         stage = "waiting"
 
-    min_ms = min(ttft_ms, tpot_ms)
-
     return {
-        "ttft_ms": ttft_ms,
-        "tpot_ms": tpot_ms,
-        "min_ms": min_ms,
+        "laxity_ms": laxity_ms,
+        "deadline_budget_ms": budget_ms,
         "stage": stage,
+        "min_ms": laxity_ms,  # back-compat alias
     }
 
 

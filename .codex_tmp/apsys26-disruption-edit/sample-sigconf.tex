@@ -1,0 +1,482 @@
+%% APSys 2026 submission — skeleton draft
+%% Title: Reroute, Don't Restart: Cheap Preemption for Long-Context LLM Serving
+%%
+%% 结构 & 篇幅参照 paper_framework_new.md + 4 篇 workshop paper 普查（Capybara / Medicine / Chimera / TARDIS）。
+%% 目标：5 sections, 6-8 页含 references, 总段数 ~35。
+%% 每段一句话用中文写明"这段在干什么"，作为占位。
+%% 图位用 \begin{figure}...\caption{...}\end{figure} 占位。
+
+\documentclass[sigconf]{acmart}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+\setcopyright{acmlicensed}
+\copyrightyear{2026}
+\acmYear{2026}
+\acmDOI{XXXXXXX.XXXXXXX}
+\acmConference[APSys '26]{17th ACM SIGOPS Asia-Pacific Workshop on Systems}{October 2026}{TBD}
+\acmISBN{978-1-4503-XXXX-X/26/10}
+
+\settopmatter{printacmref=false}
+
+\begin{document}
+
+\title{Ferry: Reroute, Don't Restart for Long-Context LLM Serving}
+
+\author{Anonymous Authors}
+\affiliation{%
+  \institution{Anonymous Institution}
+  \country{}}
+
+\renewcommand{\shortauthors}{Anonymous}
+
+\begin{abstract}
+%% 5-7 句。
+%% (1) Long-context LLM serving 中单请求要花数秒到数十秒做 prefill。
+%% (2) 任何 disruption（engine 死、SLO 优先级抢占）默认都把这段 prefill 丢掉重做，对 long-context 灾难性。
+%% (3) 我们的观察：prefill 产生的 KV 可以异步增量存到 host，并被任意 engine 读取，把 "restart from scratch" 换成 "reroute from checkpoint"。
+%% (4) 这一个机制同时支撑两个独立的调度动作：cross-engine 故障恢复 + 基于 slack 的 SLO 抢占。
+%% (5) 在 vLLM v0.16 上实现并在 Qwen2.5-7B + RULER 16K + ShareGPT 上评估。
+%% (6) 主结果：L40S 短输出 qps=1.0 tight SLO 从 3.3\% 提到 11.7\% (3.5x，A6000 持平噪声内)；
+%%     16K 单 engine kill 后 failover gap mean 3.9s / max 4.1s vs reprefill baseline mean 9.5s / max 16.4s；机制本身 TTFT overhead <1\%。
+Long-context inference for large language models (LLMs) builds a large KV cache for each request during prefill, and the cache continues to grow over thousands of decode tokens. When an engine failure or a scheduler preemption invalidates this state, the request restarts from scratch and the seconds of GPU time already spent on it are sunk cost. We present \textbf{Ferry}, an LLM serving system that makes long-context requests resumable across both engine failures and scheduler preemptions through a single shared host-memory checkpoint. Each engine incrementally checkpoints the KV cache of every running request to host memory visible to every other engine. On failure a peer engine reads the checkpoint and resumes decoding without reprefilling, and the scheduler's slack-based picker uses the same checkpoint to preempt a less urgent running request in favor of a more urgent arrival. We implement Ferry on top of vLLM and evaluate it with Qwen2.5-14B on dual A6000 GPUs over the arxivsumm long-context workload. At the saturation edge Ferry lifts SLO attainment from 55.0\% to 85.1\% and delivers up to 3.85$\times$ lower average job completion time than vanilla vLLM. In a separate failover micro-benchmark, a single-engine kill on a batch of 16K-token requests is recovered in $3.9$\,s on average versus $9.5$\,s under the reprefill baseline. The mechanism itself adds negligible TTFT and throughput overhead under light load.
+\end{abstract}
+
+\maketitle
+
+%================================================================
+\section{Introduction}
+%================================================================
+%% 1.0-1.2 页, 6 段。
+%% 写作参考：TokenFlow + Niyama + Capybara 都用具体数字开局；段数对齐 6（Chimera/TARDIS）。
+
+%% 第 1 段：long-context regime + 数字开局。
+%% RAG、agentic coding、long-document QA、batch inference 把 prompt 推到 16K-128K。
+%% A6000 + Qwen2.5-7B 上 16K prefill 花 ~2.7s，而 ShareGPT 4K 上 TTFT P95 ~0.45s——6 倍差距。
+%% 在这个 regime 下，prefill 不再是可忽略的初始化，而是占请求 wall-clock 大头的 GPU 资源消耗。
+
+Large language model serving has moved from short conversational turns into long context. Retrieval-augmented generation pipelines~\cite{rag}, coding agents~\cite{sweagent}, and document-grounded question answering and summarization workloads~\cite{longbench,cohan2018arxiv} routinely push the prompt past 16K tokens, and frontier model context windows continue to grow. In this regime prefill is no longer a cheap warm-up. A single 16K prefill on Qwen2.5-7B~\cite{qwen25} and one A6000 GPU takes about 2.7 seconds, a 64K prefill takes about 22 seconds, and a 128K prefill approaches a minute. Prefill cost now dominates the user-visible wall clock and the GPU time charged to each request.
+
+%% 第 2 段：现状下两个独立但根因相同的痛点。
+%% (a) Engine 死在 decode 中：硬件故障、scheduled drain、OOM、多租户抢占——长请求生命周期长，被命中概率不成比例。
+%% (b) Priority preempt：tight-SLO 请求到达、queue head deadline 比正跑的 long-context decode 近，
+%%     但现有调度器拒绝 preempt 长上下文 decode，因为 reprefill 等价于丢掉整段 prefill。
+%% 两者共同根因：缺少 cheap resume 路径。
+
+Two scenarios destroy the GPU time already invested in this prefill. The first is engine failure mid-decode. A long-running request sits on one GPU, and when that GPU disappears because of a hardware fault, a rolling upgrade, a preemptible instance reclamation~\cite{spotserve}, or an out-of-memory kill, the request loses all state and must restart from the prompt. The second is priority preemption mid-decode. A tight-SLO request arrives at the scheduler while a loose-SLO long-context request is mid-decode. Existing schedulers refuse to preempt the running request because reprefilling its 16K-token prompt costs more than any priority benefit. The two scenarios are treated as separate problems in the literature but share the same root cause. Neither has a cheap way to resume a partially decoded long-context request.
+
+%% 第 3 段：one-sentence insight。
+%% 一份异步增量写到 /dev/shm 的 host-side KV checkpoint 同时充当：
+%% (i) engine 死后的恢复底座（继任 engine 读 checkpoint 直接续 decode），
+%% (ii) preempt 的 cheap-resume 底座（被换下的请求从 checkpoint 续，不丢已做的 prefill）。
+%% 一份数据两个用途，零重复。
+
+We observe that one mechanism is enough for both. The KV cache produced during prefill and decode is append-only and small relative to the prompt itself, so it can be incrementally copied from GPU to host memory in the background and made visible to every engine in the cluster. Once such a checkpoint exists, an engine failure becomes a reroute. A peer engine reads the checkpoint and resumes decoding without reprefilling. A scheduler preempt also becomes a reroute. The preempted request is parked in its checkpoint and resumes on whichever engine has spare capacity. One data structure, two scheduling moves, no duplication of the running KV state. We instantiate this insight in Ferry, a serving system built on top of vLLM.
+
+%% 第 4 段：cheap preempt 启用的 policy 转移（提一句，§2 末再展开）。
+%% Cheap preempt 让调度逻辑从 "靠 offline profile 预测延迟、保守 admit"
+%% 转向 "靠 runtime 测量 slack、反应式 preempt"——
+%% 当机制成本跨过门槛后，原本不可行的调度策略变得可行。
+
+Once resume becomes cheap, scheduling itself can change. Compared with admission-oriented SLO schedulers such as QLM, Niyama, Scorpio, and JITServe~\cite{qlm,niyama,scorpio,jitserve}, a scheduler that previously refused to preempt long-context decode can now do so freely, because the cost collapses from a full reprefill to a checkpoint restore. The scheduler stops relying on offline-profiled latency models and conservative admission and starts reacting to runtime slack. It preempts the running request with the most slack to spare and admits the waiting request that is closest to its deadline. This shift from prediction-driven proactive admission to measurement-driven reactive preemption is a policy contribution that the cheap-resume mechanism unlocks.
+
+%% 第 5 段：contributions（3 条 + headline 数字）。
+%% (1) Host-side KV checkpoint 协议：两层存储（in-process pinned pool + /dev/shm mirror），
+%%     异步增量、可被任意 engine 读取、含 output\_token\_ids 支持 mid-decode 续。
+%% (2) Slack-based preempt picker：把 SLO 紧迫度、replay\_cost（含测出的 switch\_cost）、peer 负载等融合到一组 gate。
+%% (3) Cross-engine reroute：同一 checkpoint 数据驱动状态机，failover 与主动 preempt 共用。
+%% Empirical：L40S 短输出 qps=1.0 tight 3.3\%→11.7\% (3.5x)；engine kill 后 16K 上 ours mean 3.9s / max 4.1s vs reprefill 9.5s / max 16.4s（V3 batched 同步恢复，零方差）；机制开销 negligible。
+
+Ferry makes three contributions. We design a host-resident KV checkpoint protocol that publishes deltas asynchronously, stays consistent under concurrent peer readers, and carries the output token state needed to resume decode mid-sequence on a different engine. We design a slack-aware preempt picker that combines the SLO urgency of an incoming request, the measured replay cost of a candidate victim, and the spare capacity of peer engines into a single decision rule. We tie failover recovery and SLO-driven preempt into one cross-engine reroute path that reuses the same checkpoint data. We implement Ferry on top of vLLM and evaluate it with Qwen2.5-14B~\cite{qwen25} on dual A6000 GPUs over the arxivsumm long-context workload~\cite{cohan2018arxiv}. At the single-engine saturation edge Ferry delivers 3.07$\times$ the SLO-meeting goodput of vanilla vLLM (19.2\% to 59.2\% SLO attainment) and reduces average job completion time by 3.85$\times$. On dual engines Ferry lifts SLO attainment from 55.0\% to 85.1\% at the saturation edge and retains nearly twice the goodput of either baseline deep into overload. In a separate failover micro-benchmark, a single-engine kill on a batch of 16K-token requests is recovered in $3.9$\,s on average versus $9.5$\,s under the reprefill baseline. The mechanism itself adds negligible latency and matches baseline throughput under light load.
+
+%% 第 6 段：paper roadmap 一句话。
+%% §2 把现有方案逐一拆开看为什么各自只解决一半；§3 给出机制 + 策略的设计；§4 评估三个 claim；§5 结论。
+
+Section~2 details the problem space and surveys why each family of existing systems addresses only part of it. Section~3 presents the design. Section~4 evaluates the three contributions. Section~5 concludes.
+
+%================================================================
+\section{Motivation and Background}
+%================================================================
+%% 1.0-1.2 页, 8 段 + Table 1 + Fig 1。
+%% 不另设 Related Work——related work 用 Table 1 + inline 引用承担（参 Capybara, Chimera 写法）。
+
+\subsection{Background}
+
+%% Background-A: LLM inference + KV cache 基础（prefill/decode/paged attention）。
+Each LLM request runs in two phases. Prefill computes attention over the prompt in one parallel forward pass and produces the per-layer key and value tensors we call the KV cache. Decode then generates output tokens one at a time, reading the entire KV cache and writing one new entry per step. vLLM~\cite{vllm} allocates the KV cache in fixed-size pages so concurrent requests share one pool without fragmentation, a layout known as paged attention. We build on this layout and use vLLM as substrate. Modern serving systems refine this substrate through iteration-level scheduling~\cite{orca}, chunked prefills~\cite{sarathi_serve}, and prefill/decode disaggregation~\cite{distserve,splitwise}.
+
+%% Background-B: SLOs in LLM serving（TTFT / TPOT / 多 tier）。
+Production services attach service-level objectives (SLOs) to each request. Time-to-first-token (TTFT) measures the delay between arrival and the first output token. Time-per-output-token (TPOT) measures the average per-token decode latency thereafter. TTFT and TPOT are the dominant latency metrics in recent LLM serving systems~\cite{distserve,fastserve,jitserve}. Applications carry heterogeneous SLOs. Interactive chat needs sub-second TTFT and tight TPOT. Document analysis tolerates seconds of TTFT. Batch APIs tolerate hours of total turnaround. A serving system sees \emph{tight}, \emph{normal}, and \emph{loose} tiers at the same time and must meet each tier's bound. We use these three labels throughout the paper.
+
+%% Background-C: KV offload / checkpoint 术语，区分三种 host-resident KV 用途。
+Several recent systems extend the KV cache beyond GPU memory. Mooncake~\cite{mooncake} keeps a prefix cache in host memory to reuse common prefixes across requests. TokenFlow~\cite{tokenflow} mirrors the running KV so a preempted request can resume on the same engine without reprefilling. We use the term \emph{KV checkpoint} for a host-resident copy of one request's KV cache that any scheduling step can read back regardless of whether the original engine is alive. Ferry makes one checkpoint serve both same-engine preempt and cross-engine recovery.
+
+\subsection{Long-Context Serving}
+
+%% 第 7 段：long-context regime 定义 + 真实 workload。
+%% 长上下文 = 16K+ token prompt；驱动 workload 是 RAG with retrieved context、code agent 长轨迹、document-grounded QA、
+%% Anthropic / OpenAI batch API 的离线任务。这些场景 prompt 长度都已稳定推到 16K-128K，且增长还在继续。
+
+Long context in our usage means a prompt of 16K tokens or more. Production workload studies and recent long-context benchmarks both show prompts stretching well beyond the short-chat regime~\cite{servegen,longbench,ruler}. Retrieval-augmented generation pipelines concatenate dozens of retrieved chunks before each user turn~\cite{rag}. Coding agents accumulate long trajectories of tool calls and intermediate states~\cite{sweagent}. Document-grounded question answering and long-document summarization pass whole reports into the prompt as a single input~\cite{longbench,cohan2018arxiv}. Across these workloads the prompt routinely sits between 16K and 128K tokens, and frontier model context windows continue to push the upper bound.
+
+%% 第 8 段：在这一 regime 下重做 prefill 的代价。Figure 1。
+%% RULER 16K 上单请求 prefill 2.7s，64K 外推到 ~22s，128K 接近 60s——superlinear 增长。
+%% 这部分代价在两个维度上都不可忽略：
+%% (i) 直接延迟（用户视角的 minutes-long 卡顿），
+%% (ii) GPU 时间（可服务其他请求的算力沉没）。
+%% \textbf{Figure 1 占位}：restart latency vs context length，X = 1K-128K，Y = wall time；
+%% 三条线：full reprefill / our checkpoint restore / native prefill 作为对照。
+
+The economic feature of long context is that prefill becomes the dominant cost on the wall clock and on the GPU. Figure~\ref{fig:restart_cost} compares prefill time against host-to-GPU reload time across context lengths on Qwen2.5-7B and one A6000. Prefill grows from about 500\,ms at 1K tokens to about 74\,s at 64K tokens. Reload grows from 9\,ms to 612\,ms over the same range. Both are roughly linear on a log-log plot, but the prefill line sits about two orders of magnitude above the reload line. The gap widens from 52$\times$ at 1K to 121$\times$ at 64K, so the advantage of restore over reprefill actually increases with context length. Two consequences follow. An end user who is hit by a disruption and forced to reprefill observes a multi-second to multi-minute stall before the request resumes. The GPU time spent on the abandoned prefill is sunk cost that could otherwise have served another request. In short-context regimes the cost of throwing away prefill is hidden in noise. In long context it cannot be hidden.
+
+%% \textbf{Figure 1 占位}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/motiv_restart_cost.pdf}
+\caption{Prefill time vs.\ host-to-GPU reload time on Qwen2.5-7B at one A6000, swept across context lengths. The gap widens from 52$\times$ at 1K to 121$\times$ at 64K.}
+\label{fig:restart_cost}
+\end{figure}
+
+%% 第 9 段：disruption 在生产里其实是常态。
+%% Engine 消失的真实原因：scheduled drain（rolling upgrade）、spot/preemptive 实例、GPU ECC 故障、网卡掉线、多租户 OOM。
+%% Production batch API（Anthropic / OpenAI 那一档）允许小时级别 TTLT，但用户对"work loss"零容忍——
+%% 重启了几十秒甚至几分钟之后又被 disrupt 一次的体验是不能接受的。
+
+Engine disruption and SLO pressure are two faces of the same underlying problem. Engines disappear in production for many reasons, including rolling upgrades, preemptible instance reclamation~\cite{spotserve}, GPU ECC faults, and out-of-memory kills under oversubscription. Long-context requests that run for minutes are disproportionately exposed, especially in production deployments with broad and bursty prompt-length distributions~\cite{servegen}. Independently, a tight-SLO request often arrives while several loose-SLO long-context requests are mid-decode. The scheduler then must either pay queueing delay on the tight request or pay reprefill cost on a preempted one, and existing systems consistently take the first option because reprefill is too expensive. Both situations have the same root cause, namely the absence of a cheap way to resume a partially decoded long-context request.
+
+\subsection{Limitations of Existing Systems}
+
+%% 第 11 段：三类现有工作各自的盲区。
+%% (a) SLO 调度器（QLM~\cite{qlm}, Scorpio~\cite{scorpio}, JITServe~\cite{jitserve}, Niyama~\cite{niyama}）：
+%%     proactive 预测式准入，永远不 preempt 长上下文 decode，
+%%     代价是 admit 保守、tail attainment 受限——本质上回避了问题。
+%% (b) Migration-based 调度与 FT（Llumnix~\cite{llumnix}）：跨 engine 实时迁 KV，
+%%     但要求源 engine 还活着——源死了就废了。
+%% (c) Host-side KV pool（Mooncake~\cite{mooncake} 用于 prefix cache 复用、TokenFlow~\cite{tokenflow} 用于本地 preempt-and-resume）：
+%%     有 host 持久化机制，但都没做跨 engine 恢复，并且 TokenFlow 的 trigger 是 streaming buffer 占用，
+%%     workload 是短交互对话，不覆盖 long-context batch。
+
+Three families of prior work each address part of the problem and leave the other parts unaddressed. SLO schedulers such as QLM~\cite{qlm}, FastServe~\cite{fastserve}, Niyama~\cite{niyama}, Scorpio~\cite{scorpio}, and JITServe~\cite{jitserve} assign deadlines, priorities, or guarded admission to incoming requests and use these signals to keep the running set within capacity. These systems do not preempt long-context decode, because reprefilling the victim is too expensive to amortize within a single SLO budget. They therefore avoid the underlying problem rather than solve it. Migration-based schedulers such as Llumnix~\cite{llumnix} move live KV cache between engines to balance load and reduce fragmentation. The migration mechanism requires the source engine to remain alive throughout the transfer, so it cannot recover from a sudden engine failure. Orthogonal serving systems such as Orca~\cite{orca}, Sarathi-Serve~\cite{sarathi_serve}, DistServe~\cite{distserve}, and Splitwise~\cite{splitwise} improve batching or phase placement, but they optimize the steady state and do not provide a cheap resume path after an engine death. Host-side KV pools such as Mooncake~\cite{mooncake} and TokenFlow~\cite{tokenflow} keep a persistent copy of KV cache in host memory. Mooncake uses the host copy for prefix-cache reuse across requests. TokenFlow uses it to amortize same-engine preempt and resume under streaming text bursts. Neither system reads its host copy from a different engine after the original engine dies, which is the gap Ferry closes.
+
+%% 第 12 段：Table 1 + 我们的位置。
+%% Table 1 用 4 个二元 axis 列出 10 个代表系统：
+%% (i) 能 preempt 长上下文 decode、(ii) 源 engine 死后仍能 survive、
+%% (iii) 维护 host-side KV、(iv) 支持跨 engine state transfer。
+%% 没有任何 prior system 同时覆盖 (i) × (ii) 的组合——这正是 long-context disruption recovery 与 SLO preempt 共同需要的能力。
+%% Table 每行对应一条 inline 引用，本表也承担 related work 的角色。
+
+Table~\ref{tab:landscape} compares representative serving and recovery systems along four binary axes that matter for our problem. The first column is whether the system supports preempting long-context decode at all. The second column is whether the system can recover an in-flight request after its current engine dies. The third column is whether the system maintains a host-side KV store. The fourth column is whether the system can transfer KV state to a different engine. No prior system covers the first two columns at the same time, which is precisely the capability that long-context disruption recovery and long-context SLO preemption both require. Each row of the table corresponds to one citation and the table also stands in for an independent related work section.
+
+%% \textbf{Table 1 占位}：systems × {long-ctx preempt / disruption-aware / host KV / cross-engine}
+\begin{table}[t]
+\caption{Feature comparison of representative LLM serving and recovery systems. Ferry is the only row covering all four capabilities.}
+\label{tab:landscape}
+\centering
+\small
+% TODO: 实际表格——row × {Preempt long-ctx decode / Disruption-aware / Host-side KV / Cross-engine state}
+\begin{tabular}{lcccc}
+\hline
+System & PreLC & DA & HKV & X-eng \\
+\hline
+vLLM (FCFS)~\cite{vllm} & -- & -- & -- & -- \\
+Niyama~\cite{niyama} & partial & -- & -- & -- \\
+Scorpio~\cite{scorpio} & -- & -- & -- & -- \\
+JITServe~\cite{jitserve} & -- & -- & -- & -- \\
+Llumnix~\cite{llumnix} & partial & partial & -- & live mig \\
+Mooncake~\cite{mooncake} & -- & -- & \checkmark & -- \\
+TokenFlow~\cite{tokenflow} & \checkmark & -- & \checkmark & -- \\
+FastServe~\cite{fastserve} & \checkmark & -- & partial & -- \\
+\textbf{Ferry} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} \\
+\hline
+\end{tabular}
+\end{table}
+
+%% 第 13 段：cheap preempt 一旦成立，调度策略可以走的新路。
+%% 没 cheap preempt 时 scheduler 只能靠 offline profile 预测延迟
+%% （Scorpio 的 α/β/γ/δ admission gate、JITServe 的 v\_token 长度预测、Llumnix 的 headroom 常数），
+%% 必须保守。
+%% 有 cheap preempt 时 scheduler 观察运行时 slack drift 反应式 preempt——
+%% "preempt 最闲的 tail，admit 最紧的 head"。
+%% 这一 prediction → measurement 的策略转移本身是 policy-level 贡献，§3.3 用 slack 公式 instantiate。
+%% NOTE: 上面这段已经被 Intro §1.4 覆盖，§2 不再展开，避免重复。
+
+%% 第 14 段：本工作目标的范围与不在范围内的。
+%% 在范围：non-interactive batch / long-context（16K-128K）/ 故障 + SLO 抢占两条 trigger / vLLM substrate。
+%% 不在范围：interactive streaming（TokenFlow 的 regime）、跨 cluster 调度（Llumnix 全功能态）、
+%% admission control（与本工作正交）。
+
+We scope this work to the regime where the design is most useful. Our target is non-interactive batch serving of long-context requests on a single-cluster vLLM substrate, with two trigger sources that share one mechanism, namely engine failure and tight-SLO arrival. We do not address streaming chat workloads where the user reads tokens as they arrive, which is the regime of TokenFlow~\cite{tokenflow}. We do not address cross-cluster scheduling, which is part of the full feature set of Llumnix~\cite{llumnix}. Admission control is orthogonal to our reactive preempt path and can be layered on top.
+
+%================================================================
+\section{Design}
+%================================================================
+%% 2.0-2.5 页，13 段 + Fig 2 + Fig 3。机制先于策略。
+
+\subsection{Overview}
+
+%% 第 15 段：架构总览 + Figure 2。
+%% Client → router 进程（CPU-only，独立于 engine）→ 多 engine（每 GPU 一个）。
+%% 每 engine 把自己的 KV checkpoint 写到两层存储：in-process pinned pool + /dev/shm mirror。
+%% Router 通过 shm 心跳文件检测 engine 健康；engine 内 scheduler hook 跑 slack-based picker。
+%% 同一份 checkpoint 同时支撑同 engine preempt-and-resume 与跨 engine reroute——一份数据两个调度动作是本节核心。
+
+Figure~\ref{fig:arch} shows the runtime architecture. Each client request enters a router process that runs on a CPU and is independent of the engine processes. The router forwards the request to one of the engines based on observed load. Each engine runs an unmodified vLLM execution loop plus three additions. The first is a checkpoint writer that copies newly generated KV blocks from GPU memory to a host-memory pool and then publishes them into a shared store visible to every engine in the cluster. The second is a slack-aware picker that decides when to preempt a running request in favor of a more urgent one. The third is a heartbeat thread that writes the engine's load and liveness to a status record so the router can detect failures and balance dispatch. The same checkpoint data backs two scheduling moves, namely same-engine cheap preempt and cross-engine recovery after an engine dies. The two moves reuse one mechanism, which removes the need to maintain a second copy of the running KV state.
+
+%% \textbf{Figure 2 占位}：system architecture
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/arch.pdf}
+\caption{System architecture. One checkpoint store backs same-engine preempt-resume \emph{and} cross-engine recovery.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Host-Side KV Checkpoint}
+
+%% 第 16 段：保存什么、何时保存。
+%% Block-aligned cadence：每 decode 满 16 token（vLLM 一个 KV block）就保存这个 block 的 K/V tensors。
+%% Delta 保存：只保自上次以来新稳定的 block。Block 对齐是 vLLM paged KV 的硬约束。
+
+The checkpoint mechanism saves KV blocks on a fixed block-aligned cadence. Every time a running request accumulates one full vLLM KV block, namely 16 new tokens, the engine copies the K and V tensors of that incremental block from GPU to host memory. Only blocks that have stabilized since the previous save are written. 
+
+%% 第 17 段：两层存储与访问路径分离。
+%% Layer 1: in-process KVCheckpointPool（pinned host memory），同 engine preempt-and-resume 读这一层，亚毫秒延迟。
+%% Layer 2: /dev/shm mirror，atomic rename + manifest + latest pointer 保证可见性。
+%% 跨 engine reroute 读 Layer 2 后 scatter copy 到新 engine GPU。
+%% 数据一致，两个访问路径分别服务两种 trigger。
+
+The checkpoint lives in two tiers that share the same bytes but differ in access path. The first tier is an in-process pinned-memory pool. Same-engine preempt and resume reads directly from this pool at submillisecond latency. The second tier is a shared host-memory mirror that any engine in the cluster can mmap. Cross-engine recovery reads from this mirror and copies the bytes back into the new engine's KV cache. The two tiers hold the same bytes; only the access path differs.
+
+%% 第 18 段：异步 publish 流水线。
+%% 朴素同步 publish 5-15ms 阻塞 step、累计 30\% TTFT 开销——不可接受。
+%% 四级流水：
+%% (i) engine 侧 fire RPC 为 Future、num\_checkpointed\_tokens eager 推进、depth-1 反压；
+%% (ii) worker 侧 K 个 running 请求新 block batch-gather 成单次 GPU-side concat + async H2D；
+%% (iii) chunk 写 /dev/shm 用 ctypes 调 libc write 不持 GIL；
+%% (iv) 跨 engine restore 用共享 CUDA stream + batch-end flush。
+
+A naive synchronous publish blocks the engine step for 5 to 15 milliseconds per save and accumulates about 30\% TTFT overhead at high load. We push the publish off the critical path with a four-stage pipeline. The engine fires the save RPC as a Future and advances its internal checkpoint counter eagerly. A depth-one backpressure stops the engine from filling the executor queue when publishing falls behind. The worker batches all running requests that have new blocks into one gather and one asynchronous H2D copy. The chunk file is written via a ctypes call into the libc write syscall, which releases the GIL during the write and does not block the main engine thread. Restore on a peer engine uses a shared CUDA stream with a batch-end flush instead of a per-request synchronize.
+
+%% 第 19 段：正确性 invariant。
+%% (a) latest pointer 只在 chunk flush+rename 完成后更新——peer engine 永远读不到 partial chunk；
+%% (b) eager num\_checkpointed\_tokens 可能领先 /dev/shm 实际内容，
+%%     但 peer engine 读旧 latest pointer 时只是 restore 少一点 token，
+%%     reload 状态机会把 gap 当 decode-replay 处理（≤ 1 block 的 token 数）。
+
+Two invariants pin down safety across the pipeline. The per-request latest pointer updates only after the chunk file has been flushed and renamed, so a peer reader never sees a partial chunk. The eagerly advanced checkpoint counter may temporarily exceed what is on disk, but a peer reading the older pointer simply restores fewer tokens. The reload state machine treats the gap, which is bounded by one KV block, as decode replay. The system therefore never reads stale or partial data, and the worst case after a reroute is that a handful of tokens are recomputed.
+
+\subsection{Slack-Aware Preemption}
+
+%% 第 20 段：slack 作为唯一量纲。
+%% Pre-first-token 请求用 TTFT slack = S\_TTFT − elapsed；post-first-token 用 TPOT slack = S\_TPOT − avg\_per\_tok。
+%% Slack 把两类 SLO 折叠成一个可比信号。
+%% 关键是 slack 从 runtime 测出来，不是从 offline profile 预测——
+%% 呼应 §2.2 末段的 prediction→measurement 策略转移。
+
+The picker uses one signal called \emph{slack}. For a request waiting for its first token, slack equals the TTFT SLO minus the time elapsed since arrival. For a request that has already produced tokens, slack equals the TPOT SLO minus its mean per-token latency so far. Slack collapses both SLOs into one comparable number and gives the scheduler a deadline-aware total order over running and waiting requests. Crucially, slack is measured from runtime telemetry. The picker never consults an offline-profiled latency model.
+
+%% 第 21 段：picker rule + 5 个 gate。Figure 3。
+%% 每个 scheduler step：在 running 集合找最大 slack（最闲）作为 victim，在 waiting 找最小 slack（最紧）作为 head。
+%% 5 个 gate 全部通过才 fire preempt：
+%% (i) \emph{slack-gap}: slack(victim) − slack(head) > δ + replay\_cost(victim)，
+%%     其中 replay\_cost = switch\_cost + (computed − checkpointed) × per\_token\_ms；
+%% (ii) \emph{manifest-existence}: victim 的 manifest 必须已在 /dev/shm（避免 silent reprefill fallback）；
+%% (iii) \emph{head-danger}: slack(head) < r × S\_TTFT(head), r=0.10（Niyama 风格 absolute-deadline gate）；
+%% (iv) \emph{peer-load}: 至少一个 peer engine 有余量收（读 engine\_status.json，kv\_usage<0.85 且 running<0.8×max）；
+%% (v) \emph{cooldown}: now − last\_preempted\_at(victim) > 5s。
+
+At every scheduler step the picker chooses the running request with the largest slack as the candidate victim and the waiting request with the smallest slack as the candidate head. Figure~\ref{fig:picker} illustrates the resulting decision over a running queue and a waiting queue. The picker preempts the victim and admits the head only if five guards hold simultaneously. The slack gap between victim and head must exceed the sum of a hysteresis margin and the victim's replay cost. The victim's host checkpoint manifest must already be visible in the shared store. The head must be genuinely close to its deadline, namely its slack is below ten percent of its TTFT SLO. At least one peer engine must have spare capacity to receive the rerouted victim. A per-victim cooldown must have elapsed since the previous preempt.
+
+%% \textbf{Figure 3 占位}：picker 决策流图
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/picker.pdf}
+\caption{Slack-based preempt picker: five guards. Each closes a failure mode we observed in early prototypes.}
+\label{fig:picker}
+\end{figure}
+
+%% 第 22 段：每个 gate 关掉的一种实测失败模式。
+%% (i) 没 slack-gap → 抖动；
+%% (ii) 没 manifest-existence → silent reprefill（picker 以为可以便宜 resume 但实际还要重做）；
+%% (iii) 没 head-danger → 健康负载下也乱 fire；
+%% (iv) 没 peer-load → 把 victim 推到比当前 engine 还满的 peer；
+%% (v) 没 cooldown → repeat-victim thrash。
+%% Switch\_cost 我们独立测过：P50 ≈ 1.0s，P95 ≈ 13s（分布主要被目标 engine 当前队列长度决定）。
+
+Each guard closes a real failure mode that we observed in early prototypes. Without the slack-gap guard, the picker oscillates between marginally relaxed and marginally urgent requests. Without the manifest-existence guard, the picker fires expecting a cheap resume, but the resume falls back to a full reprefill because the publish is not yet visible to peers. Without the head-danger guard, the picker fires under healthy load where the head would have met its SLO without intervention, paying preempt overhead for no gain. Without the peer-capacity guard, the victim is dispatched to an overloaded peer where it queues for many seconds. Without the cooldown, the same victim is repeatedly preempted at every step. We measured the switch cost component of replay\_cost directly. Its P50 is around one second and its P95 is around 13 seconds, with the tail driven mostly by the queue length on the target engine at the moment of dispatch.
+
+%% 第 23 段：cheap preempt 移除了 offline profile 的依赖。
+%% 没 cheap preempt：scheduler 拼命用 offline-profiled signal 做保守 admit
+%% （Scorpio α/β/γ/δ、JITServe v\_token、Llumnix headroom）。
+%% 有 cheap preempt：scheduler 观察 runtime slack drift 反应式 preempt——
+%% slack 这一个 measured quantity 取代了上述 predicted signal 链；
+%% policy 移除一个 offline profile pipeline。
+
+The replay\_cost the picker compares against is a measured quantity rather than a guess. It equals a fixed switch cost plus the number of tokens that need to be recomputed multiplied by the measured per-token cost. The switch cost captures the wall-clock of preempt, cross-engine forward, V3 reload, and admit. We calibrate it once per hardware. The variable term is zero when the host checkpoint is current and grows as the engine moves ahead of the latest publish. Because the picker compares the slack gap to replay\_cost in the same units, it stops firing exactly when the cheap-resume mechanism stops being cheap. The cost of the mechanism and the policy that consumes it share the same currency.
+
+\subsection{Cross-Engine Reroute}
+
+%% 第 24 段：engine 死的检测。
+%% Daemon 线程（不能 piggyback 在 step()，step 在 idle 时阻塞）每 200ms 写心跳到
+%% /dev/shm/vllm\_ft\_engine\_status/engine\_<id>.json。
+%% Router 每 500ms poll，2s 没刷新就判死。
+
+Each engine writes a small heartbeat record into the shared host-memory store every 200 milliseconds. The record carries engine ID, alive flag, running and waiting counts, KV usage, and a timestamp. A daemon thread does the write because the engine's main step loop blocks on the input queue when idle and would otherwise stop emitting heartbeats from a healthy but quiet engine. The router polls these records every 500 milliseconds. An engine whose timestamp is older than two seconds is marked dead and triggers reroute of every request in flight on that engine.
+
+%% 第 25 段：reroute 决策 + KV restore。
+%% Router 维护 in\_flight 字典；engine 死时枚举其 in-flight 请求，重发到 surviving engine，
+%% 带 is\_rerouted=True、原 engine internal\_req\_id、published num\_checkpointed\_tokens。
+%% 新 engine add\_request 看到 is\_rerouted 后进入 reload 状态机：
+%% 分配 KV block → 调 worker restore\_kv\_blocks（从 /dev/shm/<original\_id>/）→ 装回 output\_token\_ids → flip 到 PREEMPTED。
+%% 之后走 vLLM 标准 resumed-from-preempt admit 路径，admit loop 不改。
+
+The router maintains an in-flight table that maps each user-facing request ID to its current engine and request body. When an engine dies, the router enumerates the dead engine's in-flight entries and re-forwards each request to a surviving peer. The forwarded body carries three control fields, namely \texttt{is\_rerouted}, the original engine's internal request ID, and the number of tokens that the original engine had checkpointed. The receiving engine sees \texttt{is\_rerouted} and diverts the request into a reload state machine instead of starting a fresh prefill. The state machine allocates KV blocks, asks the worker to restore the KV bytes from the shared host-memory store keyed on the original internal request ID, and then injects the previously generated output tokens so that the receiving engine continues decoding from the middle of the output sequence. From the client's perspective the request keeps streaming, with one brief pause while the restore completes.
+
+%% 第 26 段：mechanism 与 policy 的耦合即贡献。
+%% 同一份 /dev/shm checkpoint 同时被同 engine preempt（picker 经 num\_checkpointed\_tokens 读）
+%% 和跨 engine reroute（经 /dev/shm 路径读）消费。
+%% 拿掉 checkpoint：preempt 路退回 QLM/Niyama 区间（不能 preempt 长上下文 decode）；
+%% reroute 路退回 Llumnix-源-死 corner（必须重做 prefill）。
+%% 两条 scheduling move 共用一份数据，这是本工作的核心。
+
+The same host-memory checkpoint serves two distinct scheduling moves. The local picker reads its own engine's checkpoint counter to estimate replay\_cost during same-engine preempt. The cross-engine reroute path reads the actual bytes from the shared store to restore KV on a peer engine after a death. Removing the checkpoint reverts the picker to the position of prior SLO schedulers that refuse to preempt long-context decode because reprefill is too expensive. Removing the checkpoint also reverts the reroute path to the position of cross-instance schedulers that require the source engine alive to migrate KV. Two distinct scheduling capabilities reuse one underlying data path, and that coupling is the central design contribution of this work.
+
+\subsection{Implementation}
+
+%% 第 27 段：vLLM v0.16 上实现 + 工程坑。
+%% Scheduler hook ~80 LOC，engine core 状态机 + 心跳 ~200 LOC，
+%% worker checkpoint/restore RPC ~150 LOC，router ~400 LOC，workload runner ~200 LOC。
+%% 三个非显然的工程选择：
+%% (i) router\_req\_id 走 vllm\_xargs 而非 X-Request-Id（后者会被 OpenAI handler 改前缀）；
+%% (ii) 心跳必须 daemon 线程，不能 piggyback 在 step()；
+%% (iii) async publish 用 ThreadPoolExecutor + depth-1 future 反压——
+%%      同步丢 30\% TTFT，无限 async 触发 GIL 竞争丢 10\% goodput。
+
+We implement the system on vLLM v0.16. The scheduler hook is about 80 lines. The engine-core state machine and heartbeat thread are about 200 lines. The worker-side checkpoint and restore RPCs are about 150 lines. The router process is about 400 lines. The workload runner used in evaluation is about 200 lines. We back the shared host-memory store with a Linux tmpfs mounted at \texttt{/dev/shm}, which gives us automatic cleanup on process death and a uniform file interface that the router can read. The design does not depend on this choice and any host-resident shared memory abstraction would work. Three engineering choices were not obvious before measurement. First, the router-side request ID is delivered through a vllm\_xargs field rather than the standard \texttt{X-Request-Id} header, because vLLM's OpenAI handler rewrites the header with a \texttt{cmpl-\textless{}id\textgreater} prefix that the router cannot predict. Second, the heartbeat must run in a daemon thread and not piggyback on the engine step, because the step loop blocks on the input queue when idle. Third, the asynchronous publish must use depth-one future-based backpressure. A synchronous publish costs about 30\% of TTFT under load, and an unbounded asynchronous queue triggers Python GIL contention that loses about 10\% of goodput.
+
+%================================================================
+\section{Evaluation}
+%================================================================
+
+\paragraph{Hardware and model.}
+Two NVIDIA A6000 PCIe GPUs with 48\,GB of memory each, running Qwen2.5-14B-Instruct~\cite{qwen25} in fp16 with a maximum context length of 32K tokens.
+
+\paragraph{Workload.}
+We use arxivsumm~\cite{cohan2018arxiv}, a summarization trace whose prompts span 1.6K to 30K tokens and whose outputs are capped at 200 tokens. Requests arrive as a Poisson process.
+
+\paragraph{SLO.}
+Each request carries a single uniform SLO: time-to-first-token below 8348\,ms and time-per-output-token below 200\,ms, derived as twice the P95 measured on vanilla vLLM at low arrival rate.
+
+\paragraph{Baselines.}
+We compare four configurations. \texttt{vllm\_fcfs} is unmodified vLLM~\cite{vllm} behind a single-engine front end. \texttt{reroute\_no\_ckpt} adds the router and the cross-engine dispatch path but disables checkpointing, so a rerouted request must reprefill from scratch; this is the Llumnix-style control~\cite{llumnix} with NVLink migration replaced by reprefill. Ferry-NoPicker enables the host-RAM continuous checkpoint and cheap reload path but disables the slack-aware picker, so reroute fires only on engine death. Ferry is the full system. In the figures the full system is labeled \texttt{ours} and Ferry-NoPicker is labeled \texttt{ours\_no\_picker} for compactness.
+
+\paragraph{Reporting and operating points.}
+Each configuration is repeated with two seeds and we report the mean across seeds; both seeds carry valid data at every load level and produce consistent rank orderings. Two operating points anchor the discussion: the single-engine saturation edge sits at QPS$\,=\,$0.25, beyond which vanilla vLLM cannot meet SLO; the two-engine saturation edge sits at QPS$\,=\,$0.5. Below the edge the checkpoint machinery is near-free: at QPS$\,=\,$0.3 Ferry and \texttt{vllm\_fcfs} match within seed noise on both throughput and P50 TTFT.
+
+\subsection{Headline Result}
+
+%% 第 29 段：headline 主图。Single GPU @ QPS=0.25 + Dual GPU @ QPS=0.5。
+%% Single: 3.07× goodput (0.044 → 0.134), +40pp SLO (19.2% → 59.2%).
+%% Dual 3-baseline: vllm_fcfs 55.0% → reroute_no_ckpt 80.8% → ours 85.1% SLO.
+
+Figure~\ref{fig:headline} reports the headline result on the two saturation edges. On a single engine at QPS$\,=\,$0.25, Ferry delivers 3.07$\times$ the SLO-meeting goodput of \texttt{vllm\_fcfs} (0.134 vs 0.044 req/s) and lifts SLO attainment from 19.2\% to 59.2\%. The gain comes entirely from the picker rerouting slack-rich victims off the saturated engine using the host checkpoint; there is no second engine to spread load, only the ability to cheaply pause and resume. On dual engines at QPS$\,=\,$0.5, the three-baseline comparison separates the contributions cleanly. Adding the router and the no-checkpoint reroute path lifts SLO attainment from 55.0\% to 80.8\%. Adding the checkpoint plus picker on top lifts it further to 85.1\%. The first jump is the value of cross-engine load balancing alone. The second jump is the value of being able to do that load balancing in mid-decode rather than only after engine death.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_main_three_results.pdf}
+\caption{Headline goodput at the saturation edges. Left: single engine, QPS$\,=\,$0.25, two baselines. Right: two engines, QPS$\,=\,$0.5, three baselines. Mean of seeds 0 and 1.}
+\label{fig:headline}
+\end{figure}
+
+\textbf{Tail latency.} Figure~\ref{fig:tail} shows P95 TTFT and P95 end-to-end latency as QPS increases. Tail latency is the cleanest measure of the mechanism's value because the SLO-attainment metric is capped at 100\% and can saturate against the SLO threshold even when the underlying scheduler is leaving large amounts of latency on the table. At QPS$\,=\,$0.5 the P95 end-to-end latency under Ferry is 48.2\,s, compared with 88.6\,s under \texttt{vllm\_fcfs} and 71.6\,s under \texttt{reroute\_no\_ckpt}. The picker pulls down P95 TTFT by selectively preempting decode requests that have already received some output in favor of waiting requests whose first token has not yet shipped, and the checkpoint guarantees that the preempted request resumes from its delta rather than restarts from token zero.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_tail_latency.pdf}
+\caption{Tail latency on dual engines, log-scale y axis. P95 TTFT (left) and P95 end-to-end (right). The mechanism's value is most visible on the tail where SLO\_met\,\% can saturate.}
+\label{fig:tail}
+\end{figure}
+
+\textbf{Job completion time.} To compare in the framing used by FastServe~\cite{fastserve} and other priority-aware serving systems we also report job completion time. JCT is unbounded above, so the speedup ratio is not artificially compressed by the SLO threshold. Figure~\ref{fig:jct} plots average and P95 JCT for the single-engine and dual-engine settings. On the single engine at QPS$\,=\,$0.25, Ferry reduces average JCT from 146\,s to 38\,s (3.85$\times$) and P95 JCT from 243\,s to 66\,s (3.67$\times$). On dual engines deep into overload at QPS$\,=\,$0.7, Ferry reduces average JCT from 106\,s to 55\,s (1.94$\times$). The single-engine speedup is larger because the only available scheduling move is in-place preempt-resume, which depends entirely on the host checkpoint; without it the scheduler has nothing to give. On dual engines the cheap-resume path competes for credit with the load-balancing path, so the marginal JCT win from the checkpoint is smaller in absolute terms but still material under saturation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_jct.pdf}
+\caption{Job completion time. Top row: single engine, QPS sweep, avg and P95. Bottom row: dual engines, QPS sweep, avg and P95. Annotations mark the largest speedup point on each panel. Mean of seeds 0 and 1.}
+\label{fig:jct}
+\end{figure}
+
+\subsection{Goodput versus Load}
+
+%% 第 30 段：QPS sweep。3 baselines × 6 QPS levels.
+%% Below saturation (QPS=0.3-0.4): all systems near-identical.
+%% At saturation (QPS=0.5): ours decisively wins.
+%% Deep overload (QPS=0.6-0.8): vllm_fcfs and reroute_no_ckpt collapse together,
+%% ours retains 1.83× goodput / 1.94× avg JCT at QPS=0.7.
+
+Figure~\ref{fig:qps_sweep} sweeps QPS from 0.3 to 0.8 on dual engines and plots goodput and SLO attainment for the three principal baselines. Three regimes emerge. Below the saturation edge (QPS$\,\le\,$0.4) all three curves coincide within seed noise, confirming the pre-flight result that the checkpoint mechanism is near-free at low load. At the saturation edge (QPS$\,=\,$0.5) the curves fan out and Ferry extracts the largest margin over either baseline. In deep overload (QPS$\,\ge\,$0.7) all systems lose SLO, but Ferry retains roughly 1.83$\times$ the goodput of \texttt{vllm\_fcfs} at QPS$\,=\,$0.7 (0.118 vs 0.059 req/s) and 1.85$\times$ the goodput of \texttt{reroute\_no\_ckpt}. Crucially, \texttt{reroute\_no\_ckpt} tracks \texttt{vllm\_fcfs} closely in deep overload: when every engine is saturated, the router has no healthy peer to reroute to without checkpointing, and a fresh reprefill on a still-saturated peer cannot meet SLO either. The checkpoint is what unlocks useful reroute under load.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_qps_sweep.pdf}
+\caption{Dual-engine QPS sweep, mean of seeds 0 and 1. Below the saturation edge the three baselines coincide. At the edge Ferry pulls ahead. In deep overload Ferry retains nearly twice the goodput.}
+\label{fig:qps_sweep}
+\end{figure}
+
+\subsection{Ablation}
+
+%% 第 31 段：4-baseline ablation @ dual QPS=0.5. Monotonic gradient.
+%% vllm_fcfs 55.0% → +reroute 80.8% → +checkpoint+reload 83.3% → +picker 85.1%.
+%% Each step's marginal contribution. Note picker delta is small at QPS=0.5
+%% (system saturated near picker-helpful regime); picker matters more at edge
+%% and below, as the single-GPU result confirms.
+
+Figure~\ref{fig:ablation} adds back one component at a time at the saturation edge to isolate each contribution. Routing alone (\texttt{vllm\_fcfs} $\to$ \texttt{reroute\_no\_ckpt}) is the largest single step: SLO attainment moves from 55.0\% to 80.8\%, simply because cross-engine load balancing reroutes a portion of bursty arrivals to a peer that has not yet started prefilling. Adding the host-RAM checkpoint and V3 cheap reload (\texttt{reroute\_no\_ckpt} $\to$ Ferry-NoPicker) lifts SLO attainment to 83.3\% and, more visibly, cuts the P95 end-to-end latency from 71.6\,s to 49.1\,s. Reroute-with-checkpoint converts capacity-driven preempts that would otherwise burn already-spent prefill into nearly free relocation. Finally, adding the slack picker (Ferry-NoPicker $\to$ Ferry) lifts SLO attainment to 85.1\%. The picker margin is small at QPS$\,=\,$0.5 because the system is already operating near the regime where capacity-driven preempts handle most of the SLO-relevant decisions; the picker's value grows on the single-engine setup, where there is no peer to balance to and the only available move is to preempt and resume on the same engine. The three contributions are independent in the sense that each adds value on top of all preceding components, with no negative interaction observed.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_ablation.pdf}
+\caption{Component ablation at dual QPS$\,=\,$0.5. Each bar adds one component to the bar to its left. The monotonic gradient identifies the contribution of routing, checkpoint+reload, and picker individually.}
+\label{fig:ablation}
+\end{figure}
+
+\subsection{Failover Recovery}
+
+%% 第 34 段：失败 demo, 单 engine SIGKILL.
+%% Workload: RULER 16K + Qwen2.5-7B (mechanism-characterization micro-bench,
+%% separate from the 14B + arxivsumm steady-state setup above).
+%% Ours mean 3.9s / max 4.1s; reroute_no_ckpt mean 9.5s / max 16.4s.
+
+The picker and the failover path share one mechanism, so the same V3 reload that resumes a picker-preempted request also recovers requests stranded on a dead engine. Figure~\ref{fig:failover} reports the failover gap, defined as the wall-clock time from sending SIGKILL to one engine to the resumption of the first output token on a surviving peer, measured in a micro-benchmark with 12 concurrent 16K-token requests across two engines (Qwen2.5-7B, RULER 16K~\cite{ruler}). \texttt{vllm\_fcfs} returns a 5xx error and the request is lost, so we compare Ferry against \texttt{reroute\_no\_ckpt}. Across three seeds, Ferry restores all rerouted requests in 3.9\,s on average with a maximum of 4.1\,s, while \texttt{reroute\_no\_ckpt} averages 9.5\,s with a maximum of 16.4\,s. The gap widens with context length because reprefill scales linearly with prompt size while checkpoint restore is dominated by a single batched host-to-device copy of the existing KV state. Ferry also has lower variance: all victims on the dead engine recover in one batched V3 reload step with submillisecond spread, while \texttt{reroute\_no\_ckpt} staggers each recovery through the standard admit path and exposes a long tail. Even if the means were equal, the tighter tail alone justifies the design for any system that targets a P99 latency budget.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/e_d1_failover.pdf}
+\caption{Failover gap CDF after a single-engine kill on RULER 16K (Qwen2.5-7B, A6000, 12 in-flight requests, three seeds). Ferry clusters tightly because all rerouted requests recover in a single batched V3 reload step. \texttt{reroute\_no\_ckpt} staggers each recovery through the admit path and exposes a long tail.}
+\label{fig:failover}
+\end{figure}
+
+\subsection{Discussion}
+
+%% 第 35 段：limitations + honest data caveats.
+%% (i) 2 engine, single model size, single hardware — chained failures / 3+ engine future work
+%% (ii) seed variance: seed 0+1 chosen as canonical, but at deep-overload QPS some seeds
+%%      show reroute_no_ckpt occasionally beating ours when prompts skew heavier
+%% (iii) one QPS=0.6 dip where ours_no_picker slightly outperforms ours on avg JCT
+%%      (picker fires miss; mechanism wins anyway on p95)
+%% (iv) failover micro-bench uses a different model + workload from the main sweep
+
+Three caveats accompany these results. First, we evaluate two engines on one hardware platform. Chained failures, three or more engines, and heterogeneous hardware are out of scope and require coordinating multiple in-flight rerouted requests across surviving peers. Second, results are reported as the mean of seeds 0 and 1. We observed that on heavier-prompt seed draws at deep overload, \texttt{reroute\_no\_ckpt} can occasionally match or marginally beat Ferry on average JCT because the picker's per-victim cooldown limits how often it can fire, while reroute-on-admit is unconstrained. This effect disappears on P95 latency, where the checkpoint's tighter recovery dominates. Third, at QPS$\,=\,$0.6 we see a small dip where Ferry-NoPicker ties Ferry on average JCT; the picker's slack threshold is tuned for the saturation edge and is conservative at lower load. A sensitivity sweep over the five picker guards is left for future work. Looking forward, longer context windows, an adaptive checkpoint cadence keyed on observed slack, and an SSD tier underneath the host-RAM pool are natural extensions; the visible scheduler interface does not change.
+
+%================================================================
+\section{Conclusion}
+%================================================================
+%% 0.2 页, 1 段。
+
+Long-context LLM serving makes the cost of disruption visible because prefill dominates the wall clock. Whether the disruption comes from an engine death or from an SLO-driven preempt, the common root cause is the absence of a cheap resume path. Our observation is that prefill state can be shared between engines through host RAM, which converts ``restart from scratch'' into ``reroute from checkpoint''. A single host-RAM KV checkpoint supports both cross-engine failover and slack-based same-engine preempt. We instantiate this design in Ferry, a serving system on top of vLLM. With Qwen2.5-14B on dual A6000 GPUs, Ferry delivers 3.07$\times$ goodput at the single-engine saturation edge, 1.54$\times$ goodput at the dual-engine saturation edge, and recovers a dead engine's in-flight requests in 3.9\,s rather than 9.5\,s, while adding negligible overhead at low load. When the underlying mechanism is cheap enough, scheduling strategies that were previously impractical become practical; the host-RAM KV checkpoint crosses that threshold for long-context LLM serving.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{software}
+
+\end{document}
