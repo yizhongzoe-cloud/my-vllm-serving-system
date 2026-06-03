@@ -288,6 +288,16 @@ class Scheduler(SchedulerInterface):
         self._ft_random_capacity_victim = (
             os.environ.get("FT_RANDOM_CAPACITY_VICTIM") == "1"
         )
+        # Compute-bound companion to the picker: SLO-priority prefill
+        # budget reservation. When on, an urgent waiting head that is
+        # starved of per-step token budget (compute-bound: KV fine, but
+        # running prefills eat max_num_batched_tokens) gets a reserved
+        # slice of the budget so it makes progress this step, by throttling
+        # running prefills (each gets a smaller chunk) rather than evicting
+        # one. No reload — pure scheduling. Default off (ablatable).
+        self._ft_picker_compute_reserve = (
+            os.environ.get("FT_PICKER_COMPUTE_RESERVE") == "1"
+        )
         try:
             self._ft_slo_min_interval_ms = float(
                 os.environ.get(
@@ -491,13 +501,15 @@ class Scheduler(SchedulerInterface):
         # _preempt_for_slo_retain (blocks retained on GPU; engine
         # drains the retain queue and re-admits after a short window).
         if self._ft_slo_priority_preempt:
-            _victim = self._pick_priority_preempt_victim(time.time())
-            if _victim is not None:
+            _pick = self._pick_priority_preempt_victim(time.time())
+            if _pick is not None:
+                _victim, _use_retain = _pick
                 self.running.remove(_victim)
-                # Default path: cross-engine redispatch via host
-                # checkpoint (Option B). Falls back to retain when
-                # SLO_PRIORITY_PREEMPT_USE_RETAIN=1 (ablation baseline).
-                if os.environ.get(
+                # compute-bound fire -> RETAIN (park, KV stays on GPU, no
+                # reload); KV-bound fire -> REDISPATCH (release + host
+                # checkpoint reload). SLO_PRIORITY_PREEMPT_USE_RETAIN=1
+                # forces retain for every fire (ablation baseline).
+                if _use_retain or os.environ.get(
                     "SLO_PRIORITY_PREEMPT_USE_RETAIN"
                 ) == "1":
                     self._preempt_for_slo_retain(_victim, time.monotonic())
@@ -510,6 +522,84 @@ class Scheduler(SchedulerInterface):
                     # and fire the timeout fallback instantly.
                     self._preempt_for_slo_redispatch(_victim, time.time())
                 preempted_reqs.append(_victim)
+
+        # ── Budget reservation (compute-bound companion to the picker) ──
+        # If the picker did NOT preempt and the most-urgent waiting head is
+        # starved of per-step token budget (compute-bound: KV is fine but
+        # running prefills consume max_num_batched_tokens), reserve a slice
+        # of the budget for the head. The running loop below sees a reduced
+        # budget (running prefills each take a smaller chunk this step); the
+        # reserve is restored just before the waiting-admit loop so the head
+        # (prepended to the queue front) gets its chunk. No eviction/reload
+        # — SLO-priority prefill scheduling. Gated by FT_PICKER_COMPUTE_
+        # RESERVE (default off).
+        head_reserve = 0
+        if (self._ft_picker_compute_reserve and self._ft_slo_priority_preempt
+                and not preempted_reqs and self.running and self.waiting):
+            from vllm.v1.core.sched.utils import compute_slo_budgets as _csb
+            _rnow = time.time()
+            _head = None
+            _head_lax = float("inf")
+            for _r in self.waiting:
+                if getattr(_r, "is_rerouted", False):
+                    continue
+                if _r.status in (RequestStatus.WAITING_FOR_REDISPATCH,
+                                 RequestStatus.WAITING_FOR_RELOAD):
+                    continue
+                try:
+                    _lax = _csb(_r, _rnow)["laxity_ms"]
+                except Exception:
+                    continue
+                if _lax < _head_lax:
+                    _head, _head_lax = _r, _lax
+            if _head is not None:
+                _bs = self.block_size
+                _budget = self.max_num_scheduled_tokens
+                _chunk_cap = (getattr(self.scheduler_config,
+                              "long_prefill_token_threshold", 0) or _budget)
+                _head_rem = max(
+                    0, _head.num_tokens - _head.num_computed_tokens)
+                _head_chunk = min(_head_rem, _chunk_cap)
+                _head_need = (_head_rem + _bs - 1) // _bs
+                _free = (
+                    self.kv_cache_manager.block_pool.get_num_free_blocks())
+                _demand = 0
+                _has_prefill = False
+                for _r in self.running:
+                    if _r.num_computed_tokens >= _r.num_prompt_tokens:
+                        _demand += 1
+                    else:
+                        _has_prefill = True
+                        _demand += min(
+                            _r.num_prompt_tokens - _r.num_computed_tokens,
+                            _chunk_cap)
+                _kv_ok = _free >= _head_need
+                _compute_blocked = (_budget - _demand) < _head_chunk
+                _ratio = getattr(self, "_ft_picker_head_danger_ratio", 0.40)
+                _head_a = getattr(_head, "ttft_slo_ms", None) or 0.0
+                _danger = (_head_lax < _head_a * _ratio
+                           if _head_a > 0 else False)
+                if (_kv_ok and _compute_blocked and _has_prefill
+                        and _danger and _head_chunk > 0):
+                    # reserve a slice (capped so running isn't fully starved)
+                    head_reserve = min(_head_chunk, _budget // 2)
+                    try:
+                        if self.waiting.peek_request() is not _head:
+                            self.waiting.remove_request(_head)
+                            self.waiting.prepend_request(_head)
+                    except (IndexError, KeyError, ValueError):
+                        head_reserve = 0
+                    if head_reserve:
+                        self._budget_reserve_count = (
+                            getattr(self, "_budget_reserve_count", 0) + 1)
+                        logger.info(
+                            "PICKER_BUDGET_RESERVE #%d: head=%s reserve=%d "
+                            "(budget=%d running_demand=%d head_lax=%.0fms); "
+                            "throttling running prefills this step",
+                            self._budget_reserve_count, _head.request_id,
+                            head_reserve, _budget, _demand, _head_lax,
+                        )
+        token_budget -= head_reserve
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -702,6 +792,10 @@ class Scheduler(SchedulerInterface):
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
+
+        # Restore the head's reserved budget so the waiting-admit loop can
+        # admit it (the running loop above ran on budget - head_reserve).
+        token_budget += head_reserve
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -1171,8 +1265,12 @@ class Scheduler(SchedulerInterface):
 
     def _pick_priority_preempt_victim(
         self, now: float
-    ) -> "Request | None":
+    ) -> "tuple[Request, bool] | None":
         """SLO priority preempt victim picker.
+
+        Returns (victim, use_retain) where use_retain=True means the fire
+        is compute-bound and should park the victim (KV stays on GPU, no
+        reload); False means KV-bound -> release + host-checkpoint reload.
 
         Triggers when a tight-SLO request is waiting and a looser-SLO
         request is running. Selects the running request with the most
@@ -1307,7 +1405,38 @@ class Scheduler(SchedulerInterface):
         # absorb the pause without missing its own deadline).
         # FT_PICKER_FIT_GATE=0 falls back to slack-only selection.
         if self._ft_picker_fit_gate:
+            # ── Bottleneck-aware victim selection (KV OR compute) ──
+            # Fire only when preempting actually unblocks the head. Two
+            # scarce resources: KV blocks, and the per-step token budget
+            # (max_num_batched_tokens). The head can be blocked on either:
+            #   kv_blocked      : free_blocks < head_need (no room for KV)
+            #   compute_blocked : the running set's per-step token demand
+            #                     leaves < head_chunk budget to advance the
+            #                     head's prefill (admit loop runs after the
+            #                     running loop and only gets the leftover).
+            # If NEITHER binds, the natural admit loop takes the head ->
+            # stay quiet. (This replaces the old KV-only HEAD_ALREADY_FITS
+            # give-up, which was blind to compute and so never fired on
+            # compute-bound workloads.) Whichever binds decides the resume
+            # mode: compute-only -> RETAIN (park a few steps, KV stays on
+            # GPU, ~0 reload cost; safe because KV is plentiful here); any
+            # KV pressure -> REDISPATCH (release + host-checkpoint reload,
+            # since retain keeps the victim's KV and cannot relieve KV).
+            #
+            # Victim chosen by max net SURPLUS = victim_laxity - head_laxity
+            # - min_gap - resume_cost (all ms). surplus>0 IS the net-benefit
+            # gate (victim, after paying resume cost, is still min_gap more
+            # relaxed than the head); picking the max-surplus victim instead
+            # of raw max-laxity avoids preferring a high-slack but
+            # expensive-to-reload victim over a cheaper one. The separate
+            # affordability check below is kept because surplus>0 does NOT
+            # imply victim_laxity>resume_cost when the head is >min_gap late.
             bs = self.block_size
+            budget = self.max_num_scheduled_tokens
+            chunk_cap = (
+                getattr(self.scheduler_config,
+                        "long_prefill_token_threshold", 0) or budget
+            )
             free_blocks = (
                 self.kv_cache_manager.block_pool.get_num_free_blocks()
             )
@@ -1315,56 +1444,91 @@ class Scheduler(SchedulerInterface):
                 0, most_urgent.num_tokens - most_urgent.num_computed_tokens
             )
             head_need_blocks = (head_remaining + bs - 1) // bs
-            if free_blocks >= head_need_blocks:
+            head_chunk = (min(head_remaining, chunk_cap)
+                          if head_remaining > 0 else 1)
+
+            # Per-step token demand the running set will consume this step
+            # (decode ~1 token; prefill a chunk capped by the threshold).
+            running_demand = 0
+            for r in self.running:
+                if r.num_computed_tokens >= r.num_prompt_tokens:
+                    running_demand += 1
+                else:
+                    running_demand += min(
+                        r.num_prompt_tokens - r.num_computed_tokens, chunk_cap
+                    )
+
+            kv_blocked = free_blocks < head_need_blocks
+            compute_blocked = (budget - running_demand) < head_chunk
+            if not kv_blocked and not compute_blocked:
                 logger.info(
-                    "PICKER_HEAD_ALREADY_FITS: head=%s need=%d free=%d "
-                    "blocks; no preempt (KV not the bottleneck here)",
-                    most_urgent.request_id, head_need_blocks, free_blocks,
-                )
-                return None
-            fitting: list[tuple["Request", float]] = []
-            for r, s in candidates:
-                v_blocks = (max(0, r.num_computed_tokens) + bs - 1) // bs
-                if free_blocks + v_blocks >= head_need_blocks:
-                    fitting.append((r, s))
-            if not fitting:
-                logger.info(
-                    "PICKER_NO_FITTING_VICTIM: head=%s need=%d free=%d "
-                    "blocks; no single loose victim frees enough; "
+                    "PICKER_HEAD_NOT_BLOCKED: head=%s fits KV "
+                    "(free=%d need=%d) and budget ok (demand=%d/%d); "
                     "no preempt",
-                    most_urgent.request_id, head_need_blocks, free_blocks,
+                    most_urgent.request_id, free_blocks, head_need_blocks,
+                    running_demand, budget,
                 )
                 return None
-            victim, victim_slack = max(fitting, key=lambda t: t[1])
+
+            use_retain = compute_blocked and not kv_blocked
+
+            best_victim: "Request | None" = None
+            best_slack = 0.0
+            best_surplus = float("-inf")
+            best_cost = 0.0
+            for r, r_slack in candidates:
+                if kv_blocked:
+                    v_blocks = (max(0, r.num_computed_tokens) + bs - 1) // bs
+                    if free_blocks + v_blocks < head_need_blocks:
+                        continue  # eviction alone wouldn't free enough KV
+                if compute_blocked:
+                    if r.num_computed_tokens >= r.num_prompt_tokens:
+                        continue  # decode victim frees ~1 token; useless
+                    v_budget = min(
+                        r.num_prompt_tokens - r.num_computed_tokens, chunk_cap
+                    )
+                    if (budget - running_demand) + v_budget < head_chunk:
+                        continue  # freeing one prefill still isn't enough
+                cost = 0.0 if use_retain else compute_replay_cost(r, now)
+                surplus = (r_slack - head_slack
+                           - self._ft_slo_min_gap_ms - cost)
+                if surplus > best_surplus:
+                    best_surplus = surplus
+                    best_victim = r
+                    best_slack = r_slack
+                    best_cost = cost
+            if best_victim is None:
+                logger.info(
+                    "PICKER_NO_FEASIBLE_VICTIM: head=%s kv_blocked=%s "
+                    "compute_blocked=%s; no victim relieves the bottleneck",
+                    most_urgent.request_id, kv_blocked, compute_blocked,
+                )
+                return None
+            if best_surplus <= 0:
+                logger.info(
+                    "PICKER_NEGATIVE_SURPLUS: head=%s best_surplus=%.0fms; "
+                    "victim not relaxed enough vs head+cost; no preempt",
+                    most_urgent.request_id, best_surplus,
+                )
+                return None
+            victim, victim_slack = best_victim, best_slack
+            replay_cost_ms = best_cost
+            # Affordability safety (not implied by surplus>0 when the head
+            # is >min_gap late). retain cost is 0 -> no-op there.
+            if victim_slack <= replay_cost_ms:
+                return None
         else:
-            # Ablation: slack-only victim selection (pre-fit-gate).
+            # Ablation (FT_PICKER_FIT_GATE=0): slack-only selection,
+            # redispatch only, with the legacy affordability + net-benefit
+            # gates.
             victim, victim_slack = max(candidates, key=lambda t: t[1])
-
-        # Replay cost: how many ms of decode the victim will have to
-        # re-do on resume because its checkpoint lags behind its decode
-        # head. Adds to the hysteresis threshold so we only preempt
-        # victims whose slack advantage actually exceeds the replay
-        # penalty.
-        replay_cost_ms = compute_replay_cost(victim, now)
-
-        # Affordability gate: the victim must have enough deadline laxity
-        # to absorb the pause. A preempt+reload pauses the victim for
-        # ~replay_cost_ms, which reduces its laxity by that much; if the
-        # victim is already within replay_cost of its deadline it cannot
-        # be paused without missing. `victim` is the MAX-laxity candidate,
-        # so if even it cannot afford the pause, none can. This is what
-        # keeps the picker quiet under overload: when every running
-        # request is already behind its deadline (laxity < replay_cost),
-        # we do not churn by preempting victims that will miss anyway.
-        if victim_slack <= replay_cost_ms:
-            return None
-
-        # Net-benefit gate: only preempt if the victim is enough more
-        # relaxed than the waiting head to justify the switch cost, i.e.
-        # victim_laxity > head_laxity + min_gap_ms + replay_cost_ms.
-        if ((victim_slack - head_slack)
-                < (self._ft_slo_min_gap_ms + replay_cost_ms)):
-            return None
+            replay_cost_ms = compute_replay_cost(victim, now)
+            use_retain = False
+            if victim_slack <= replay_cost_ms:
+                return None
+            if ((victim_slack - head_slack)
+                    < (self._ft_slo_min_gap_ms + replay_cost_ms)):
+                return None
 
         # Head-danger gate. Fires picker only when head is "in danger":
         #   head_slack < FT_PICKER_IN_DANGER_MS (absolute, default 300ms)
@@ -1501,17 +1665,18 @@ class Scheduler(SchedulerInterface):
             getattr(self, "_priority_preempt_count", 0) + 1
         )
         logger.info(
-            "SLO_PRIORITY_PREEMPT #%d: victim=%s (slack=%.0fms) "
+            "SLO_PRIORITY_PREEMPT #%d: mode=%s victim=%s (slack=%.0fms) "
             "for most_urgent=%s (slack=%.0fms), gap=%.0fms, "
             "replay_cost=%.0fms, queue_pos=%d",
             self._priority_preempt_count,
+            "retain" if use_retain else "redispatch",
             victim.request_id, victim_slack,
             most_urgent.request_id, most_urgent_slack,
             victim_slack - most_urgent_slack,
             replay_cost_ms,
             0,  # most_urgent now at head; logged 0 for clarity
         )
-        return victim
+        return (victim, use_retain)
 
     def _peer_overloaded(self, now: float) -> bool:
         """Return True iff all peer engines are overloaded or unreachable.

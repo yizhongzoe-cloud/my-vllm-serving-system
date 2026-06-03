@@ -278,6 +278,53 @@ def build_tiered_schedule(
     return schedule
 
 
+def build_staged_kv_schedule(
+    loose_dataset: str = "ruler_16k",
+    tight_dataset: str = "ruler_4k",
+    n_loose: int = 4,
+    n_tight: int = 8,
+    loose_output: int = 1024,
+    tight_output: int = 64,
+    tight_start_s: float = 35.0,
+    tight_qps: float = 0.3,
+    seed: int = 0,
+) -> list[tuple[float, str, int, int, str]]:
+    """Staged KV-bound workload — the SLO picker's home turf.
+
+    n_loose long-context (loose-tier) requests arrive at t~0 with a forced
+    long output, so once prefilled they sit in DECODE holding large KV and
+    have host checkpoints. After tight_start_s (by which the loose set has
+    prefilled + is decoding + checkpointed), n_tight short-context
+    (tight-tier) requests arrive — they cannot be admitted without evicting
+    a loose KV holder, which is exactly the picker's job. Returns the same
+    (offset, prompt, max_tokens, prompt_tokens, tier) tuples as
+    build_tiered_schedule so the caller's tiered SLO logic applies.
+    """
+    rng = np.random.default_rng(seed)
+    lpath, ltag = resolve_dataset_info(loose_dataset)
+    tpath, ttag = resolve_dataset_info(tight_dataset)
+    loose_recs = load_dataset(dataset_name=ltag, dataset_path=lpath,
+                              max_samples=n_loose, seed=seed)
+    tight_recs = load_dataset(dataset_name=ttag, dataset_path=tpath,
+                              max_samples=n_tight, seed=seed + 1)
+    if len(loose_recs) < n_loose or len(tight_recs) < n_tight:
+        raise RuntimeError(
+            f"staged_kv: need {n_loose} loose + {n_tight} tight records, "
+            f"got {len(loose_recs)}/{len(tight_recs)}")
+    sched: list[tuple[float, str, int, int, str]] = []
+    for rec in loose_recs:  # KV holders arrive in the first ~2s
+        sched.append((float(rng.uniform(0.0, 2.0)), rec["prompt"],
+                      loose_output, int(rec.get("prompt_tokens", 0)),
+                      "loose"))
+    t = tight_start_s  # tight heads arrive after loose are resident
+    for rec in tight_recs:
+        sched.append((t, rec["prompt"], tight_output,
+                      int(rec.get("prompt_tokens", 0)), "tight"))
+        t += float(rng.exponential(1.0 / tight_qps))
+    sched.sort(key=lambda s: s[0])
+    return sched
+
+
 def build_mixed_schedule(
     short_dataset: str,
     long_dataset: str,

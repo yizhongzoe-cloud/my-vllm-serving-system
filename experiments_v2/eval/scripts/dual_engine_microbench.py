@@ -33,7 +33,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from experiments_v2.eval.workloads.workload_builder import (  # noqa: E402
     build_schedule, build_mixed_schedule, build_trace_schedule,
-    build_tiered_schedule, summarize_schedule,
+    build_tiered_schedule, build_staged_kv_schedule, summarize_schedule,
 )
 from experiments_v2.eval.scripts.e_m1_slo_sweep import (  # noqa: E402
     Client, parse_request_done_log, cleanup_shm, percentile,
@@ -230,6 +230,20 @@ def main() -> int:
                         help="Override every request's max_tokens with this "
                         "value (use with --ignore-eos for KV-bound "
                         "workloads like sharegpt + long forced output).")
+    # Staged KV-bound workload (requires --tiered). Long-context loose
+    # holders arrive first and sit in decode holding large KV; short tight
+    # heads are injected after, and can only be admitted by evicting a
+    # loose KV holder = the picker's home turf. Use with --ignore-eos and
+    # a shrunk KV pool (FT_GPU_MEMORY_UTILIZATION ~0.75).
+    parser.add_argument("--staged-kv", action="store_true",
+                        help="Use the staged KV-bound workload "
+                        "(ruler_16k loose holders + ruler_4k tight heads).")
+    parser.add_argument("--n-loose", type=int, default=4)
+    parser.add_argument("--n-tight", type=int, default=8)
+    parser.add_argument("--loose-output", type=int, default=1024)
+    parser.add_argument("--tight-output", type=int, default=64)
+    parser.add_argument("--tight-start-s", type=float, default=35.0)
+    parser.add_argument("--tight-qps", type=float, default=0.3)
     args = parser.parse_args()
 
     # Per-request SLO budgets (the literal a and b each request is given).
@@ -253,15 +267,25 @@ def main() -> int:
                          "required for --tiered")
         tight_b = args.tpot_slo_ms
         loose_b = args.loose_mult * args.tpot_slo_ms
-        schedule_full = build_tiered_schedule(
-            dataset_name=args.dataset,
-            num_requests=args.num_requests,
-            arrival_rate_qps=args.arrival_rate_qps,
-            tight_ratio=args.tight_ratio,
-            seed=args.seed,
-            burst_size=args.burst_size,
-            burst_spread_s=args.burst_spread,
-        )
+        if args.staged_kv:
+            schedule_full = build_staged_kv_schedule(
+                n_loose=args.n_loose, n_tight=args.n_tight,
+                loose_output=args.loose_output,
+                tight_output=args.tight_output,
+                tight_start_s=args.tight_start_s,
+                tight_qps=args.tight_qps,
+                seed=args.seed,
+            )
+        else:
+            schedule_full = build_tiered_schedule(
+                dataset_name=args.dataset,
+                num_requests=args.num_requests,
+                arrival_rate_qps=args.arrival_rate_qps,
+                tight_ratio=args.tight_ratio,
+                seed=args.seed,
+                burst_size=args.burst_size,
+                burst_spread_s=args.burst_spread,
+            )
         schedule = [(s[0], s[1], s[2]) for s in schedule_full]
         prompt_tokens_list = [s[3] for s in schedule_full]
         classes = [s[4] for s in schedule_full]

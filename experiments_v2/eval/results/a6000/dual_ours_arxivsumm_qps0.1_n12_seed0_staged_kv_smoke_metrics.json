@@ -1,0 +1,252 @@
+{
+  "baseline": "ours",
+  "model": "/home/yzhong76/model/Qwen2.5-14B-Instruct",
+  "dataset": "arxivsumm",
+  "num_requests": 12,
+  "arrival_rate_qps": 0.1,
+  "seed": 0,
+  "slo_mode": "class_tier_dual_engine",
+  "workload_trace": null,
+  "slo_by_class": {
+    "tight": {
+      "ttft_ms": null,
+      "tpot_ms": 200.0
+    },
+    "loose": {
+      "ttft_ms": null,
+      "tpot_ms": 400.0
+    }
+  },
+  "schedule_summary": {
+    "n": 12,
+    "window_s": 87.56711645067367,
+    "empirical_qps": 0.12566536787809277,
+    "max_tokens_p50": 64,
+    "max_tokens_p95": 1024
+  },
+  "n_events": 12,
+  "slo_met_pct": 58.333333333333336,
+  "slo_met_count": 7,
+  "per_class_breakdown": {
+    "tight": {
+      "n": 8,
+      "met": 3,
+      "pct": 37.5
+    },
+    "loose": {
+      "n": 4,
+      "met": 4,
+      "pct": 100.0
+    }
+  },
+  "ttft_ms": {
+    "p50": 11991.272,
+    "p95": 29691.203
+  },
+  "tpot_ms": {
+    "p50": 56.269,
+    "p95": 73.799
+  },
+  "e2e_ms": {
+    "p50": 34340.52,
+    "p95": 67229.521
+  },
+  "client_outcomes": {
+    "200_ok": 12,
+    "errored": 0
+  },
+  "per_request": [
+    {
+      "req_id": "cmpl-b6c405b7733ae94d-0-aad11147",
+      "arrival_ts": 1779320432.655436,
+      "ttft_ms": 5886.216,
+      "tpot_ms": 56.853,
+      "e2e_ms": 64045.933,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-92e634a55f422207-0-98c8d810",
+      "arrival_ts": 1779320432.685379,
+      "ttft_ms": 5980.556,
+      "tpot_ms": 57.355,
+      "e2e_ms": 64654.123,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-bfe71e55321ad5b3-0-b61b4b36",
+      "arrival_ts": 1779320433.130035,
+      "ttft_ms": 11654.626,
+      "tpot_ms": 54.403,
+      "e2e_ms": 67309.391,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-ae3617dfcbd48695-0-aa98daf9",
+      "arrival_ts": 1779320433.864804,
+      "ttft_ms": 11595.123,
+      "tpot_ms": 54.384,
+      "e2e_ms": 67229.521,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-ad33be36700ec616-0-b1e94f32",
+      "arrival_ts": 1779320467.605278,
+      "ttft_ms": 30842.007,
+      "tpot_ms": 76.789,
+      "e2e_ms": 35679.912,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-879044ce525e51af-0-b63d72b7",
+      "arrival_ts": 1779320469.40748,
+      "ttft_ms": 29691.203,
+      "tpot_ms": 73.799,
+      "e2e_ms": 34340.52,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-80499b38012fd7a0-0-85fa4efb",
+      "arrival_ts": 1779320474.844272,
+      "ttft_ms": 24782.172,
+      "tpot_ms": 59.455,
+      "e2e_ms": 28527.387,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-be4bac391f5da6ee-0-b0d96b1a",
+      "arrival_ts": 1779320477.085953,
+      "ttft_ms": 23205.74,
+      "tpot_ms": 56.269,
+      "e2e_ms": 26750.334,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-a5575739bc4df492-0-a6a9955c",
+      "arrival_ts": 1779320479.604281,
+      "ttft_ms": 20714.416,
+      "tpot_ms": 49.79,
+      "e2e_ms": 23851.456,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-9a1a0027d6dd996d-0-b9a58bc2",
+      "arrival_ts": 1779320489.000345,
+      "ttft_ms": 11991.272,
+      "tpot_ms": 46.496,
+      "e2e_ms": 14920.721,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": true,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-9283d328a8c3b1ce-0-be27314d",
+      "arrival_ts": 1779320509.206618,
+      "ttft_ms": 1100.325,
+      "tpot_ms": 42.23,
+      "e2e_ms": 3760.552,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-90af7528cd76f516-0-98dd3e48",
+      "arrival_ts": 1779320520.151856,
+      "ttft_ms": 1101.656,
+      "tpot_ms": 42.225,
+      "e2e_ms": 3761.696,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": true,
+      "slo_met_per_token": true
+    }
+  ]
+}

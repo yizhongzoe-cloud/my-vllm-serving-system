@@ -1,0 +1,31 @@
+{
+  "baseline": "vllm_fcfs",
+  "prefix_caching": false,
+  "qps": 0.3,
+  "num_requests": 16,
+  "n_icept": 8,
+  "n_ok": 16,
+  "wall_s": 93.39972305297852,
+  "throughput_req_s": 0.17130671780391066,
+  "icept_at": 30,
+  "total_output": 60,
+  "pause_range": [
+    5.0,
+    5.0
+  ],
+  "reload_validity": {
+    "reloaded": 0,
+    "fell_back_reprefill": 0
+  },
+  "seg2_latency_s": {
+    "p50": 18.474344491958618,
+    "p95": 36.62368018627167,
+    "mean": 21.45554256439209,
+    "n": 8
+  },
+  "work_latency_s": {
+    "p50": 35.48428964614868,
+    "p95": 57.29858750104904
+  },
+  "errors": []
+}

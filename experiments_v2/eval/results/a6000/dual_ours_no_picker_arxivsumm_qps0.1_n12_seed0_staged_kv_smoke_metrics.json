@@ -1,0 +1,252 @@
+{
+  "baseline": "ours_no_picker",
+  "model": "/home/yzhong76/model/Qwen2.5-14B-Instruct",
+  "dataset": "arxivsumm",
+  "num_requests": 12,
+  "arrival_rate_qps": 0.1,
+  "seed": 0,
+  "slo_mode": "class_tier_dual_engine",
+  "workload_trace": null,
+  "slo_by_class": {
+    "tight": {
+      "ttft_ms": null,
+      "tpot_ms": 200.0
+    },
+    "loose": {
+      "ttft_ms": null,
+      "tpot_ms": 400.0
+    }
+  },
+  "schedule_summary": {
+    "n": 12,
+    "window_s": 87.56711645067367,
+    "empirical_qps": 0.12566536787809277,
+    "max_tokens_p50": 64,
+    "max_tokens_p95": 1024
+  },
+  "n_events": 12,
+  "slo_met_pct": 58.333333333333336,
+  "slo_met_count": 7,
+  "per_class_breakdown": {
+    "tight": {
+      "n": 8,
+      "met": 3,
+      "pct": 37.5
+    },
+    "loose": {
+      "n": 4,
+      "met": 4,
+      "pct": 100.0
+    }
+  },
+  "ttft_ms": {
+    "p50": 12542.299,
+    "p95": 29258.142
+  },
+  "tpot_ms": {
+    "p50": 54.615,
+    "p95": 72.12
+  },
+  "e2e_ms": {
+    "p50": 33802.475,
+    "p95": 65669.924
+  },
+  "client_outcomes": {
+    "200_ok": 12,
+    "errored": 0
+  },
+  "per_request": [
+    {
+      "req_id": "cmpl-a1164d460092e855-0-a8dd0378",
+      "arrival_ts": 1779320560.983999,
+      "ttft_ms": 6001.572,
+      "tpot_ms": 55.196,
+      "e2e_ms": 62467.106,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-8861dbf2dde5ecbc-0-86e98dda",
+      "arrival_ts": 1779320561.028283,
+      "ttft_ms": 6022.075,
+      "tpot_ms": 57.846,
+      "e2e_ms": 65197.977,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-b48d9ea831205165-0-8ab60fac",
+      "arrival_ts": 1779320561.466697,
+      "ttft_ms": 10711.094,
+      "tpot_ms": 53.723,
+      "e2e_ms": 65669.924,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-88615a609d85a4b2-0-b9726800",
+      "arrival_ts": 1779320562.203249,
+      "ttft_ms": 12028.225,
+      "tpot_ms": 54.503,
+      "e2e_ms": 67784.341,
+      "num_output": 1024,
+      "prompt_len": 16384,
+      "finish": "LENGTH",
+      "class": "loose",
+      "slo_ttft_ms": 23920.64,
+      "slo_tpot_ms": 400.0,
+      "slo_deadline_ms": 433520.64,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-ac27a47a29c02fe7-0-85b615e6",
+      "arrival_ts": 1779320595.945785,
+      "ttft_ms": 29258.142,
+      "tpot_ms": 72.12,
+      "e2e_ms": 33802.475,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-a8d870024b2c444a-0-b9e1bcdc",
+      "arrival_ts": 1779320597.753847,
+      "ttft_ms": 30236.583,
+      "tpot_ms": 74.669,
+      "e2e_ms": 34939.329,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-bed3935cb23ad0d8-0-b145bb30",
+      "arrival_ts": 1779320603.185438,
+      "ttft_ms": 23206.755,
+      "tpot_ms": 54.615,
+      "e2e_ms": 26647.222,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-879ea90bedd5a962-0-96e2d08b",
+      "arrival_ts": 1779320605.426675,
+      "ttft_ms": 23757.339,
+      "tpot_ms": 57.101,
+      "e2e_ms": 27354.612,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-87eeb47964644c25-0-b2bce1c6",
+      "arrival_ts": 1779320607.945302,
+      "ttft_ms": 19141.282,
+      "tpot_ms": 44.919,
+      "e2e_ms": 21971.268,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": false,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-b0f24e16fa9fb696-0-aab71682",
+      "arrival_ts": 1779320617.342334,
+      "ttft_ms": 12542.299,
+      "tpot_ms": 47.328,
+      "e2e_ms": 15523.718,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": true,
+      "slo_met_per_token": false
+    },
+    {
+      "req_id": "cmpl-b2a6ad4d9668d6a3-0-ba0e0c0f",
+      "arrival_ts": 1779320637.548536,
+      "ttft_ms": 1102.861,
+      "tpot_ms": 42.248,
+      "e2e_ms": 3764.355,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": true,
+      "slo_met_per_token": true
+    },
+    {
+      "req_id": "cmpl-bf94e7246b76c013-0-af0128a8",
+      "arrival_ts": 1779320648.494783,
+      "ttft_ms": 1104.782,
+      "tpot_ms": 42.233,
+      "e2e_ms": 3765.368,
+      "num_output": 64,
+      "prompt_len": 4096,
+      "finish": "LENGTH",
+      "class": "tight",
+      "slo_ttft_ms": 2990.08,
+      "slo_tpot_ms": 200.0,
+      "slo_deadline_ms": 15790.08,
+      "slo_met": true,
+      "slo_met_per_token": true
+    }
+  ]
+}

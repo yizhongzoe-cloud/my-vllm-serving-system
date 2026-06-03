@@ -1,0 +1,31 @@
+{
+  "baseline": "ours",
+  "prefix_caching": false,
+  "qps": 0.3,
+  "num_requests": 16,
+  "n_icept": 8,
+  "n_ok": 16,
+  "wall_s": 88.4208402633667,
+  "throughput_req_s": 0.180952815561841,
+  "icept_at": 30,
+  "total_output": 60,
+  "pause_range": [
+    15.0,
+    15.0
+  ],
+  "reload_validity": {
+    "reloaded": 8,
+    "fell_back_reprefill": 0
+  },
+  "seg2_latency_s": {
+    "p50": 3.5008643865585327,
+    "p95": 19.996193063259128,
+    "mean": 6.789040744304657,
+    "n": 8
+  },
+  "work_latency_s": {
+    "p50": 32.44671940803528,
+    "p95": 40.239977300167084
+  },
+  "errors": []
+}

@@ -42,13 +42,13 @@ print("thru recmp:", [round(v, 3) if v else None for v in r_thru])
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.2, 3.3))
 ax1.plot(X, o_thru, "o-", color="#2e86ab", linewidth=2, label="Ferry")
 ax1.plot(X, r_thru, "s--", color="#999999", label="vLLM (recompute)")
-ax1.set_xlabel("Arrival rate (req/s)"); ax1.set_ylabel("Completed throughput (req/s)")
-ax1.legend(frameon=False, fontsize=9); ax1.grid(True, alpha=0.3)
+ax1.set_xlabel("Arrival rate (req/s)", fontsize=12); ax1.set_ylabel("Completed throughput (req/s)", fontsize=12)
+ax1.tick_params(labelsize=11); ax1.legend(frameon=False, fontsize=10); ax1.grid(True, alpha=0.3)
 
 ax2.plot(X, o_wp95, "o-", color="#2e86ab", linewidth=2, label="Ferry")
 ax2.plot(X, r_wp95, "s--", color="#999999", label="vLLM (recompute)")
-ax2.set_xlabel("Arrival rate (req/s)"); ax2.set_ylabel("P95 work latency (s)")
-ax2.legend(frameon=False, fontsize=9); ax2.grid(True, alpha=0.3)
+ax2.set_xlabel("Arrival rate (req/s)", fontsize=12); ax2.set_ylabel("P95 work latency (s)", fontsize=12)
+ax2.tick_params(labelsize=11); ax2.legend(frameon=False, fontsize=10); ax2.grid(True, alpha=0.3)
 fig.tight_layout()
 for out in (Path(__file__).resolve().parent / "fig_icept_qps.pdf",
             Path(__file__).resolve().parent / "fig_icept_qps.png"):

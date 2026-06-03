@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Interception crossover figure: segment-2 resume latency vs tool-call
 pause duration, for ours (host-RAM reload) / vLLM recompute / vLLM GPU
-prefix-caching (APC). Mean of seed 0 and 1.
+prefix-caching (APC). Mean over seeds 0--2.
 
-Story: APC is cheap at short pauses (cache survives) but degrades toward
-recompute as the pause lengthens (LRU eviction); Ferry's host checkpoint
-is flat-low regardless of pause. Renders fig_icept_crossover.{pdf,png}.
+Story: Ferry's host checkpoint keeps resume flat-low regardless of pause;
+APC degrades toward recompute as the pause lengthens (LRU eviction);
+recompute is uniformly slowest. Renders fig_icept_crossover.{pdf,png}.
 """
 import json
 import os
@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 R = Path(os.environ.get(
     "EVAL_RESULTS_DIR",
     Path(__file__).resolve().parents[1] / "eval" / "results" / "a6000"))
-PAUSES = [2, 30, 60]
-SEEDS = [0, 1]
+PAUSES = [2, 5, 10, 15, 20, 30, 45, 60]
+SEEDS = [0, 1, 2]
 
 
 def seg2_p50(baseline_tag_fn):
@@ -47,11 +47,12 @@ fig, ax = plt.subplots(figsize=(5.0, 3.4))
 ax.plot(PAUSES, recomp, "s--", color="#999999", label="vLLM (recompute)")
 ax.plot(PAUSES, apc, "^-", color="#d1495b", label="vLLM + prefix cache (APC)")
 ax.plot(PAUSES, ours, "o-", color="#2e86ab", linewidth=2, label="Ferry (host reload)")
-ax.set_xlabel("Tool-call pause duration (s)")
-ax.set_ylabel("Resume latency (s)")
+ax.set_xlabel("Tool-call pause duration (s)", fontsize=12)
+ax.set_ylabel("Resume latency (s)", fontsize=12)
 ax.set_xticks(PAUSES)
+ax.tick_params(labelsize=11)
 ax.set_ylim(bottom=0)
-ax.legend(frameon=False, fontsize=9)
+ax.legend(frameon=False, fontsize=10)
 ax.grid(True, alpha=0.3)
 fig.tight_layout()
 for out in (Path(__file__).resolve().parent / "fig_icept_crossover.pdf",
